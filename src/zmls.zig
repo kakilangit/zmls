@@ -79,6 +79,16 @@ pub const tree_hashes = @import("tree/hashes.zig");
 /// applySenderPath, addLeaf, removeLeaf.
 pub const tree_path = @import("tree/path.zig");
 
+// ── Credentials ─────────────────────────────────────────────
+
+/// Credential types: Basic, X.509.
+pub const credential = @import("credential/credential.zig");
+
+/// CredentialValidator port (application-provided).
+pub const credential_validator = @import(
+    "credential/validator.zig",
+);
+
 test {
     @import("std").testing.refAllDecls(@This());
 }
