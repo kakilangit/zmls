@@ -89,6 +89,31 @@ pub const credential_validator = @import(
     "credential/validator.zig",
 );
 
+// ── Key Schedule ────────────────────────────────────────────
+
+/// Epoch secret derivation (RFC 9420 Section 8).
+pub const key_schedule = @import("key_schedule/schedule.zig");
+
+/// Transcript hash computation (confirmed + interim).
+pub const transcript = @import("key_schedule/transcript.zig");
+
+/// Pre-shared key injection (RFC 9420 Section 8.4).
+pub const psk = @import("key_schedule/psk.zig");
+
+/// PSK lookup port and resumption PSK retention.
+pub const psk_lookup = @import("key_schedule/psk_lookup.zig");
+
+/// Secret tree for application key derivation (Section 9).
+pub const secret_tree = @import("key_schedule/secret_tree.zig");
+
+/// Past-epoch key retention for out-of-order decryption.
+pub const epoch_key_ring = @import(
+    "key_schedule/epoch_key_ring.zig",
+);
+
+/// MLS exporter: mlsExporter(P, secret, label, ctx, len).
+pub const exporter = @import("key_schedule/exporter.zig");
+
 test {
     @import("std").testing.refAllDecls(@This());
 }
