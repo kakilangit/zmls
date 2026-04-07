@@ -136,6 +136,24 @@ pub const private_msg = @import("framing/private_msg.zig");
 /// MLSMessage envelope (top-level wire format).
 pub const mls_message = @import("framing/mls_message.zig");
 
+// ── Messages ────────────────────────────────────────────────
+
+/// KeyPackage creation, signing, validation (RFC 9420 Section 10).
+pub const key_package = @import("messages/key_package.zig");
+
+/// Proposal types: Add, Remove, Update, ReInit, ExternalInit,
+/// PreSharedKey, GroupContextExtensions.
+pub const proposal = @import("messages/proposal.zig");
+
+/// Commit message encoding/decoding.
+pub const commit = @import("messages/commit.zig");
+
+/// Welcome message: encrypt/decrypt group secrets for joiners.
+pub const welcome = @import("messages/welcome.zig");
+
+/// GroupInfo: sign, verify, encrypt, decrypt.
+pub const group_info = @import("messages/group_info.zig");
+
 test {
     @import("std").testing.refAllDecls(@This());
 }
