@@ -1,0 +1,13 @@
+.{
+    .name = .zmls,
+    .version = "0.1.0",
+    .fingerprint = 0x658dc3baf9f837dc,
+    .minimum_zig_version = "0.16.0-dev.3039+b490412cd",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+    },
+}
