@@ -61,6 +61,24 @@ pub const cipher_suite = @import("crypto/cipher_suite.zig");
 /// HPKE: encapDeterministic, decap, sealBase, openBase.
 pub const hpke = @import("crypto/hpke.zig");
 
+// ── Tree ────────────────────────────────────────────────────
+
+/// Array-based binary tree index arithmetic (RFC 9420 Section 7.1).
+pub const tree_math = @import("tree/math.zig");
+
+/// Node types: LeafNode, ParentNode, Node, Extension.
+pub const tree_node = @import("tree/node.zig");
+
+/// RatchetTree: the array-backed left-balanced binary tree.
+pub const ratchet_tree = @import("tree/ratchet_tree.zig");
+
+/// Tree hash and parent hash computation (RFC 9420 Section 7.8-7.9).
+pub const tree_hashes = @import("tree/hashes.zig");
+
+/// Path operations: generateUpdatePath, applyUpdatePath,
+/// applySenderPath, addLeaf, removeLeaf.
+pub const tree_path = @import("tree/path.zig");
+
 test {
     @import("std").testing.refAllDecls(@This());
 }
