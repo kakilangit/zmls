@@ -17,6 +17,20 @@ pub fn build(b: *std.Build) void {
     });
     const run_lib_tests = b.addRunArtifact(lib_tests);
 
+    // Integration tests: end-to-end protocol flows.
+    const integ_mod = b.createModule(.{
+        .root_source_file = b.path(
+            "tests/integration_test.zig",
+        ),
+        .target = target,
+        .optimize = optimize,
+    });
+    integ_mod.addImport("zmls", mod);
+    const integ_tests = b.addTest(.{
+        .root_module = integ_mod,
+    });
+    const run_integ_tests = b.addRunArtifact(integ_tests);
+
     // Interoperability tests: RFC 9420 test vectors.
     const tv_mod = b.createModule(.{
         .root_source_file = b.path("tests/test_vectors.zig"),
@@ -37,5 +51,6 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
+    test_step.dependOn(&run_integ_tests.step);
     test_step.dependOn(&run_interop_tests.step);
 }
