@@ -4,3 +4,4 @@ zig-out/
 .zed/
 local/
 refs/
+tests/vectors/

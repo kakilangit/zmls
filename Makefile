@@ -1,7 +1,29 @@
-.PHONY: all fmt check build test clean
+.PHONY: all fmt check build test fetch-vectors clean
 
 ZIG := zig
 SRC_DIR := src
+
+# Pinned commit for RFC 9420 test vectors.
+TV_COMMIT := 16d05d3a5bfe7cf12f5392dd4deb65930e9c31be
+TV_BASE := https://raw.githubusercontent.com/mlswg/mls-implementations/$(TV_COMMIT)/test-vectors
+TV_DIR := tests/vectors
+TV_FILES := \
+	crypto-basics.json \
+	deserialization.json \
+	key-schedule.json \
+	message-protection.json \
+	messages.json \
+	passive-client-handling-commit.json \
+	passive-client-random.json \
+	passive-client-welcome.json \
+	psk_secret.json \
+	secret-tree.json \
+	transcript-hashes.json \
+	tree-math.json \
+	tree-operations.json \
+	tree-validation.json \
+	treekem.json \
+	welcome.json
 
 # Default target.
 all: fmt check build test
@@ -26,16 +48,26 @@ build-safe:
 build-fast:
 	$(ZIG) build -Doptimize=ReleaseFast
 
-# Run all tests.
-test:
+# Fetch RFC 9420 test vectors from GitHub (skips existing files).
+fetch-vectors:
+	@mkdir -p $(TV_DIR)
+	@for f in $(TV_FILES); do \
+		if [ ! -f "$(TV_DIR)/$$f" ]; then \
+			echo "fetching $$f"; \
+			curl -sfL -o "$(TV_DIR)/$$f" "$(TV_BASE)/$$f" || exit 1; \
+		fi; \
+	done
+
+# Run all tests (fetches test vectors first if missing).
+test: fetch-vectors
 	$(ZIG) build test
 
 # Run tests with a name filter. Usage: make test-filter TEST_FILTER="tree_math"
-test-filter:
+test-filter: fetch-vectors
 	$(ZIG) build test -- --test-filter "$(TEST_FILTER)"
 
 # Run tests with verbose output.
-test-verbose:
+test-verbose: fetch-vectors
 	$(ZIG) build test -- --verbose
 
 # Remove build artifacts.
