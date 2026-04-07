@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      exists: ${{ steps.check.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract tag
+        id: tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if release exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.tag.outputs.tag }}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "❌ Release ${{ steps.tag.outputs.tag }} already exists, skipping"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "✅ Release ${{ steps.tag.outputs.tag }} does not exist, proceeding"
+          fi
+
+  check:
+    name: Format check
+    needs: preflight
+    if: needs.preflight.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: master
+      - run: make check
+
+  build:
+    name: Build
+    needs: [preflight, check]
+    if: needs.preflight.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: master
+      - name: Debug
+        run: make build
+      - name: ReleaseSafe
+        run: make build-safe
+
+  test:
+    name: Test
+    needs: [preflight, build]
+    if: needs.preflight.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: master
+      - run: make test
+      - name: Result
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ All tests passed"
+          else
+            echo "❌ Tests failed"
+          fi
+
+  release:
+    name: Create release
+    needs: [preflight, test]
+    if: needs.preflight.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract changelog
+        id: changelog
+        run: |
+          tag="${{ needs.preflight.outputs.tag }}"
+          version="${tag#v}"
+          # Extract the section for this version from CHANGELOG.md.
+          body=$(awk -v ver="$version" '
+            /^## \[/ {
+              if (found) exit
+              if (index($0, "["ver"]")) found=1
+              next
+            }
+            found { print }
+          ' CHANGELOG.md)
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "$body"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ needs.preflight.outputs.tag }}" \
+            --title "${{ needs.preflight.outputs.tag }}" \
+            --notes "${{ steps.changelog.outputs.body }}" \
+            --verify-tag
