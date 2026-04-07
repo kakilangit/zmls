@@ -27,6 +27,40 @@ pub const codec = @import("codec/codec.zig");
 /// Variable-length integer encoding (RFC 9420 Section 2.1.2).
 pub const varint = @import("codec/varint.zig");
 
+// ── Crypto ──────────────────────────────────────────────────
+
+/// CryptoProvider interface specification (comptime duck type).
+pub const crypto_provider = @import("crypto/provider.zig");
+
+/// Default provider: X25519 + AES-128-GCM + SHA-256 + Ed25519
+/// (MLS cipher suite 0x0001).
+pub const crypto_default = @import("crypto/default.zig");
+
+/// Suite 0x0003: X25519 + ChaCha20-Poly1305 + SHA-256 + Ed25519.
+pub const crypto_chacha20 = @import("crypto/chacha20.zig");
+
+/// Suite 0x0002: P-256 + AES-128-GCM + SHA-256 + P-256.
+pub const crypto_p256 = @import("crypto/p256.zig");
+
+/// Suite 0x0004: P-256 + ChaCha20-Poly1305 + SHA-256 + P-256.
+pub const crypto_p256_chacha20 = @import(
+    "crypto/p256_chacha20.zig",
+);
+
+/// Suite 0x0006: P-384 + AES-256-GCM + SHA-384 + P-384.
+pub const crypto_p384 = @import("crypto/p384.zig");
+
+/// Labeled crypto operations: expandWithLabel, deriveSecret,
+/// encryptWithLabel, decryptWithLabel, signWithLabel,
+/// verifyWithLabel, refHash (RFC 9420 Section 5).
+pub const crypto_primitives = @import("crypto/primitives.zig");
+
+/// CipherSuite enum to provider mapping.
+pub const cipher_suite = @import("crypto/cipher_suite.zig");
+
+/// HPKE: encapDeterministic, decap, sealBase, openBase.
+pub const hpke = @import("crypto/hpke.zig");
+
 test {
     @import("std").testing.refAllDecls(@This());
 }
