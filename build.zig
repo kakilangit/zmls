@@ -88,4 +88,27 @@ pub fn build(b: *std.Build) void {
         .root_module = cli_mod,
     });
     b.installArtifact(cli_exe);
+
+    // Benchmark executable.
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("benchmarks/bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_mod.addImport("zmls", mod);
+    const bench_exe = b.addExecutable(.{
+        .name = "zmls-bench",
+        .root_module = bench_mod,
+    });
+    b.installArtifact(bench_exe);
+
+    const run_bench = b.addRunArtifact(bench_exe);
+    if (b.args) |args| {
+        run_bench.addArgs(args);
+    }
+    const bench_step = b.step(
+        "bench",
+        "Run benchmarks",
+    );
+    bench_step.dependOn(&run_bench.step);
 }

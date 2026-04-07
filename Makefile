@@ -1,7 +1,8 @@
-.PHONY: all fmt check build test test-cli fetch-vectors clean
+.PHONY: all fmt check build test test-cli bench bench-filter fetch-vectors clean
 
 ZIG := zig
 SRC_DIR := src
+BENCH_FILTER ?=
 
 # Pinned commit for RFC 9420 test vectors.
 TV_COMMIT := 16d05d3a5bfe7cf12f5392dd4deb65930e9c31be
@@ -73,6 +74,14 @@ test-verbose: fetch-vectors
 # Run CLI end-to-end tests (builds CLI first).
 test-cli: build
 	examples/cli/test_e2e.sh "$(CURDIR)/zig-out/bin/zmls-cli"
+
+# Run all benchmarks (ReleaseFast for meaningful results).
+bench:
+	$(ZIG) build bench -Doptimize=ReleaseFast
+
+# Run benchmarks with filter. Usage: make bench-filter BENCH_FILTER="hash"
+bench-filter:
+	$(ZIG) build bench -Doptimize=ReleaseFast -- $(BENCH_FILTER)
 
 # Remove build artifacts.
 clean:
