@@ -154,6 +154,42 @@ pub const welcome = @import("messages/welcome.zig");
 /// GroupInfo: sign, verify, encrypt, decrypt.
 pub const group_info = @import("messages/group_info.zig");
 
+// ── Group Operations ────────────────────────────────────────
+
+/// GroupContext: serializable group metadata (Section 11.1).
+pub const group_context = @import("group/context.zig");
+
+/// GroupState: full mutable state of a group member.
+/// createGroup: initialize a new single-member group.
+pub const group_state = @import("group/state.zig");
+
+/// Proposal validation and application (Section 12.2).
+pub const group_evolution = @import("group/evolution.zig");
+
+/// Proposal cache for pending proposals between commits.
+pub const proposal_cache = @import("group/proposal_cache.zig");
+
+/// Commit creation and processing (Section 12.4).
+pub const group_commit = @import("group/commit.zig");
+
+/// Staged commit for two-phase apply (inspect-before-apply).
+pub const staged_commit = @import("group/staged_commit.zig");
+
+/// Welcome processing for new members joining via Welcome.
+pub const group_welcome = @import("group/welcome.zig");
+
+/// External join: createExternalCommit, processExternalCommit
+/// (Section 12.4.3.2).
+pub const group_external = @import("group/external.zig");
+
+/// External senders extension (Section 12.1.8.1).
+pub const external_senders = @import(
+    "group/external_senders.zig",
+);
+
+/// GroupState binary serialization (Section 19.3).
+pub const serializer = @import("group/serializer.zig");
+
 test {
     @import("std").testing.refAllDecls(@This());
 }
