@@ -1,4 +1,4 @@
-.PHONY: all fmt check build test fetch-vectors clean
+.PHONY: all fmt check build test test-cli fetch-vectors clean
 
 ZIG := zig
 SRC_DIR := src
@@ -69,6 +69,10 @@ test-filter: fetch-vectors
 # Run tests with verbose output.
 test-verbose: fetch-vectors
 	$(ZIG) build test -- --verbose
+
+# Run CLI end-to-end tests (builds CLI first).
+test-cli: build
+	examples/cli/test_e2e.sh "$(CURDIR)/zig-out/bin/zmls-cli"
 
 # Remove build artifacts.
 clean:
