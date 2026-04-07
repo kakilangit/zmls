@@ -18,6 +18,15 @@ pub const errors = @import("common/errors.zig");
 /// Extensibility) -- RFC 9420 Section 13.4.
 pub const grease = @import("common/grease.zig");
 
+// ── Codec ───────────────────────────────────────────────────
+
+/// TLS presentation language serialization/deserialization.
+/// Slice-based API: `encode(buf, pos, ...)` -> new position.
+pub const codec = @import("codec/codec.zig");
+
+/// Variable-length integer encoding (RFC 9420 Section 2.1.2).
+pub const varint = @import("codec/varint.zig");
+
 test {
     @import("std").testing.refAllDecls(@This());
 }
