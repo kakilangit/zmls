@@ -49,8 +49,30 @@ pub fn build(b: *std.Build) void {
     });
     const run_interop_tests = b.addRunArtifact(interop_tests);
 
+    // Fuzz targets: codec, tree, proposals, messages.
+    const fuzz_names = [_][]const u8{
+        "tests/fuzz_codec.zig",
+        "tests/fuzz_tree.zig",
+        "tests/fuzz_proposals.zig",
+        "tests/fuzz_messages.zig",
+    };
+
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_integ_tests.step);
     test_step.dependOn(&run_interop_tests.step);
+
+    inline for (fuzz_names) |fuzz_path| {
+        const fuzz_mod = b.createModule(.{
+            .root_source_file = b.path(fuzz_path),
+            .target = target,
+            .optimize = optimize,
+        });
+        fuzz_mod.addImport("zmls", mod);
+        const fuzz_tests = b.addTest(.{
+            .root_module = fuzz_mod,
+        });
+        const run_fuzz = b.addRunArtifact(fuzz_tests);
+        test_step.dependOn(&run_fuzz.step);
+    }
 }
