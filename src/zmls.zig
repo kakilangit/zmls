@@ -114,6 +114,28 @@ pub const epoch_key_ring = @import(
 /// MLS exporter: mlsExporter(P, secret, label, ctx, len).
 pub const exporter = @import("key_schedule/exporter.zig");
 
+// ── Message Framing ─────────────────────────────────────────
+
+/// Sender, ContentType, WireFormat types.
+pub const framing = @import("framing/content_type.zig");
+
+/// FramedContent and FramedContentTBS.
+pub const framed_content = @import(
+    "framing/framed_content.zig",
+);
+
+/// Signing, verification, confirmation tags.
+pub const framing_auth = @import("framing/auth.zig");
+
+/// PublicMessage framing and membership tags.
+pub const public_msg = @import("framing/public_msg.zig");
+
+/// PrivateMessage: content encryption/decryption, sender data.
+pub const private_msg = @import("framing/private_msg.zig");
+
+/// MLSMessage envelope (top-level wire format).
+pub const mls_message = @import("framing/mls_message.zig");
+
 test {
     @import("std").testing.refAllDecls(@This());
 }
