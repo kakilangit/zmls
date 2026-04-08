@@ -1453,12 +1453,26 @@ pub fn Client(comptime P: type) type {
             group_id: []const u8,
         ) MembershipError![]u8 {
             if (self.closed) return error.ClientClosed;
-            return self.commitWithProposals(
+
+            // Collect pending proposals for this group.
+            var proposal_buf: [256]zmls.Proposal = undefined;
+            const proposals = self.proposal_store
+                .collectProposals(
+                group_id,
+                &proposal_buf,
+            );
+
+            const wire_bytes = self.commitWithProposals(
                 allocator,
                 io,
                 group_id,
-                &.{},
+                proposals,
             );
+
+            // Clear after commit regardless of success.
+            self.proposal_store.clearGroup(group_id);
+
+            return wire_bytes;
         }
 
         /// A staged commit that has not yet been persisted.

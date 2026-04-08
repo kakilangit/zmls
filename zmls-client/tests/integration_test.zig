@@ -668,3 +668,279 @@ test "groupInfo: round-trip decodable" {
         wire.wire_format,
     );
 }
+
+test "three-party: Alice invites Bob, then Carol" {
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(P, 8).init();
+    defer alice_ks.deinit();
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(P, 8).init();
+    defer bob_ks.deinit();
+    var carol_gs = MemGS(8).init();
+    defer carol_gs.deinit();
+    var carol_ks = MemKS(P, 8).init();
+    defer carol_ks.deinit();
+
+    var gd = MemGD(4, 8, 16).init();
+    defer gd.deinit();
+    var kpd = MemKPD(8).init();
+    defer kpd.deinit();
+    var gid = MemGID(4).init();
+    defer gid.deinit();
+
+    const alice_seed: [32]u8 = .{0x42} ** 32;
+    const bob_seed: [32]u8 = .{0x43} ** 32;
+    const carol_seed: [32]u8 = .{0x44} ** 32;
+
+    var alice = try makeClient(
+        "alice",
+        &alice_seed,
+        &alice_gs,
+        &alice_ks,
+    );
+    defer alice.deinit();
+    var bob = try makeClient(
+        "bob",
+        &bob_seed,
+        &bob_gs,
+        &bob_ks,
+    );
+    defer bob.deinit();
+    var carol = try makeClient(
+        "carol",
+        &carol_seed,
+        &carol_gs,
+        &carol_ks,
+    );
+    defer carol.deinit();
+    var ds = makeDS(&gd, &kpd, &gid);
+    defer ds.deinit();
+
+    const io = testIo();
+
+    // 1. Alice creates group + invites Bob.
+    const group_id = setupAliceBobGroup(
+        &alice,
+        &bob,
+        &ds,
+    ) catch return error.SkipZigTest;
+    defer testing.allocator.free(group_id);
+
+    // 2. Carol generates KP, Alice invites Carol.
+    const carol_kp = try carol.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(carol_kp.data);
+    try ds.uploadKeyPackage(io, "carol", carol_kp.data);
+
+    const kp_bytes2 = (try ds.downloadKeyPackage(
+        testing.allocator,
+        io,
+        "carol",
+    )) orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(kp_bytes2);
+
+    var invite2 = try alice.inviteMember(
+        testing.allocator,
+        io,
+        group_id,
+        kp_bytes2,
+    );
+    defer invite2.deinit();
+
+    try ds.group_directory.addMember(
+        io,
+        group_id,
+        "carol",
+    );
+    try ds.processMessage(
+        io,
+        "alice",
+        group_id,
+        .commit,
+        invite2.commit,
+    );
+
+    // 3. Bob processes Alice's second commit.
+    //    Discard the first commit (Bob joined via Welcome,
+    //    not by processing the invite commit).
+    var stale_msg = (try ds.fetchMessage(
+        testing.allocator,
+        io,
+        group_id,
+        "bob",
+    )) orelse return error.TestUnexpectedResult;
+    stale_msg.deinit(testing.allocator);
+
+    var bob_commit = (try ds.fetchMessage(
+        testing.allocator,
+        io,
+        group_id,
+        "bob",
+    )) orelse return error.TestUnexpectedResult;
+    defer bob_commit.deinit(testing.allocator);
+
+    var bob_result = try bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        bob_commit.data,
+    );
+    switch (bob_result) {
+        .commit_applied => |*ca| ca.deinit(),
+        .application => |*msg| msg.deinit(),
+        .proposal_cached => {},
+    }
+
+    // 4. Carol joins via Welcome.
+    var alice_bundle2 = try alice.loadBundle(
+        io,
+        group_id,
+    );
+    defer alice_bundle2.deinit(testing.allocator);
+    var tree_copy2 = try alice_bundle2
+        .group_state.tree.clone();
+    defer tree_copy2.deinit();
+
+    var join_carol = try carol.joinGroup(
+        testing.allocator,
+        io,
+        invite2.welcome,
+        .{
+            .ratchet_tree = tree_copy2,
+            .signer_verify_key = &alice
+                .signing_public_key,
+            .my_leaf_index = zmls.LeafIndex
+                .fromU32(2),
+        },
+    );
+    defer join_carol.deinit();
+
+    // 5. Verify all three at epoch 2.
+    const a_ep = try alice.groupEpoch(io, group_id);
+    const b_ep = try bob.groupEpoch(io, group_id);
+    const c_ep = try carol.groupEpoch(io, group_id);
+    try testing.expectEqual(@as(u64, 2), a_ep);
+    try testing.expectEqual(@as(u64, 2), b_ep);
+    try testing.expectEqual(@as(u64, 2), c_ep);
+
+    // 6. Alice sends a message, Bob and Carol decrypt.
+    const ct = try alice.sendMessage(
+        testing.allocator,
+        io,
+        group_id,
+        "hello everyone!",
+    );
+    defer testing.allocator.free(ct);
+
+    var bob_msg = try bob.receiveMessage(
+        testing.allocator,
+        io,
+        group_id,
+        ct,
+    );
+    defer bob_msg.deinit();
+    try testing.expectEqualSlices(
+        u8,
+        "hello everyone!",
+        bob_msg.data,
+    );
+
+    var carol_msg = try carol.receiveMessage(
+        testing.allocator,
+        io,
+        group_id,
+        ct,
+    );
+    defer carol_msg.deinit();
+    try testing.expectEqualSlices(
+        u8,
+        "hello everyone!",
+        carol_msg.data,
+    );
+}
+
+test "proposal batching: proposeRemove then commit" {
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(P, 8).init();
+    defer alice_ks.deinit();
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(P, 8).init();
+    defer bob_ks.deinit();
+
+    var gd = MemGD(4, 8, 16).init();
+    defer gd.deinit();
+    var kpd = MemKPD(8).init();
+    defer kpd.deinit();
+    var gid = MemGID(4).init();
+    defer gid.deinit();
+
+    const alice_seed: [32]u8 = .{0x42} ** 32;
+    const bob_seed: [32]u8 = .{0x43} ** 32;
+
+    var alice = try makeClient(
+        "alice",
+        &alice_seed,
+        &alice_gs,
+        &alice_ks,
+    );
+    defer alice.deinit();
+    var bob = try makeClient(
+        "bob",
+        &bob_seed,
+        &bob_gs,
+        &bob_ks,
+    );
+    defer bob.deinit();
+    var ds = makeDS(&gd, &kpd, &gid);
+    defer ds.deinit();
+
+    const io = testIo();
+
+    // Setup: Alice creates group, invites Bob.
+    const group_id = setupAliceBobGroup(
+        &alice,
+        &bob,
+        &ds,
+    ) catch return error.SkipZigTest;
+    defer testing.allocator.free(group_id);
+
+    // Alice proposes removing Bob (cached, not committed).
+    const proposal_bytes = try alice.proposeRemove(
+        testing.allocator,
+        io,
+        group_id,
+        1, // Bob's leaf index
+    );
+    defer testing.allocator.free(proposal_bytes);
+
+    // Epoch should still be 1 (from the invite).
+    const epoch_before = try alice.groupEpoch(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(@as(u64, 1), epoch_before);
+
+    // Alice commits all pending proposals.
+    const commit_bytes = try alice.commitPending(
+        testing.allocator,
+        io,
+        group_id,
+    );
+    defer testing.allocator.free(commit_bytes);
+
+    // Epoch should be 2 now.
+    const epoch_after = try alice.groupEpoch(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(@as(u64, 2), epoch_after);
+
+    // Commit data should be non-empty.
+    try testing.expect(commit_bytes.len > 0);
+}

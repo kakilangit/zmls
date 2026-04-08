@@ -102,6 +102,28 @@ pub fn PendingProposalStore(comptime P: type) type {
             }
         }
 
+        /// Collect proposals for a group into a
+        /// caller-provided buffer. Returns the slice of
+        /// proposals found (up to buffer length).
+        pub fn collectProposals(
+            self: *const Self,
+            group_id: []const u8,
+            out: []zmls.Proposal,
+        ) []zmls.Proposal {
+            const gid_hash = hashGroupId(group_id);
+            var n: u32 = 0;
+            for (&self.entries) |*e| {
+                if (n >= out.len) break;
+                if (e.occupied and
+                    e.group_id_hash == gid_hash)
+                {
+                    out[n] = e.proposal;
+                    n += 1;
+                }
+            }
+            return out[0..n];
+        }
+
         fn hashGroupId(group_id: []const u8) u64 {
             return std.hash.Wyhash.hash(0, group_id);
         }
