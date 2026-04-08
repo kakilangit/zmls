@@ -24,6 +24,7 @@ const client_types = @import("types.zig");
 
 pub const WireFormatPolicy = client_types.WireFormatPolicy;
 pub const InviteResult = client_types.InviteResult;
+pub const JoinGroupResult = client_types.JoinGroupResult;
 
 /// Maximum pending KeyPackages a Client can hold.
 const max_pending_kps: u32 = 64;
@@ -93,6 +94,8 @@ pub fn Client(comptime P: type) type {
             SerializationFailed,
             KeyGenerationFailed,
             CapacityExhausted,
+            NoPendingKeyPackage,
+            WelcomeProcessingFailed,
         } || GroupStore.Error || KS.Error || Allocator.Error;
 
         // ────────────────────────────────────────────────
@@ -601,6 +604,128 @@ pub fn Client(comptime P: type) type {
         }
 
         // ────────────────────────────────────────────────
+        // Join group via Welcome
+        // ────────────────────────────────────────────────
+
+        /// Options for joining a group via Welcome.
+        pub const JoinGroupOpts = struct {
+            /// Ratchet tree from the inviter (out-of-band).
+            ratchet_tree: zmls.RatchetTree,
+            /// Inviter's signature verification key.
+            signer_verify_key: *const [P.sign_pk_len]u8,
+            /// This joiner's leaf index in the new tree.
+            my_leaf_index: zmls.LeafIndex,
+        };
+
+        /// Join a group via a Welcome message.
+        ///
+        /// Decodes the Welcome, matches against pending
+        /// KeyPackages, calls processWelcome, persists
+        /// the resulting GroupState, and consumes the
+        /// pending KP entry. Returns the group ID.
+        pub fn joinGroup(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            welcome_bytes: []const u8,
+            opts: JoinGroupOpts,
+        ) Error!JoinGroupResult {
+            if (self.closed) return error.ClientClosed;
+
+            // Decode the Welcome.
+            const w_dec = zmls.Welcome.decode(
+                allocator,
+                welcome_bytes,
+                0,
+            ) catch return error.SerializationFailed;
+            var welcome = w_dec.value;
+            defer welcome.deinit(allocator);
+
+            // Match against pending KPs.
+            const match = self.findPendingMatch(
+                &welcome,
+            ) orelse return error.NoPendingKeyPackage;
+
+            return self.processAndPersistWelcome(
+                allocator,
+                io,
+                &welcome,
+                match,
+                opts,
+            );
+        }
+
+        const PendingMatch = struct {
+            ref: [P.nh]u8,
+            keys: *const PendingMap.PendingKeys,
+        };
+
+        /// Find a pending KP that matches a Welcome secret.
+        fn findPendingMatch(
+            self: *const Self,
+            welcome: *const zmls.Welcome,
+        ) ?PendingMatch {
+            for (welcome.secrets) |s| {
+                if (s.new_member.len != P.nh) continue;
+                const ref: *const [P.nh]u8 =
+                    s.new_member[0..P.nh];
+                const keys = self.pending_key_packages
+                    .find(ref);
+                if (keys != null) {
+                    return .{
+                        .ref = ref.*,
+                        .keys = keys.?,
+                    };
+                }
+            }
+            return null;
+        }
+
+        /// Process Welcome and persist the new GroupState.
+        fn processAndPersistWelcome(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            welcome: *const zmls.Welcome,
+            match: PendingMatch,
+            opts: JoinGroupOpts,
+        ) Error!JoinGroupResult {
+            var gs = GS.joinViaWelcome(
+                allocator,
+                .{
+                    .welcome = welcome,
+                    .kp_ref = &match.ref,
+                    .init_sk = &match.keys.init_sk,
+                    .init_pk = &match.keys.init_pk,
+                    .signer_verify_key = opts
+                        .signer_verify_key,
+                    .tree_data = .{
+                        .prebuilt = opts.ratchet_tree,
+                    },
+                    .my_leaf_index = opts.my_leaf_index,
+                },
+            ) catch return error.WelcomeProcessingFailed;
+            defer gs.deinit();
+
+            const gid = gs.groupId();
+            const owned_gid = try allocator.dupe(
+                u8,
+                gid,
+            );
+            errdefer allocator.free(owned_gid);
+
+            try self.persistGroup(io, gid, &gs);
+            _ = self.pending_key_packages.remove(
+                &match.ref,
+            );
+
+            return .{
+                .group_id = owned_gid,
+                .allocator = allocator,
+            };
+        }
+
+        // ────────────────────────────────────────────────
         // Helpers
         // ────────────────────────────────────────────────
 
@@ -999,4 +1124,202 @@ test "Client: inviteMember persists updated group state" {
 
     // Tree should now have 2 leaf slots (Alice + Bob).
     try testing.expectEqual(@as(u32, 2), gs.leafCount());
+}
+
+test "Client: joinGroup via Welcome succeeds" {
+    const io = testIo();
+
+    // Alice: create group.
+    var a_gs = MemGS(8).init();
+    defer a_gs.deinit();
+    var a_ks = MemKS(TestP, 8).init();
+    defer a_ks.deinit();
+    var alice = try makeTestClient(&a_gs, &a_ks);
+    defer alice.deinit();
+
+    const gid = try alice.createGroup(io);
+    defer testing.allocator.free(gid);
+
+    // Bob: generate a KeyPackage.
+    var b_gs = MemGS(8).init();
+    defer b_gs.deinit();
+    var b_ks = MemKS(TestP, 8).init();
+    defer b_ks.deinit();
+    var bob = try makeTestClientBob(&b_gs, &b_ks);
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    // Alice invites Bob.
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        gid,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    // Get Alice's tree for Bob (out-of-band).
+    var a_state = try alice.loadGroup(io, gid);
+    defer a_state.deinit();
+    var tree_copy = try a_state.tree.clone();
+    defer tree_copy.deinit();
+
+    // Bob joins via Welcome.
+    var join = try bob.joinGroup(
+        testing.allocator,
+        io,
+        invite.welcome,
+        .{
+            .ratchet_tree = tree_copy,
+            .signer_verify_key = &alice.sign_pk,
+            .my_leaf_index = zmls.LeafIndex.fromU32(1),
+        },
+    );
+    defer join.deinit();
+
+    // Group ID should match Alice's group.
+    try testing.expectEqualSlices(u8, gid, join.group_id);
+
+    // Bob's pending KP should be consumed.
+    try testing.expectEqual(
+        @as(u32, 0),
+        bob.pending_key_packages.count,
+    );
+}
+
+test "Client: joinGroup persists group state" {
+    const io = testIo();
+
+    // Alice: create group.
+    var a_gs = MemGS(8).init();
+    defer a_gs.deinit();
+    var a_ks = MemKS(TestP, 8).init();
+    defer a_ks.deinit();
+    var alice = try makeTestClient(&a_gs, &a_ks);
+    defer alice.deinit();
+
+    const gid = try alice.createGroup(io);
+    defer testing.allocator.free(gid);
+
+    // Bob: generate a KeyPackage.
+    var b_gs = MemGS(8).init();
+    defer b_gs.deinit();
+    var b_ks = MemKS(TestP, 8).init();
+    defer b_ks.deinit();
+    var bob = try makeTestClientBob(&b_gs, &b_ks);
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    // Alice invites Bob.
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        gid,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    // Get Alice's tree for Bob.
+    var a_state = try alice.loadGroup(io, gid);
+    defer a_state.deinit();
+    var tree_copy = try a_state.tree.clone();
+    defer tree_copy.deinit();
+
+    // Bob joins.
+    var join = try bob.joinGroup(
+        testing.allocator,
+        io,
+        invite.welcome,
+        .{
+            .ratchet_tree = tree_copy,
+            .signer_verify_key = &alice.sign_pk,
+            .my_leaf_index = zmls.LeafIndex.fromU32(1),
+        },
+    );
+    defer join.deinit();
+
+    // Bob can reload the group from his store.
+    var b_state = try bob.loadGroup(io, join.group_id);
+    defer b_state.deinit();
+
+    // Both should be at epoch 1.
+    try testing.expectEqual(@as(u64, 1), b_state.epoch());
+    try testing.expectEqual(a_state.epoch(), b_state.epoch());
+
+    // Both should see 2 members.
+    try testing.expectEqual(@as(u32, 2), b_state.leafCount());
+}
+
+test "Client: joinGroup fails without pending KP" {
+    const io = testIo();
+
+    // Alice: create group and invite Bob.
+    var a_gs = MemGS(8).init();
+    defer a_gs.deinit();
+    var a_ks = MemKS(TestP, 8).init();
+    defer a_ks.deinit();
+    var alice = try makeTestClient(&a_gs, &a_ks);
+    defer alice.deinit();
+
+    const gid = try alice.createGroup(io);
+    defer testing.allocator.free(gid);
+
+    // Bob generates a KP (for Alice to use).
+    var b_gs = MemGS(8).init();
+    defer b_gs.deinit();
+    var b_ks = MemKS(TestP, 8).init();
+    defer b_ks.deinit();
+    var bob = try makeTestClientBob(&b_gs, &b_ks);
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        gid,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    // Clear Bob's pending map to simulate lost state.
+    bob.pending_key_packages.deinit();
+    bob.pending_key_packages = @TypeOf(
+        bob.pending_key_packages,
+    ).init();
+
+    var a_state = try alice.loadGroup(io, gid);
+    defer a_state.deinit();
+    var tree_copy = try a_state.tree.clone();
+    defer tree_copy.deinit();
+
+    // joinGroup should fail: no matching pending KP.
+    const result = bob.joinGroup(
+        testing.allocator,
+        io,
+        invite.welcome,
+        .{
+            .ratchet_tree = tree_copy,
+            .signer_verify_key = &alice.sign_pk,
+            .my_leaf_index = zmls.LeafIndex.fromU32(1),
+        },
+    );
+    try testing.expectError(
+        error.NoPendingKeyPackage,
+        result,
+    );
 }

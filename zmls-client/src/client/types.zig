@@ -79,3 +79,14 @@ pub const MemberInfo = struct {
     leaf_index: u32,
     identity: []const u8,
 };
+
+/// Result of joinGroup: group_id of the joined group.
+pub const JoinGroupResult = struct {
+    group_id: []u8,
+    allocator: Allocator,
+
+    pub fn deinit(self: *JoinGroupResult) void {
+        self.allocator.free(self.group_id);
+        self.* = undefined;
+    }
+};

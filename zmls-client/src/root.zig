@@ -87,6 +87,7 @@ pub const Client = @import("client/client.zig").Client;
 pub const client_types = @import("client/types.zig");
 pub const WireFormatPolicy = client_types.WireFormatPolicy;
 pub const InviteResult = client_types.InviteResult;
+pub const JoinGroupResult = client_types.JoinGroupResult;
 pub const ExternalJoinResult = client_types.ExternalJoinResult;
 pub const ReceivedMessage = client_types.ReceivedMessage;
 pub const ProcessingResult = client_types.ProcessingResult;
