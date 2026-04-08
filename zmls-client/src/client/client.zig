@@ -292,7 +292,7 @@ pub fn Client(comptime P: type) type {
         // Internal: load / persist GroupBundle
         // ────────────────────────────────────────────────
 
-        fn loadBundle(
+        pub fn loadBundle(
             self: *Self,
             io: Io,
             group_id: []const u8,
@@ -897,11 +897,31 @@ pub fn Client(comptime P: type) type {
             group_id: []const u8,
         ) MembershipError![]u8 {
             if (self.closed) return error.ClientClosed;
-            return self.commitWithProposals(
+
+            var bundle = try self.loadBundle(
+                io,
+                group_id,
+            );
+            defer bundle.deinit(self.allocator);
+
+            // Single-member tree has no path nodes; the
+            // core library handles this with zero commit
+            // secret and no UpdatePath.
+            if (bundle.group_state.tree.leaf_count <= 1) {
+                return self.commitWithProposals(
+                    allocator,
+                    io,
+                    group_id,
+                    &.{},
+                );
+            }
+
+            return self.commitWithPath(
                 allocator,
                 io,
                 group_id,
                 &.{},
+                &bundle,
             );
         }
 
@@ -1218,6 +1238,39 @@ pub fn Client(comptime P: type) type {
                 undefined;
             for (fdp.copath) |cp| {
                 const res = extended_tree.resolution(
+                    cp,
+                    &res_buf,
+                ) catch return error.CountFailed;
+                total += @intCast(res.len);
+            }
+
+            return total;
+        }
+
+        /// Count ephemeral seeds needed for an existing
+        /// leaf's filtered direct path (for selfUpdate).
+        fn countEphSeedsForLeaf(
+            tree: *const zmls.RatchetTree,
+            leaf_index: zmls.LeafIndex,
+        ) error{CountFailed}!u32 {
+            var p_buf: [32]zmls.types
+                .NodeIndex = undefined;
+            var c_buf: [32]zmls.types
+                .NodeIndex = undefined;
+            const fdp = tree.filteredDirectPath(
+                leaf_index,
+                &p_buf,
+                &c_buf,
+            ) catch return error.CountFailed;
+
+            var total: u32 = 0;
+            var res_buf: [
+                zmls.RatchetTree
+                    .max_resolution_size
+            ]zmls.types.NodeIndex =
+                undefined;
+            for (fdp.copath) |cp| {
+                const res = tree.resolution(
                     cp,
                     &res_buf,
                 ) catch return error.CountFailed;
@@ -1586,8 +1639,7 @@ pub fn Client(comptime P: type) type {
             return encoded.wire_bytes;
         }
 
-        /// Shared commit-and-persist for removeMember and
-        /// selfUpdate.
+        /// Shared commit-and-persist for removeMember.
         fn commitWithProposals(
             self: *Self,
             allocator: Allocator,
@@ -1606,6 +1658,86 @@ pub fn Client(comptime P: type) type {
                 .{
                     .proposals = proposals,
                     .sign_key = &self.signing_secret_key,
+                },
+            ) catch return error.CommitFailed;
+            defer commit_output.deinit();
+
+            const wire_bytes = encodeCommitAsWireMessage(
+                allocator,
+                &bundle.group_state,
+                &commit_output,
+            ) catch return error.CommitFailed;
+            errdefer allocator.free(wire_bytes);
+
+            var secret_tree = try initSecretTree(
+                allocator,
+                &commit_output.group_state,
+            );
+            defer secret_tree.deinit(allocator);
+
+            try self.persistBundle(
+                io,
+                group_id,
+                &commit_output.group_state,
+                &secret_tree,
+            );
+
+            return wire_bytes;
+        }
+
+        /// Commit with an explicit UpdatePath. Generates
+        /// fresh encryption keys, leaf secret, and eph
+        /// seeds for the committer's filtered direct path.
+        fn commitWithPath(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            proposals: []const zmls.Proposal,
+            bundle: *Bundle,
+        ) MembershipError![]u8 {
+            const enc_kp = generateDhKeypair(
+                io,
+            ) catch return error.CommitFailed;
+
+            var new_leaf = buildLeafNode(
+                self,
+                &enc_kp.pk,
+            );
+            new_leaf.source = .commit;
+
+            const eph_count = countEphSeedsForLeaf(
+                &bundle.group_state.tree,
+                bundle.group_state.my_leaf_index,
+            ) catch return error.CommitFailed;
+
+            const eph_seeds = allocator.alloc(
+                [32]u8,
+                eph_count,
+            ) catch return error.OutOfMemory;
+            defer allocator.free(eph_seeds);
+
+            for (eph_seeds) |*s| {
+                io.randomSecure(s) catch
+                    return error.CommitFailed;
+            }
+
+            var leaf_secret: [P.nh]u8 = undefined;
+            io.randomSecure(&leaf_secret) catch
+                return error.CommitFailed;
+            defer secureZeroSlice(&leaf_secret);
+
+            var commit_output = bundle.group_state.commit(
+                allocator,
+                .{
+                    .proposals = proposals,
+                    .sign_key = &self.signing_secret_key,
+                    .path_params = .{
+                        .allocator = allocator,
+                        .new_leaf = new_leaf,
+                        .leaf_secret = &leaf_secret,
+                        .eph_seeds = eph_seeds,
+                    },
                 },
             ) catch return error.CommitFailed;
             defer commit_output.deinit();
