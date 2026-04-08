@@ -1,5 +1,5 @@
 .PHONY: all fmt check build test test-cli bench bench-filter fetch-vectors clean \
-       fmt-client check-client test-client clean-client
+       fmt-client check-client build-client test-client clean-client
 
 ZIG := zig
 SRC_DIR := src
@@ -40,7 +40,7 @@ check: check-client
 	$(ZIG) fmt --check $(SRC_DIR)
 
 # Build the library in debug mode.
-build:
+build: build-client
 	$(ZIG) build
 
 # Build the library in release-safe mode.
@@ -73,9 +73,9 @@ test-filter: fetch-vectors
 test-verbose: fetch-vectors
 	$(ZIG) build test -- --verbose
 
-# Run CLI end-to-end tests (builds CLI first).
-test-cli: build
-	examples/cli/test_e2e.sh "$(CURDIR)/zig-out/bin/zmls-cli"
+# Run CLI end-to-end tests (via zmls-client).
+test-cli:
+	@$(MAKE) -C $(CLIENT_DIR) test-cli
 
 # Run all benchmarks (ReleaseFast for meaningful results).
 bench:
@@ -99,6 +99,9 @@ check-client:
 
 test-client:
 	@$(MAKE) -C $(CLIENT_DIR) test
+
+build-client:
+	@$(MAKE) -C $(CLIENT_DIR) build
 
 clean-client:
 	@$(MAKE) -C $(CLIENT_DIR) clean

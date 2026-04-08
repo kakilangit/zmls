@@ -41,11 +41,12 @@ jobs:
         with:
           version: master
       - run: make test
+      - run: make test-cli
       - name: Result
         if: always()
         run: |
           if [ "${{ job.status }}" = "success" ]; then
-            echo "✅ All tests passed"
+            echo "All tests passed"
           else
-            echo "❌ Tests failed"
+            echo "Tests failed"
           fi

@@ -1,4 +1,4 @@
-.PHONY: all fmt check build test test-filter clean
+.PHONY: all fmt check build test test-filter test-cli clean
 
 ZIG := zig
 SRC_DIR := src
@@ -9,10 +9,12 @@ all: fmt check build test
 # Format all Zig source files.
 fmt:
 	$(ZIG) fmt $(SRC_DIR)
+	$(ZIG) fmt examples
 
 # Check formatting without modifying files. Useful in CI.
 check:
 	$(ZIG) fmt --check $(SRC_DIR)
+	$(ZIG) fmt --check examples
 
 # Build the library and CLI in debug mode.
 build:
@@ -37,6 +39,10 @@ test-filter:
 # Run tests with verbose output.
 test-verbose:
 	$(ZIG) build test -- --verbose
+
+# Run CLI end-to-end tests (builds CLI first).
+test-cli: build
+	examples/cli/test_e2e.sh "$(CURDIR)/zig-out/bin/zmls-cli"
 
 # Remove build artifacts.
 clean:
