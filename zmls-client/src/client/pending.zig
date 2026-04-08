@@ -26,6 +26,8 @@ pub fn PendingKeyPackageMap(comptime P: type, comptime capacity: u32) type {
         pub const PendingKeys = struct {
             /// HPKE init secret key for Welcome decryption.
             init_sk: [P.nsk]u8,
+            /// HPKE init public key for Welcome decryption.
+            init_pk: [P.npk]u8,
             /// Encryption secret key for the leaf.
             enc_sk: [P.nsk]u8,
             /// Signature secret key snapshot (needed to verify
@@ -126,6 +128,7 @@ const StubP = struct {
     pub const nk: u32 = 16;
     pub const nn: u32 = 12;
     pub const nsk: u32 = 32;
+    pub const npk: u32 = 32;
     pub const sign_sk_len: u32 = 64;
 };
 
@@ -136,6 +139,7 @@ test "PendingKeyPackageMap: insert/find/remove" {
     const ref: [StubP.nh]u8 = .{0xAA} ** StubP.nh;
     const keys = PendingKeyPackageMap(StubP, 8).PendingKeys{
         .init_sk = .{0x11} ** StubP.nsk,
+        .init_pk = .{0x44} ** StubP.npk,
         .enc_sk = .{0x22} ** StubP.nsk,
         .sign_sk = .{0x33} ** StubP.sign_sk_len,
     };
@@ -192,6 +196,7 @@ test "PendingKeyPackageMap: deinit zeros secrets" {
     const ref: [StubP.nh]u8 = .{0xBB} ** StubP.nh;
     const keys = PendingKeyPackageMap(StubP, 4).PendingKeys{
         .init_sk = .{0x11} ** StubP.nsk,
+        .init_pk = .{0x44} ** StubP.npk,
         .enc_sk = .{0x22} ** StubP.nsk,
         .sign_sk = .{0x33} ** StubP.sign_sk_len,
     };

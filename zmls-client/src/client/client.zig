@@ -12,6 +12,7 @@ const Io = std.Io;
 const zmls = @import("zmls");
 
 const Credential = zmls.Credential;
+const KeyPackage = zmls.KeyPackage;
 
 const GroupStore = @import("../ports/group_store.zig").GroupStore;
 const key_store_mod = @import("../ports/key_store.zig");
@@ -91,6 +92,7 @@ pub fn Client(comptime P: type) type {
             GroupNotFound,
             SerializationFailed,
             KeyGenerationFailed,
+            CapacityExhausted,
         } || GroupStore.Error || KS.Error || Allocator.Error;
 
         // ────────────────────────────────────────────────
@@ -265,17 +267,184 @@ pub fn Client(comptime P: type) type {
             try self.persistGroup(io, group_id, &gs);
 
             // Store encryption secret key.
-            self.key_store.storeEncryptionKey(
+            try self.key_store.storeEncryptionKey(
                 io,
                 group_id,
                 0,
                 &enc_kp.sk,
-            ) catch {};
+            );
+        }
+
+        // ────────────────────────────────────────────────
+        // KeyPackage generation
+        // ────────────────────────────────────────────────
+
+        /// Maximum encoded KeyPackage size (same as core lib).
+        const max_kp_encode: u32 = 65536;
+
+        /// Result of freshKeyPackage: TLS-encoded bytes
+        /// and the reference hash for tracking.
+        pub const FreshKeyPackageResult = struct {
+            /// TLS-encoded KeyPackage bytes (caller-owned).
+            data: []u8,
+            /// Reference hash for matching against Welcomes.
+            ref_hash: [P.nh]u8,
+        };
+
+        /// Generate a fresh KeyPackage, store private keys
+        /// in the pending map, and return the TLS-encoded
+        /// KeyPackage bytes.
+        ///
+        /// The KeyPackage is ready to be uploaded to a
+        /// KeyPackage directory for other clients to fetch.
+        pub fn freshKeyPackage(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+        ) Error!FreshKeyPackageResult {
+            if (self.closed) return error.ClientClosed;
+
+            // Caller owns storage; buildKeyPackage writes
+            // in-place so slice fields stay valid.
+            var ctx: KpContext = undefined;
+            try self.buildKeyPackage(io, &ctx);
+            defer secureZeroSlice(&ctx.init_kp.sk);
+            defer secureZeroSlice(&ctx.enc_kp.sk);
+            defer secureZeroSlice(&ctx.sig_buf);
+            defer secureZeroSlice(&ctx.leaf_sig_buf);
+
+            return self.encodeAndStore(allocator, &ctx);
+        }
+
+        /// Intermediate state for KP construction.
+        const KpContext = struct {
+            kp: KeyPackage,
+            init_kp: DhKeypair,
+            enc_kp: DhKeypair,
+            init_pk: [P.npk]u8,
+            enc_pk: [P.npk]u8,
+            sig_buf: [P.sig_len]u8,
+            leaf_sig_buf: [P.sig_len]u8,
+        };
+
+        const DhKeypair = struct {
+            sk: [P.nsk]u8,
+            pk: [P.npk]u8,
+        };
+
+        /// Build and sign a KeyPackage in-place via
+        /// out-pointer. Slice fields in `ctx.kp` point
+        /// directly into `ctx`'s backing arrays, so no
+        /// fixup is needed after the call.
+        fn buildKeyPackage(
+            self: *Self,
+            io: Io,
+            ctx: *KpContext,
+        ) Error!void {
+            // Generate init + encryption key pairs.
+            var init_seed: [32]u8 = undefined;
+            var enc_seed: [32]u8 = undefined;
+            io.randomSecure(&init_seed) catch
+                return error.KeyGenerationFailed;
+            io.randomSecure(&enc_seed) catch
+                return error.KeyGenerationFailed;
+            defer secureZeroSlice(&init_seed);
+            defer secureZeroSlice(&enc_seed);
+
+            const init_kp = toDhKeypair(
+                P.dhKeypairFromSeed(&init_seed) catch
+                    return error.KeyGenerationFailed,
+            );
+            const enc_kp = toDhKeypair(
+                P.dhKeypairFromSeed(&enc_seed) catch
+                    return error.KeyGenerationFailed,
+            );
+
+            ctx.init_kp = init_kp;
+            ctx.enc_kp = enc_kp;
+            ctx.init_pk = init_kp.pk;
+            ctx.enc_pk = enc_kp.pk;
+
+            // Slices point into ctx's own backing arrays.
+            ctx.kp = .{
+                .version = .mls10,
+                .cipher_suite = self.cipher_suite,
+                .init_key = &ctx.init_pk,
+                .leaf_node = .{
+                    .encryption_key = &ctx.enc_pk,
+                    .signature_key = &self.sign_pk,
+                    .credential = Credential.initBasic(
+                        self.identity,
+                    ),
+                    .capabilities = defaultCapabilities(),
+                    .source = .key_package,
+                    .lifetime = defaultLifetime(),
+                    .parent_hash = null,
+                    .extensions = &.{},
+                    .signature = &.{},
+                },
+                .extensions = &.{},
+                .signature = &.{},
+            };
+
+            // Sign LeafNode (source=key_package: no gid/leaf).
+            ctx.kp.leaf_node.signLeafNode(
+                P,
+                &self.sign_sk,
+                &ctx.leaf_sig_buf,
+                null,
+                null,
+            ) catch return error.KeyGenerationFailed;
+
+            // Sign KeyPackage.
+            ctx.kp.signKeyPackage(
+                P,
+                &self.sign_sk,
+                &ctx.sig_buf,
+            ) catch return error.KeyGenerationFailed;
+        }
+
+        fn encodeAndStore(
+            self: *Self,
+            allocator: Allocator,
+            ctx: *KpContext,
+        ) Error!FreshKeyPackageResult {
+            // Compute reference hash.
+            const ref = ctx.kp.makeRef(
+                P,
+            ) catch return error.KeyGenerationFailed;
+
+            // TLS-encode the KeyPackage.
+            var buf: [max_kp_encode]u8 = undefined;
+            const end = ctx.kp.encode(
+                &buf,
+                0,
+            ) catch return error.SerializationFailed;
+
+            const data = try allocator.dupe(u8, buf[0..end]);
+            errdefer allocator.free(data);
+
+            // Store private keys in pending map.
+            try self.pending_key_packages.insert(
+                &ref,
+                .{
+                    .init_sk = ctx.init_kp.sk,
+                    .init_pk = ctx.init_kp.pk,
+                    .enc_sk = ctx.enc_kp.sk,
+                    .sign_sk = self.sign_sk,
+                },
+            );
+
+            return .{ .data = data, .ref_hash = ref };
         }
 
         // ────────────────────────────────────────────────
         // Helpers
         // ────────────────────────────────────────────────
+
+        fn toDhKeypair(raw: anytype) DhKeypair {
+            return .{ .sk = raw.sk, .pk = raw.pk };
+        }
 
         /// Default capabilities for KeyPackages. Lists only
         /// the mandatory/default values per RFC 9420 Section
@@ -352,4 +521,192 @@ test "Client: init/deinit lifecycle" {
 
     try testing.expect(!client.closed);
     try testing.expectEqualSlices(u8, "alice", client.identity);
+}
+
+fn makeTestClient(
+    gs_store: *MemGS(8),
+    ks_store: *MemKS(TestP, 8),
+) !Client(TestP) {
+    const seed: [32]u8 = .{0x42} ** 32;
+    return Client(TestP).init(
+        testing.allocator,
+        "alice",
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &seed,
+        .{
+            .group_store = gs_store.groupStore(),
+            .key_store = ks_store.keyStore(),
+            .credential_validator = zmls.credential_validator
+                .AcceptAllValidator.validator(),
+        },
+    );
+}
+
+test "Client: freshKeyPackage returns decodable bytes" {
+    var gs_store = MemGS(8).init();
+    defer gs_store.deinit();
+    var ks_store = MemKS(TestP, 8).init();
+    defer ks_store.deinit();
+
+    var client = try makeTestClient(&gs_store, &ks_store);
+    defer client.deinit();
+
+    const io = testIo();
+    const result = try client.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(result.data);
+
+    // Must produce non-empty bytes.
+    try testing.expect(result.data.len > 0);
+
+    // Must be decodable as a KeyPackage.
+    const decoded = try KeyPackage.decode(
+        testing.allocator,
+        result.data,
+        0,
+    );
+    var kp = decoded.value;
+    defer kp.deinit(testing.allocator);
+
+    // Verify it consumed all bytes.
+    try testing.expectEqual(
+        @as(u32, @intCast(result.data.len)),
+        decoded.pos,
+    );
+
+    // Verify basic fields.
+    try testing.expectEqual(
+        zmls.ProtocolVersion.mls10,
+        kp.version,
+    );
+    try testing.expectEqual(
+        zmls.CipherSuite
+            .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        kp.cipher_suite,
+    );
+    try testing.expectEqual(
+        zmls.types.LeafNodeSource.key_package,
+        kp.leaf_node.source,
+    );
+
+    // init_key and encryption_key must be present.
+    try testing.expect(kp.init_key.len > 0);
+    try testing.expect(kp.leaf_node.encryption_key.len > 0);
+
+    // Signature must verify.
+    try kp.verifySignature(TestP);
+
+    // LeafNode signature must verify (key_package source).
+    try kp.leaf_node.verifyLeafNodeSignature(
+        TestP,
+        null,
+        null,
+    );
+}
+
+test "Client: freshKeyPackage stores keys in pending map" {
+    var gs_store = MemGS(8).init();
+    defer gs_store.deinit();
+    var ks_store = MemKS(TestP, 8).init();
+    defer ks_store.deinit();
+
+    var client = try makeTestClient(&gs_store, &ks_store);
+    defer client.deinit();
+
+    const io = testIo();
+    const result = try client.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(result.data);
+
+    // Pending map should have exactly one entry.
+    try testing.expectEqual(
+        @as(u32, 1),
+        client.pending_key_packages.count,
+    );
+
+    // Lookup by ref_hash should succeed.
+    const found = client.pending_key_packages.find(
+        &result.ref_hash,
+    );
+    try testing.expect(found != null);
+
+    // The signing key should match the client's key.
+    try testing.expectEqualSlices(
+        u8,
+        &client.sign_sk,
+        &found.?.sign_sk,
+    );
+}
+
+test "Client: freshKeyPackage ref_hash matches recomputed" {
+    var gs_store = MemGS(8).init();
+    defer gs_store.deinit();
+    var ks_store = MemKS(TestP, 8).init();
+    defer ks_store.deinit();
+
+    var client = try makeTestClient(&gs_store, &ks_store);
+    defer client.deinit();
+
+    const io = testIo();
+    const result = try client.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(result.data);
+
+    // Decode the KP and recompute the ref hash.
+    const decoded = try KeyPackage.decode(
+        testing.allocator,
+        result.data,
+        0,
+    );
+    var kp = decoded.value;
+    defer kp.deinit(testing.allocator);
+
+    const recomputed = try kp.makeRef(TestP);
+    try testing.expectEqualSlices(
+        u8,
+        &result.ref_hash,
+        &recomputed,
+    );
+}
+
+test "Client: multiple freshKeyPackages get distinct refs" {
+    var gs_store = MemGS(8).init();
+    defer gs_store.deinit();
+    var ks_store = MemKS(TestP, 8).init();
+    defer ks_store.deinit();
+
+    var client = try makeTestClient(&gs_store, &ks_store);
+    defer client.deinit();
+
+    const io = testIo();
+    const r1 = try client.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(r1.data);
+
+    const r2 = try client.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(r2.data);
+
+    // Two KPs must have different ref hashes (different keys).
+    try testing.expect(!std.mem.eql(
+        u8,
+        &r1.ref_hash,
+        &r2.ref_hash,
+    ));
+
+    // Pending map should have two entries.
+    try testing.expectEqual(
+        @as(u32, 2),
+        client.pending_key_packages.count,
+    );
 }
