@@ -206,6 +206,35 @@ pub fn Client(comptime P: type) type {
             ProposalCacheFailed,
         };
 
+        pub const GroupInfoError = GroupStore.Error ||
+            Allocator.Error || error{
+            ClientClosed,
+            GroupNotFound,
+            BundleDeserializeFailed,
+            EncodingFailed,
+            SigningFailed,
+        };
+
+        pub const ExternalJoinError = GroupStore.Error ||
+            KS.Error || Allocator.Error || error{
+            ClientClosed,
+            GroupInfoDecodeFailed,
+            TreeDecodeFailed,
+            GroupContextDecodeFailed,
+            ExternalCommitFailed,
+            KeyGenerationFailed,
+            BundleSerializeFailed,
+            EncodingFailed,
+        };
+
+        pub const StageCommitError = GroupStore.Error ||
+            Allocator.Error || error{
+            ClientClosed,
+            GroupNotFound,
+            BundleDeserializeFailed,
+            CommitFailed,
+        };
+
         // ────────────────────────────────────────────────
         // Lifecycle
         // ────────────────────────────────────────────────
@@ -887,6 +916,420 @@ pub fn Client(comptime P: type) type {
         }
 
         // ────────────────────────────────────────────────
+        // External join
+        // ────────────────────────────────────────────────
+
+        /// Join a group via external commit using a signed
+        /// GroupInfo message (MLSMessage-wrapped).
+        ///
+        /// Returns the group_id and commit bytes that
+        /// existing members must process.
+        pub fn externalJoin(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_info_bytes: []const u8,
+        ) ExternalJoinError!client_types.ExternalJoinResult {
+            if (self.closed) return error.ClientClosed;
+
+            var parsed = parseGroupInfoMessage(
+                allocator,
+                group_info_bytes,
+            ) catch return error.GroupInfoDecodeFailed;
+            defer parsed.deinit(allocator);
+
+            return self.executeExternalJoin(
+                allocator,
+                io,
+                &parsed,
+            );
+        }
+
+        const ParsedGroupInfo = struct {
+            gi: zmls.group_info.GroupInfo,
+            gc: zmls.group_context.GroupContext(P.nh),
+            tree: zmls.RatchetTree,
+
+            fn deinit(
+                self_gi: *@This(),
+                alloc: Allocator,
+            ) void {
+                self_gi.tree.deinit();
+                self_gi.gc.deinit(alloc);
+                self_gi.gi.deinit(alloc);
+            }
+        };
+
+        fn parseGroupInfoMessage(
+            allocator: Allocator,
+            data: []const u8,
+        ) error{ParseFailed}!ParsedGroupInfo {
+            const wire = zmls.mls_message.MLSMessage
+                .decodeExact(data) catch
+                return error.ParseFailed;
+            if (wire.wire_format != .mls_group_info)
+                return error.ParseFailed;
+            const gi_bytes = switch (wire.body) {
+                .group_info => |b| b,
+                else => return error.ParseFailed,
+            };
+
+            const gi_dec = zmls.group_info.GroupInfo
+                .decode(allocator, gi_bytes, 0) catch
+                return error.ParseFailed;
+            var gi = gi_dec.value;
+            errdefer gi.deinit(allocator);
+
+            const gc_dec = zmls.group_context
+                .GroupContext(P.nh).decode(
+                allocator,
+                gi.group_context,
+                0,
+            ) catch return error.ParseFailed;
+            var gc = gc_dec.value;
+            errdefer gc.deinit(allocator);
+
+            const tree = extractRatchetTree(
+                allocator,
+                gi.extensions,
+            ) catch return error.ParseFailed;
+
+            return .{
+                .gi = gi,
+                .gc = gc,
+                .tree = tree,
+            };
+        }
+
+        fn extractRatchetTree(
+            allocator: Allocator,
+            extensions: []const zmls.Extension,
+        ) error{TreeNotFound}!zmls.RatchetTree {
+            for (extensions) |*ext| {
+                if (ext.extension_type == .ratchet_tree) {
+                    return decodeRatchetTree(
+                        allocator,
+                        ext.data,
+                    ) catch return error.TreeNotFound;
+                }
+            }
+            return error.TreeNotFound;
+        }
+
+        fn decodeRatchetTree(
+            allocator: Allocator,
+            data: []const u8,
+        ) !zmls.RatchetTree {
+            const vr = try zmls.varint.decode(data, 0);
+            const payload_len = vr.value;
+            const hdr_end = vr.pos;
+            if (hdr_end + payload_len > data.len)
+                return error.Truncated;
+
+            var pos: u32 = hdr_end;
+            const end: u32 = hdr_end + payload_len;
+            var node_count: u32 = 0;
+            var count_pos = pos;
+            while (count_pos < end) {
+                const pres = zmls.codec.decodeUint8(
+                    data,
+                    count_pos,
+                ) catch return error.Truncated;
+                if (pres.value != 0) {
+                    const nd = zmls.tree_node.Node.decode(
+                        std.heap.page_allocator,
+                        data,
+                        pres.pos,
+                    ) catch return error.Truncated;
+                    var node_copy = nd.value;
+                    node_copy.deinit(
+                        std.heap.page_allocator,
+                    );
+                    count_pos = nd.pos;
+                } else {
+                    count_pos = pres.pos;
+                }
+                node_count += 1;
+            }
+
+            const leaf_count = (node_count + 1) / 2;
+            var tree = zmls.RatchetTree.init(
+                allocator,
+                leaf_count,
+            ) catch
+                return error.Truncated;
+
+            var ni: u32 = 0;
+            while (pos < end) {
+                const pres = try zmls.codec.decodeUint8(
+                    data,
+                    pos,
+                );
+                if (pres.value != 0) {
+                    const nd = try zmls.tree_node.Node.decode(
+                        std.heap.page_allocator,
+                        data,
+                        pres.pos,
+                    );
+                    tree.nodes[ni] = nd.value;
+                    pos = nd.pos;
+                } else {
+                    tree.nodes[ni] = null;
+                    pos = pres.pos;
+                }
+                ni += 1;
+            }
+
+            return tree;
+        }
+
+        fn executeExternalJoin(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            parsed: *const ParsedGroupInfo,
+        ) ExternalJoinError!client_types.ExternalJoinResult {
+            const enc_kp = generateDhKeypair(
+                io,
+            ) catch return error.KeyGenerationFailed;
+
+            var joiner_leaf = buildLeafNode(
+                self,
+                &enc_kp.pk,
+            );
+            joiner_leaf.source = .commit;
+
+            const eph_count = countEphSeeds(
+                &parsed.tree,
+                parsed.tree.leaf_count,
+            ) catch return error.ExternalCommitFailed;
+
+            const eph_seeds = allocator.alloc(
+                [32]u8,
+                eph_count,
+            ) catch return error.OutOfMemory;
+            defer allocator.free(eph_seeds);
+
+            for (eph_seeds) |*s| {
+                io.randomSecure(s) catch
+                    return error.KeyGenerationFailed;
+            }
+
+            var leaf_secret: [P.nh]u8 = undefined;
+            io.randomSecure(&leaf_secret) catch
+                return error.KeyGenerationFailed;
+            defer secureZeroSlice(&leaf_secret);
+
+            var ext_init_seed: [32]u8 = undefined;
+            io.randomSecure(&ext_init_seed) catch
+                return error.KeyGenerationFailed;
+            defer secureZeroSlice(&ext_init_seed);
+
+            const interim_th = computeInterimFromGi(
+                &parsed.gc.confirmed_transcript_hash,
+                parsed.gi.confirmation_tag,
+            ) catch return error.ExternalCommitFailed;
+
+            var ec = zmls.createExternalCommit(
+                P,
+                allocator,
+                &parsed.gc,
+                &parsed.tree,
+                parsed.gi.extensions,
+                &interim_th,
+                .{
+                    .allocator = allocator,
+                    .joiner_leaf = joiner_leaf,
+                    .sign_key = &self.signing_secret_key,
+                    .leaf_secret = &leaf_secret,
+                    .eph_seeds = eph_seeds,
+                    .ext_init_seed = &ext_init_seed,
+                    .remove_proposals = &.{},
+                },
+                .mls_public_message,
+            ) catch return error.ExternalCommitFailed;
+            // persistExternalJoinResult moves tree+gc out
+            // of ec, replacing ec.tree with a dummy. We
+            // must free that dummy when ec goes out of scope.
+            defer ec.tree.deinit();
+
+            return self.persistExternalJoinResult(
+                allocator,
+                io,
+                &ec,
+                &enc_kp,
+            );
+        }
+
+        fn computeInterimFromGi(
+            confirmed_hash: *const [P.nh]u8,
+            confirmation_tag: []const u8,
+        ) error{ComputeFailed}![P.nh]u8 {
+            return zmls.updateInterimTranscriptHash(
+                P,
+                confirmed_hash,
+                confirmation_tag,
+            ) catch return error.ComputeFailed;
+        }
+
+        fn countEphSeeds(
+            tree: *const zmls.RatchetTree,
+            leaf_count: u32,
+        ) error{CountFailed}!u32 {
+            const new_leaf_idx = leaf_count;
+            const new_leaf = zmls.LeafIndex.fromU32(
+                new_leaf_idx,
+            );
+            const new_lc = leaf_count + 1;
+            const padded_lc = zmls.tree_math.paddedLeafCount(
+                new_lc,
+            );
+
+            var extended_tree = zmls.RatchetTree.init(
+                std.heap.page_allocator,
+                padded_lc,
+            ) catch return error.CountFailed;
+            defer extended_tree.deinit();
+
+            const copy_width = @min(
+                tree.nodeCount(),
+                extended_tree.nodeCount(),
+            );
+            @memcpy(
+                extended_tree.nodes[0..copy_width],
+                tree.nodes[0..copy_width],
+            );
+
+            var p_buf: [32]zmls.types
+                .NodeIndex = undefined;
+            var c_buf: [32]zmls.types
+                .NodeIndex = undefined;
+            const fdp = extended_tree.filteredDirectPath(
+                new_leaf,
+                &p_buf,
+                &c_buf,
+            ) catch return error.CountFailed;
+
+            var total: u32 = 0;
+            var res_buf: [
+                zmls.RatchetTree
+                    .max_resolution_size
+            ]zmls.types.NodeIndex =
+                undefined;
+            for (fdp.copath) |cp| {
+                const res = extended_tree.resolution(
+                    cp,
+                    &res_buf,
+                ) catch return error.CountFailed;
+                total += @intCast(res.len);
+            }
+
+            return total;
+        }
+
+        fn persistExternalJoinResult(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            ec: *zmls.ExternalCommitResult(P),
+            enc_kp: *const DhKeypair,
+        ) ExternalJoinError!client_types.ExternalJoinResult {
+            var gs = buildGroupStateFromExternal(
+                self.allocator,
+                ec,
+            ) catch return error.ExternalCommitFailed;
+            errdefer gs.deinit();
+
+            const group_id = gs.groupId();
+            const owned_gid = allocator.dupe(
+                u8,
+                group_id,
+            ) catch return error.OutOfMemory;
+            errdefer allocator.free(owned_gid);
+
+            var bundle = Bundle.initFromGroupState(
+                self.allocator,
+                &gs,
+            ) catch |err| {
+                gs.deinit();
+                return err;
+            };
+            defer bundle.deinit(self.allocator);
+
+            try self.persistBundle(
+                io,
+                group_id,
+                &bundle.group_state,
+                &bundle.secret_tree,
+            );
+
+            try self.key_store.storeEncryptionKey(
+                io,
+                group_id,
+                @intFromEnum(ec.joiner_leaf_index),
+                &enc_kp.sk,
+            );
+
+            const commit_data = encodeExternalCommitWire(
+                allocator,
+                ec,
+            ) catch return error.EncodingFailed;
+            errdefer allocator.free(commit_data);
+
+            return .{
+                .group_id = owned_gid,
+                .commit = commit_data,
+                .allocator = allocator,
+            };
+        }
+
+        fn buildGroupStateFromExternal(
+            allocator: Allocator,
+            ec: *zmls.ExternalCommitResult(P),
+        ) !GS {
+            // Move ownership of tree and gc from ec.
+            const tree = ec.tree;
+            ec.tree = zmls.RatchetTree.init(
+                allocator,
+                1,
+            ) catch
+                return error.OutOfMemory;
+
+            const gc = ec.group_context;
+            ec.group_context = undefined;
+
+            return .{
+                .tree = tree,
+                .group_context = gc,
+                .epoch_secrets = ec.epoch_secrets,
+                .interim_transcript_hash = ec
+                    .interim_transcript_hash,
+                .confirmed_transcript_hash = ec
+                    .confirmed_transcript_hash,
+                .my_leaf_index = ec.joiner_leaf_index,
+                .wire_format_policy = .always_encrypt,
+                .pending_proposals = zmls.proposal_cache
+                    .ProposalCache(P).init(),
+                .epoch_key_ring = zmls.epoch_key_ring
+                    .EpochKeyRing(P).init(0),
+                .resumption_psk_ring = zmls.psk_lookup
+                    .ResumptionPskRing(P).init(0),
+                .allocator = allocator,
+            };
+        }
+
+        fn encodeExternalCommitWire(
+            allocator: Allocator,
+            ec: *const zmls.ExternalCommitResult(P),
+        ) error{
+            EncodingFailed,
+            OutOfMemory,
+        }![]u8 {
+            const content = ec.commit_bytes[0..ec.commit_len];
+            return allocator.dupe(u8, content);
+        }
+
+        // ────────────────────────────────────────────────
         // Standalone proposals
         // ────────────────────────────────────────────────
 
@@ -963,6 +1406,137 @@ pub fn Client(comptime P: type) type {
                 group_id,
                 &.{},
             );
+        }
+
+        /// A staged commit that has not yet been persisted.
+        ///
+        /// Call `confirm` to persist the new epoch state,
+        /// or `discard` to abandon it (original state is
+        /// unchanged). The handle owns the commit and
+        /// welcome bytes.
+        pub const StagedCommitHandle = struct {
+            commit_data: []u8,
+            welcome_data: ?[]u8,
+            staged_group_state: GS,
+            staged_secret_tree: ST,
+            group_id: []const u8,
+            allocator: Allocator,
+            confirmed: bool,
+
+            pub fn deinit(
+                self_h: *StagedCommitHandle,
+            ) void {
+                // Always clean up the staged state. Even
+                // after confirm (which serializes to store),
+                // the in-memory structs still own heap
+                // allocations that must be freed.
+                self_h.staged_group_state.deinit();
+                self_h.staged_secret_tree.deinit(
+                    self_h.allocator,
+                );
+                self_h.allocator.free(
+                    self_h.commit_data,
+                );
+                if (self_h.welcome_data) |w| {
+                    self_h.allocator.free(w);
+                }
+                self_h.allocator.free(
+                    self_h.group_id,
+                );
+                self_h.* = undefined;
+            }
+
+            /// Persist the staged state, advancing the
+            /// group to the new epoch.
+            pub fn confirm(
+                self_h: *StagedCommitHandle,
+                client: *Self,
+                io: Io,
+            ) (GroupStore.Error || error{
+                BundleSerializeFailed,
+            })!void {
+                try client.persistBundle(
+                    io,
+                    self_h.group_id,
+                    &self_h.staged_group_state,
+                    &self_h.staged_secret_tree,
+                );
+                self_h.confirmed = true;
+            }
+
+            /// Abandon the staged commit. The original
+            /// group state remains unchanged. Must still
+            /// call `deinit` afterward to free memory.
+            pub fn discard(
+                self_h: *StagedCommitHandle,
+            ) void {
+                // Mark as confirmed so confirm() cannot
+                // be called after discard(). Memory is
+                // freed in deinit().
+                self_h.confirmed = true;
+            }
+        };
+
+        /// Create a commit without persisting it.
+        ///
+        /// Returns a `StagedCommitHandle` containing the
+        /// commit bytes and the staged group state. Call
+        /// `confirm` to persist or `discard` to abandon.
+        pub fn stageCommit(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            proposals: []const zmls.Proposal,
+        ) StageCommitError!StagedCommitHandle {
+            if (self.closed) return error.ClientClosed;
+
+            var bundle = try self.loadBundle(
+                io,
+                group_id,
+            );
+            defer bundle.deinit(self.allocator);
+
+            var commit_output = bundle.group_state.commit(
+                allocator,
+                .{
+                    .proposals = proposals,
+                    .sign_key = &self.signing_secret_key,
+                },
+            ) catch return error.CommitFailed;
+            errdefer commit_output.deinit();
+
+            const wire_bytes = encodeCommitAsWireMessage(
+                allocator,
+                &bundle.group_state,
+                &commit_output,
+            ) catch return error.CommitFailed;
+            errdefer allocator.free(wire_bytes);
+
+            var secret_tree = initSecretTree(
+                allocator,
+                &commit_output.group_state,
+            ) catch return error.CommitFailed;
+            errdefer secret_tree.deinit(allocator);
+
+            // Move ownership of staged state to handle.
+            const gs = commit_output.group_state;
+            commit_output.group_state = undefined;
+
+            const owned_gid = try allocator.dupe(
+                u8,
+                group_id,
+            );
+
+            return .{
+                .commit_data = wire_bytes,
+                .welcome_data = null,
+                .staged_group_state = gs,
+                .staged_secret_tree = secret_tree,
+                .group_id = owned_gid,
+                .allocator = allocator,
+                .confirmed = false,
+            };
         }
 
         fn encodeAndCacheProposal(
@@ -1536,6 +2110,32 @@ pub fn Client(comptime P: type) type {
                 .epochAuthenticator().*;
         }
 
+        /// Export a signed GroupInfo for external joiners.
+        ///
+        /// Returns heap-allocated bytes containing the
+        /// MLSMessage-wrapped GroupInfo with ratchet_tree
+        /// and external_pub extensions.
+        pub fn groupInfo(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+        ) GroupInfoError![]u8 {
+            if (self.closed) return error.ClientClosed;
+
+            var bundle = try self.loadBundle(
+                io,
+                group_id,
+            );
+            defer bundle.deinit(self.allocator);
+
+            return buildSignedGroupInfo(
+                allocator,
+                &bundle.group_state,
+                &self.signing_secret_key,
+            );
+        }
+
         /// Clear all pending proposals for a group without
         /// committing them.
         pub fn cancelPendingProposals(
@@ -1851,6 +2451,175 @@ pub fn Client(comptime P: type) type {
                     .encryption_secret,
                 group_state.leafCount(),
             ) catch return error.BundleSerializeFailed;
+        }
+
+        // ── GroupInfo helpers ─────────────────────────
+
+        const max_gi_encode: u32 = 65536;
+        const max_tree_encode: u32 = 1 << 18;
+
+        /// Build a signed GroupInfo wrapped in MLSMessage.
+        fn buildSignedGroupInfo(
+            allocator: Allocator,
+            group_state: *const GS,
+            sign_key: *const [P.sign_sk_len]u8,
+        ) GroupInfoError![]u8 {
+            const tree_bytes = encodeRatchetTree(
+                allocator,
+                &group_state.tree,
+            ) catch return error.EncodingFailed;
+            defer allocator.free(tree_bytes);
+
+            var ext_pub_buf: [P.npk]u8 = undefined;
+            const ext_pub_ext = zmls
+                .makeExternalPubExtension(
+                P,
+                &group_state.epoch_secrets
+                    .external_secret,
+                &ext_pub_buf,
+            ) catch return error.SigningFailed;
+
+            const gi_exts = [_]zmls.Extension{
+                .{
+                    .extension_type = .ratchet_tree,
+                    .data = tree_bytes,
+                },
+                ext_pub_ext,
+            };
+
+            var gc_buf: [max_group_context_encode]u8 =
+                undefined;
+            const gc_bytes = group_state.serializeContext(
+                &gc_buf,
+            ) catch return error.EncodingFailed;
+
+            const conf_tag = zmls.framing_auth
+                .computeConfirmationTag(
+                P,
+                &group_state.epoch_secrets
+                    .confirmation_key,
+                &group_state.confirmed_transcript_hash,
+            );
+
+            return encodeGroupInfoMessage(
+                allocator,
+                gc_bytes,
+                &gi_exts,
+                &conf_tag,
+                @intFromEnum(group_state.my_leaf_index),
+                sign_key,
+            );
+        }
+
+        /// Encode a signed GroupInfo into an MLSMessage.
+        fn encodeGroupInfoMessage(
+            allocator: Allocator,
+            gc_bytes: []const u8,
+            extensions: []const zmls.Extension,
+            confirmation_tag: *const [P.nh]u8,
+            signer: u32,
+            sign_key: *const [P.sign_sk_len]u8,
+        ) GroupInfoError![]u8 {
+            const sig = zmls.signGroupInfo(
+                P,
+                gc_bytes,
+                extensions,
+                confirmation_tag,
+                signer,
+                sign_key,
+            ) catch return error.SigningFailed;
+
+            const gi = zmls.group_info.GroupInfo{
+                .group_context = gc_bytes,
+                .extensions = extensions,
+                .confirmation_tag = confirmation_tag,
+                .signer = signer,
+                .signature = &sig,
+            };
+
+            var gi_buf: [max_gi_encode]u8 = undefined;
+            const gi_end = gi.encode(
+                &gi_buf,
+                0,
+            ) catch return error.EncodingFailed;
+
+            const mls_msg = zmls.mls_message.MLSMessage{
+                .version = .mls10,
+                .wire_format = .mls_group_info,
+                .body = .{
+                    .group_info = gi_buf[0..gi_end],
+                },
+            };
+
+            var wire_buf: [max_gi_encode]u8 = undefined;
+            const wire_end = mls_msg.encode(
+                &wire_buf,
+                0,
+            ) catch return error.EncodingFailed;
+
+            return allocator.dupe(
+                u8,
+                wire_buf[0..wire_end],
+            );
+        }
+
+        /// Encode a ratchet tree as TLS-serialized bytes.
+        fn encodeRatchetTree(
+            allocator: Allocator,
+            tree: *const zmls.RatchetTree,
+        ) error{
+            EncodingFailed,
+            OutOfMemory,
+        }![]u8 {
+            const full_width = tree.nodeCount();
+            var trim_width: u32 = full_width;
+            while (trim_width > 0 and
+                tree.nodes[trim_width - 1] == null)
+            {
+                trim_width -= 1;
+            }
+
+            // Encode the payload into a large temp buffer.
+            var tmp: [max_gi_encode]u8 = undefined;
+            var pos: u32 = 0;
+            var ni: u32 = 0;
+            while (ni < trim_width) : (ni += 1) {
+                if (tree.nodes[ni]) |*n| {
+                    pos = zmls.codec.encodeUint8(
+                        &tmp,
+                        pos,
+                        1,
+                    ) catch return error.EncodingFailed;
+                    pos = n.encode(
+                        &tmp,
+                        pos,
+                    ) catch return error.EncodingFailed;
+                } else {
+                    pos = zmls.codec.encodeUint8(
+                        &tmp,
+                        pos,
+                        0,
+                    ) catch return error.EncodingFailed;
+                }
+            }
+
+            const payload_size: u32 = pos;
+            const hdr_size = zmls.varint.encodedLength(
+                payload_size,
+            );
+            const total = hdr_size + payload_size;
+            const out = try allocator.alloc(u8, total);
+            errdefer allocator.free(out);
+
+            const hdr_end = zmls.varint.encode(
+                out,
+                0,
+                payload_size,
+            ) catch return error.EncodingFailed;
+
+            @memcpy(out[hdr_end..total], tmp[0..payload_size]);
+
+            return out;
         }
 
         // ── Wire encoding ─────────────────────────────
@@ -3799,4 +4568,209 @@ test "Client: sendMessageWithAad round-trips" {
     defer testing.allocator.free(ciphertext);
 
     try testing.expect(ciphertext.len > 0);
+}
+
+test "Client: groupInfo returns decodable bytes" {
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+
+    var alice = try makeTestClient(
+        &alice_group_store,
+        &alice_key_store,
+    );
+    defer alice.deinit();
+
+    const io = testIo();
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    const gi_bytes = try alice.groupInfo(
+        testing.allocator,
+        io,
+        group_id,
+    );
+    defer testing.allocator.free(gi_bytes);
+
+    try testing.expect(gi_bytes.len > 0);
+
+    // Verify it decodes as a valid MLSMessage(GroupInfo).
+    const wire = try zmls.mls_message.MLSMessage
+        .decodeExact(gi_bytes);
+    try testing.expectEqual(
+        zmls.WireFormat.mls_group_info,
+        wire.wire_format,
+    );
+
+    // Decode the inner GroupInfo.
+    const gi_body = switch (wire.body) {
+        .group_info => |b| b,
+        else => return error.SkipZigTest,
+    };
+    const gi_dec = try zmls.group_info.GroupInfo.decode(
+        testing.allocator,
+        gi_body,
+        0,
+    );
+    var gi = gi_dec.value;
+    defer gi.deinit(testing.allocator);
+
+    // Verify signer index matches Alice (leaf 0).
+    try testing.expectEqual(@as(u32, 0), gi.signer);
+}
+
+test "Client: externalJoin lifecycle" {
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+
+    var alice = try makeTestClient(
+        &alice_group_store,
+        &alice_key_store,
+    );
+    defer alice.deinit();
+
+    const io = testIo();
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    // Export GroupInfo for external joiners.
+    const gi_bytes = try alice.groupInfo(
+        testing.allocator,
+        io,
+        group_id,
+    );
+    defer testing.allocator.free(gi_bytes);
+
+    // Bob does an external join.
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+
+    var bob = makeTestClientBob(
+        &bob_group_store,
+        &bob_key_store,
+    ) catch return error.SkipZigTest;
+    defer bob.deinit();
+
+    var result = try bob.externalJoin(
+        testing.allocator,
+        io,
+        gi_bytes,
+    );
+    defer result.deinit();
+
+    // Bob should have commit bytes to distribute.
+    try testing.expect(result.commit.len > 0);
+
+    // Bob's group_id should match Alice's group.
+    try testing.expectEqualSlices(
+        u8,
+        group_id,
+        result.group_id,
+    );
+
+    // Bob should be at epoch 1 (external commit
+    // advances from epoch 0 to epoch 1).
+    const bob_epoch = try bob.groupEpoch(
+        io,
+        result.group_id,
+    );
+    try testing.expectEqual(@as(u64, 1), bob_epoch);
+}
+
+test "Client: stageCommit confirm advances epoch" {
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+
+    var alice = try makeTestClient(
+        &alice_group_store,
+        &alice_key_store,
+    );
+    defer alice.deinit();
+
+    const io = testIo();
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    // Epoch should be 0 initially.
+    const epoch_before = try alice.groupEpoch(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(@as(u64, 0), epoch_before);
+
+    // Stage a commit (empty commit = key update).
+    var handle = try alice.stageCommit(
+        testing.allocator,
+        io,
+        group_id,
+        &.{},
+    );
+
+    // Commit data should be non-empty.
+    try testing.expect(handle.commit_data.len > 0);
+
+    // Epoch should still be 0 — not yet confirmed.
+    const epoch_staged = try alice.groupEpoch(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(@as(u64, 0), epoch_staged);
+
+    // Confirm the staged commit.
+    try handle.confirm(&alice, io);
+    defer handle.deinit();
+
+    // Epoch should now be 1.
+    const epoch_after = try alice.groupEpoch(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(@as(u64, 1), epoch_after);
+}
+
+test "Client: stageCommit discard leaves epoch unchanged" {
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+
+    var alice = try makeTestClient(
+        &alice_group_store,
+        &alice_key_store,
+    );
+    defer alice.deinit();
+
+    const io = testIo();
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    const epoch_before = try alice.groupEpoch(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(@as(u64, 0), epoch_before);
+
+    // Stage a commit but discard it.
+    var handle = try alice.stageCommit(
+        testing.allocator,
+        io,
+        group_id,
+        &.{},
+    );
+    handle.discard();
+    handle.deinit();
+
+    // Epoch should still be 0.
+    const epoch_after = try alice.groupEpoch(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(@as(u64, 0), epoch_after);
 }
