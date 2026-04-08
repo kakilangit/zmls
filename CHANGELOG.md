@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **zmls-client** -- Client and Delivery Service framework. Hexagonal
+  port interfaces, in-memory adapters, Client(P), DeliveryService,
+  and wire protocol envelope framing.
+
 ## [0.1.0] - 2026-04-07
 
 Initial release. Complete implementation of RFC 9420 (Messaging Layer
