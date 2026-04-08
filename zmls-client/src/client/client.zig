@@ -11,6 +11,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const zmls = @import("zmls");
 
+const Credential = zmls.Credential;
+
 const GroupStore = @import("../ports/group_store.zig").GroupStore;
 const key_store_mod = @import("../ports/key_store.zig");
 const transport_mod = @import("../ports/transport.zig");
@@ -227,7 +229,6 @@ pub fn Client(comptime P: type) type {
         ) Error!void {
             if (self.closed) return error.ClientClosed;
 
-            // Build creator LeafNode.
             // Generate encryption keypair for the leaf.
             var enc_seed: [32]u8 = undefined;
             io.randomSecure(&enc_seed) catch
@@ -237,18 +238,15 @@ pub fn Client(comptime P: type) type {
             ) catch return error.KeyGenerationFailed;
             secureZeroSlice(&enc_seed);
 
-            const cred = zmls.Credential{
-                .credential_type = .basic,
-                .data = self.identity,
-            };
-
             const leaf = zmls.LeafNode{
                 .encryption_key = &enc_kp.pk,
                 .signature_key = &self.sign_pk,
-                .credential = cred,
-                .capabilities = .{},
+                .credential = Credential.initBasic(
+                    self.identity,
+                ),
+                .capabilities = defaultCapabilities(),
                 .source = .key_package,
-                .lifetime = null,
+                .lifetime = defaultLifetime(),
                 .parent_hash = null,
                 .extensions = &.{},
                 .signature = &.{},
@@ -273,6 +271,42 @@ pub fn Client(comptime P: type) type {
                 0,
                 &enc_kp.sk,
             ) catch {};
+        }
+
+        // ────────────────────────────────────────────────
+        // Helpers
+        // ────────────────────────────────────────────────
+
+        /// Default capabilities for KeyPackages. Lists only
+        /// the mandatory/default values per RFC 9420 Section
+        /// 7.2 — no non-default extensions or proposal types.
+        fn defaultCapabilities() zmls.tree_node.Capabilities {
+            return .{
+                .versions = &default_versions,
+                .cipher_suites = &default_suites,
+                .extensions = &.{},
+                .proposals = &.{},
+                .credentials = &default_cred_types,
+            };
+        }
+
+        const default_versions = [_]zmls.ProtocolVersion{
+            .mls10,
+        };
+        const default_suites = [_]zmls.CipherSuite{
+            .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        };
+        const default_cred_types = [_]zmls.types.CredentialType{
+            .basic,
+        };
+
+        /// Default lifetime: 30 days from a fixed reference.
+        /// Real applications should use actual timestamps.
+        fn defaultLifetime() zmls.tree_node.Lifetime {
+            return .{
+                .not_before = 0,
+                .not_after = 30 * 24 * 60 * 60,
+            };
         }
     };
 }
