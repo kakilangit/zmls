@@ -9,9 +9,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zmls = @import("zmls");
 
-/// Maximum inline proposals in a single Commit.
-const max_inline_proposals: u32 = 256;
-
 pub fn CommitProcess(comptime P: type) type {
     comptime zmls.crypto_provider.assertValid(P);
 
@@ -19,6 +16,9 @@ pub fn CommitProcess(comptime P: type) type {
     const PublicMsg = zmls.public_msg.PublicMessage(P);
 
     return struct {
+        const max_proposals: u32 =
+            zmls.proposal_cache.max_pending;
+
         pub const ProcessError = error{
             DecodingFailed,
             EpochMismatch,
@@ -40,7 +40,7 @@ pub fn CommitProcess(comptime P: type) type {
             /// Number of members added by this commit.
             added_count: u32,
             /// Leaf indices of members removed by this commit.
-            removed_leaves: [max_inline_proposals]u32,
+            removed_leaves: [max_proposals]u32,
             removed_count: u32,
 
             pub fn deinit(self: *CommitResult) void {
@@ -139,12 +139,24 @@ pub fn CommitProcess(comptime P: type) type {
             receiver_encryption_key: *const [P.nsk]u8,
             receiver_public_key: *const [P.npk]u8,
         ) ProcessError!CommitResult {
-            // Resolve inline proposals.
-            var proposals: [max_inline_proposals]zmls
-                .Proposal = undefined;
-            const proposal_count = resolveInlineProposals(
-                commit,
+            // Resolve proposals (inline + by-reference).
+            const max = zmls.proposal_cache.max_pending;
+            var proposals: [max]zmls.Proposal = undefined;
+            var senders: [max]zmls.Sender = undefined;
+
+            const commit_sender = zmls.Sender{
+                .sender_type = framed_content
+                    .sender.sender_type,
+                .leaf_index = framed_content
+                    .sender.leaf_index,
+            };
+
+            const proposal_count = group_state
+                .pending_proposals.resolveWithSenders(
+                commit.proposals,
+                commit_sender,
                 &proposals,
+                &senders,
             ) catch return error.CommitDecodeFailed;
 
             // Look up sender's verification key.
@@ -184,36 +196,12 @@ pub fn CommitProcess(comptime P: type) type {
                         t
                     else
                         null,
+                    .proposal_senders = senders[0..proposal_count],
                     .wire_format = .mls_public_message,
                 },
             ) catch return error.CommitProcessingFailed;
 
             return buildResult(&output, commit);
-        }
-
-        fn resolveInlineProposals(
-            commit: *const zmls.Commit,
-            output: *[max_inline_proposals]zmls.Proposal,
-        ) !u32 {
-            var count: u32 = 0;
-            for (commit.proposals) |*proposal_or_ref| {
-                if (count >= max_inline_proposals)
-                    return error.TooManyProposals;
-                switch (proposal_or_ref.tag) {
-                    .proposal => {
-                        output[count] =
-                            proposal_or_ref.payload.proposal;
-                        count += 1;
-                    },
-                    .reference => {
-                        // By-reference proposals require a
-                        // proposal cache. Not yet supported.
-                        return error.UnsupportedProposalRef;
-                    },
-                    else => return error.InvalidProposalType,
-                }
-            }
-            return count;
         }
 
         fn lookupSenderKey(
@@ -247,7 +235,7 @@ pub fn CommitProcess(comptime P: type) type {
             output: *GS.ProcessOutput,
             commit: *const zmls.Commit,
         ) CommitResult {
-            var removed: [max_inline_proposals]u32 =
+            var removed: [max_proposals]u32 =
                 undefined;
             var removed_count: u32 = 0;
             var added_count: u32 = 0;
@@ -261,7 +249,7 @@ pub fn CommitProcess(comptime P: type) type {
                     .add => added_count += 1,
                     .remove => {
                         if (removed_count <
-                            max_inline_proposals)
+                            max_proposals)
                         {
                             removed[removed_count] =
                                 proposal.payload.remove

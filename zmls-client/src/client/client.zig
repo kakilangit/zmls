@@ -28,12 +28,15 @@ const client_types = @import("types.zig");
 const bundle_mod = @import("group_bundle.zig");
 const protect_mod = @import("message_protect.zig");
 const commit_mod = @import("commit_process.zig");
+const proposal_enc = @import("proposal_encode.zig");
+const proposal_store_mod = @import("proposal_store.zig");
 
 pub const WireFormatPolicy = client_types.WireFormatPolicy;
 pub const InviteResult = client_types.InviteResult;
 pub const JoinGroupResult = client_types.JoinGroupResult;
 pub const ReceivedMessage = client_types.ReceivedMessage;
 pub const ProcessingResult = client_types.ProcessingResult;
+pub const ProposalCached = client_types.ProposalCached;
 
 /// Maximum pending KeyPackages a Client can hold.
 const max_pending_key_packages: u32 = 64;
@@ -55,10 +58,13 @@ pub fn Client(comptime P: type) type {
         const Bundle = bundle_mod.GroupBundle(P);
         const Protect = protect_mod.MessageProtect(P);
         const CommitProc = commit_mod.CommitProcess(P);
+        const PropEnc = proposal_enc.ProposalEncode(P);
         const PendingMap = pending_mod.PendingKeyPackageMap(
             P,
             max_pending_key_packages,
         );
+        const PropStore =
+            proposal_store_mod.PendingProposalStore(P);
 
         // ── Identity (immutable after init) ────────────
         identity: []const u8,
@@ -79,6 +85,9 @@ pub fn Client(comptime P: type) type {
 
         // ── Pending KeyPackages ────────────────────────
         pending_key_packages: PendingMap,
+
+        // ── Pending proposals (survives serialization) ─
+        proposal_store: PropStore,
 
         // ── Allocator (managed pattern) ────────────────
         allocator: Allocator,
@@ -187,6 +196,16 @@ pub fn Client(comptime P: type) type {
         } || Protect.DecryptError ||
             CommitProc.ProcessError;
 
+        pub const ProposeError = GroupStore.Error ||
+            Allocator.Error || error{
+            ClientClosed,
+            GroupNotFound,
+            BundleDeserializeFailed,
+            BundleSerializeFailed,
+            ProposalEncodeFailed,
+            ProposalCacheFailed,
+        };
+
         // ────────────────────────────────────────────────
         // Lifecycle
         // ────────────────────────────────────────────────
@@ -225,6 +244,7 @@ pub fn Client(comptime P: type) type {
                 .wire_format_policy = options
                     .wire_format_policy,
                 .pending_key_packages = PendingMap.init(),
+                .proposal_store = PropStore.init(),
                 .allocator = allocator,
                 .closed = false,
             };
@@ -866,6 +886,132 @@ pub fn Client(comptime P: type) type {
             try self.group_store.delete(io, group_id);
         }
 
+        // ────────────────────────────────────────────────
+        // Standalone proposals
+        // ────────────────────────────────────────────────
+
+        /// Propose adding a member (standalone proposal).
+        /// Returns wire-encoded proposal bytes.
+        pub fn proposeAdd(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            key_package_bytes: []const u8,
+        ) ProposeError![]u8 {
+            if (self.closed) return error.ClientClosed;
+
+            const decoded = KeyPackage.decode(
+                allocator,
+                key_package_bytes,
+                0,
+            ) catch return error.ProposalEncodeFailed;
+            var key_package = decoded.value;
+            defer key_package.deinit(allocator);
+
+            const proposal = zmls.Proposal{
+                .tag = .add,
+                .payload = .{ .add = .{
+                    .key_package = key_package,
+                } },
+            };
+            return self.encodeAndCacheProposal(
+                allocator,
+                io,
+                group_id,
+                &proposal,
+            );
+        }
+
+        /// Propose removing a member (standalone proposal).
+        /// Returns wire-encoded proposal bytes.
+        pub fn proposeRemove(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            target_leaf: u32,
+        ) ProposeError![]u8 {
+            if (self.closed) return error.ClientClosed;
+
+            const proposal = zmls.Proposal{
+                .tag = .remove,
+                .payload = .{ .remove = .{
+                    .removed = target_leaf,
+                } },
+            };
+            return self.encodeAndCacheProposal(
+                allocator,
+                io,
+                group_id,
+                &proposal,
+            );
+        }
+
+        /// Commit all pending (cached) proposals.
+        /// Returns wire-encoded commit bytes.
+        pub fn commitPending(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+        ) MembershipError![]u8 {
+            if (self.closed) return error.ClientClosed;
+            return self.commitWithProposals(
+                allocator,
+                io,
+                group_id,
+                &.{},
+            );
+        }
+
+        fn encodeAndCacheProposal(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            proposal: *const zmls.Proposal,
+        ) ProposeError![]u8 {
+            var bundle = try self.loadBundle(
+                io,
+                group_id,
+            );
+            defer bundle.deinit(self.allocator);
+
+            const encoded = PropEnc.encodeProposal(
+                allocator,
+                &bundle.group_state,
+                proposal,
+                &self.signing_secret_key,
+            ) catch return error.ProposalEncodeFailed;
+            defer allocator.free(
+                encoded.authenticated_content,
+            );
+
+            const sender = zmls.Sender{
+                .sender_type = .member,
+                .leaf_index = @intFromEnum(
+                    bundle.group_state.my_leaf_index,
+                ),
+            };
+
+            // Compute ref hash for later resolution.
+            const ref = zmls.crypto_primitives.refHash(
+                P,
+                "MLS 1.0 Proposal Reference",
+                encoded.authenticated_content,
+            );
+
+            self.proposal_store.store(
+                group_id,
+                ref,
+                proposal.*,
+                sender,
+            ) catch return error.ProposalCacheFailed;
+
+            return encoded.wire_bytes;
+        }
+
         /// Shared commit-and-persist for removeMember and
         /// selfUpdate.
         fn commitWithProposals(
@@ -1016,8 +1162,10 @@ pub fn Client(comptime P: type) type {
         ///
         /// Peeks at the wire format to dispatch:
         /// - PrivateMessage → decrypt as application message
-        /// - PublicMessage  → process as commit (proposals
-        ///   not yet supported)
+        /// - PublicMessage (commit) → process commit, advance
+        ///   epoch
+        /// - PublicMessage (proposal) → cache for future
+        ///   commit resolution
         ///
         /// Returns a discriminated union describing what
         /// happened. The caller does NOT need to know the
@@ -1103,11 +1251,46 @@ pub fn Client(comptime P: type) type {
             group_id: []const u8,
             wire_bytes: []const u8,
         ) ProcessIncomingError!ProcessingResult {
+            // Decode envelope to determine content type.
+            const content_type = peekPublicContentType(
+                wire_bytes,
+            ) catch return error.WireDecodeFailed;
+
+            return switch (content_type) {
+                .commit => self.processPublicCommit(
+                    allocator,
+                    io,
+                    group_id,
+                    wire_bytes,
+                ),
+                .proposal => self.processPublicProposal(
+                    allocator,
+                    io,
+                    group_id,
+                    wire_bytes,
+                ),
+                else => error.UnsupportedWireFormat,
+            };
+        }
+
+        fn processPublicCommit(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            wire_bytes: []const u8,
+        ) ProcessIncomingError!ProcessingResult {
             var bundle = try self.loadBundle(
                 io,
                 group_id,
             );
             defer bundle.deinit(self.allocator);
+
+            // Inject stored proposals for this group.
+            self.proposal_store.injectInto(
+                group_id,
+                &bundle.group_state.pending_proposals,
+            );
 
             // Load receiver encryption key from store.
             var receiver_secret_key: [P.nsk]u8 = undefined;
@@ -1125,7 +1308,6 @@ pub fn Client(comptime P: type) type {
             ) catch return error.ReceiverKeyNotFound;
             if (!found) return error.ReceiverKeyNotFound;
 
-            // Derive public key from the leaf node.
             const receiver_public_key = getLeafEncryptionKey(
                 &bundle.group_state,
             ) catch return error.ReceiverKeyNotFound;
@@ -1139,7 +1321,6 @@ pub fn Client(comptime P: type) type {
                 &receiver_public_key,
             );
 
-            // Build new SecretTree for the new epoch.
             var secret_tree = initSecretTree(
                 allocator,
                 &result.group_state,
@@ -1159,11 +1340,6 @@ pub fn Client(comptime P: type) type {
                 return err;
             };
 
-            // Store new encryption key for next epoch.
-            // (In a full implementation we'd extract the
-            // new leaf key from path processing. For now
-            // we re-store the same key.)
-
             const commit_applied = buildCommitApplied(
                 allocator,
                 &result,
@@ -1172,11 +1348,61 @@ pub fn Client(comptime P: type) type {
                 return error.OutOfMemory;
             };
 
-            // Transfer group_state ownership to result;
-            // we no longer need it here.
             result.deinit();
 
+            // Clear stored proposals — epoch advanced.
+            self.proposal_store.clearGroup(group_id);
+
             return .{ .commit_applied = commit_applied };
+        }
+
+        fn processPublicProposal(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            wire_bytes: []const u8,
+        ) ProcessIncomingError!ProcessingResult {
+            const decoded = decodePublicProposal(
+                allocator,
+                wire_bytes,
+            ) catch return error.WireDecodeFailed;
+
+            // Build AuthenticatedContent for ref hash.
+            const auth_content = buildProposalAuthContent(
+                &decoded.framed_content,
+                &decoded.auth,
+            ) catch return error.WireDecodeFailed;
+
+            const ref = zmls.crypto_primitives.refHash(
+                P,
+                "MLS 1.0 Proposal Reference",
+                auth_content.slice(),
+            );
+
+            const sender = zmls.Sender{
+                .sender_type = decoded.framed_content
+                    .sender.sender_type,
+                .leaf_index = decoded.framed_content
+                    .sender.leaf_index,
+            };
+
+            self.proposal_store.store(
+                group_id,
+                ref,
+                decoded.proposal,
+                sender,
+            ) catch return error.WireDecodeFailed;
+
+            _ = io;
+
+            return .{ .proposal_cached = .{
+                .proposal_type = @intFromEnum(
+                    decoded.proposal.tag,
+                ),
+                .sender_leaf = decoded.framed_content
+                    .sender.leaf_index,
+            } };
         }
 
         fn peekWireFormat(
@@ -1189,6 +1415,125 @@ pub fn Client(comptime P: type) type {
                 .big,
             );
             return @enumFromInt(raw);
+        }
+
+        /// Peek at the content type inside a PublicMessage
+        /// within an MLSMessage envelope.
+        fn peekPublicContentType(
+            wire_bytes: []const u8,
+        ) !zmls.types.ContentType {
+            const message = zmls.mls_message.MLSMessage
+                .decodeExact(wire_bytes) catch
+                return error.DecodeFailed;
+
+            const public_bytes = switch (message.body) {
+                .public_message => |b| b,
+                else => return error.DecodeFailed,
+            };
+
+            const PublicMsg2 =
+                zmls.public_msg.PublicMessage(P);
+            const decoded = PublicMsg2.decode(
+                public_bytes,
+                0,
+            ) catch return error.DecodeFailed;
+
+            return decoded.value.content.content_type;
+        }
+
+        /// Decoded proposal from a PublicMessage.
+        const DecodedProposal = struct {
+            framed_content: zmls.FramedContent,
+            auth: Auth,
+            proposal: zmls.Proposal,
+        };
+
+        /// Decode a proposal from wire bytes.
+        fn decodePublicProposal(
+            allocator: Allocator,
+            wire_bytes: []const u8,
+        ) !DecodedProposal {
+            const message = zmls.mls_message.MLSMessage
+                .decodeExact(wire_bytes) catch
+                return error.DecodeFailed;
+
+            const public_bytes = switch (message.body) {
+                .public_message => |b| b,
+                else => return error.DecodeFailed,
+            };
+
+            const PublicMsg2 =
+                zmls.public_msg.PublicMessage(P);
+            const decoded = PublicMsg2.decode(
+                public_bytes,
+                0,
+            ) catch return error.DecodeFailed;
+            const fc = decoded.value.content;
+
+            if (fc.content_type != .proposal)
+                return error.NotAProposal;
+
+            // Decode the proposal from the content bytes.
+            const prop_decoded = zmls.Proposal.decode(
+                allocator,
+                fc.content,
+                0,
+            ) catch return error.DecodeFailed;
+
+            return .{
+                .framed_content = fc,
+                .auth = decoded.value.auth,
+                .proposal = prop_decoded.value,
+            };
+        }
+
+        /// Maximum buffer for AuthenticatedContent.
+        const max_auth_content: u32 = 1 << 17;
+
+        const AuthContentBuffer = struct {
+            data: [max_auth_content]u8,
+            len: u32,
+
+            fn slice(self: *const AuthContentBuffer) []const u8 {
+                return self.data[0..self.len];
+            }
+        };
+
+        /// Build AuthenticatedContent bytes from a decoded
+        /// proposal's FramedContent and auth data.
+        /// WireFormat(u16) || FramedContent || AuthData
+        fn buildProposalAuthContent(
+            framed_content: *const zmls.FramedContent,
+            auth: *const Auth,
+        ) !AuthContentBuffer {
+            var result: AuthContentBuffer = undefined;
+            var pos: u32 = 0;
+
+            // WireFormat (u16)
+            pos = zmls.codec.encodeUint16(
+                &result.data,
+                pos,
+                @intFromEnum(
+                    zmls.types.WireFormat
+                        .mls_public_message,
+                ),
+            ) catch return error.EncodeFailed;
+
+            // FramedContent
+            pos = framed_content.encode(
+                &result.data,
+                pos,
+            ) catch return error.EncodeFailed;
+
+            // FramedContentAuthData
+            pos = auth.encode(
+                &result.data,
+                pos,
+                .proposal,
+            ) catch return error.EncodeFailed;
+
+            result.len = pos;
+            return result;
         }
 
         fn getLeafEncryptionKey(
@@ -2670,5 +3015,118 @@ test "Client: processIncoming processes commit" {
     try testing.expectEqual(
         @as(u32, 3),
         bob_bundle.group_state.leafCount(),
+    );
+}
+
+test "Client: proposeRemove returns wire-encoded bytes" {
+    const io = testIo();
+
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_group_store,
+        &alice_key_store,
+        &bob_group_store,
+        &bob_key_store,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    // Alice proposes removing Bob.
+    const proposal_bytes = try alice.proposeRemove(
+        testing.allocator,
+        io,
+        group_id,
+        1,
+    );
+    defer testing.allocator.free(proposal_bytes);
+
+    try testing.expect(proposal_bytes.len > 0);
+
+    // Verify it's a valid MLSMessage.
+    const msg = zmls.mls_message.MLSMessage
+        .decodeExact(proposal_bytes) catch
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(
+        zmls.types.WireFormat.mls_public_message,
+        msg.wire_format,
+    );
+}
+
+test "Client: processIncoming caches received proposal" {
+    const io = testIo();
+
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_group_store,
+        &alice_key_store,
+        &bob_group_store,
+        &bob_key_store,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    // Alice proposes removing Bob.
+    const proposal_bytes = try alice.proposeRemove(
+        testing.allocator,
+        io,
+        group_id,
+        1,
+    );
+    defer testing.allocator.free(proposal_bytes);
+
+    // Bob processes the proposal via processIncoming.
+    const result = try bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        proposal_bytes,
+    );
+
+    switch (result) {
+        .proposal_cached => |cached| {
+            // ProposalType.remove = 3
+            try testing.expectEqual(
+                @as(u8, 3),
+                cached.proposal_type,
+            );
+            // Sender is Alice (leaf 0).
+            try testing.expectEqual(
+                @as(u32, 0),
+                cached.sender_leaf,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Bob should have the proposal in store.
+    try testing.expectEqual(
+        @as(u32, 1),
+        bob.proposal_store.count,
     );
 }

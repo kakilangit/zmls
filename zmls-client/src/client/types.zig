@@ -57,8 +57,16 @@ pub const ProcessingResult = union(enum) {
     application: ReceivedMessage,
     /// A commit was processed; epoch advanced.
     commit_applied: CommitApplied,
-    /// A proposal was cached.
-    proposal_cached,
+    /// A standalone proposal was cached for a future commit.
+    proposal_cached: ProposalCached,
+};
+
+/// A standalone proposal that was received and cached.
+pub const ProposalCached = struct {
+    /// The proposal type (add, remove, update, etc.).
+    proposal_type: u16,
+    /// The sender's leaf index (for member senders).
+    sender_leaf: u32,
 };
 
 pub const CommitApplied = struct {

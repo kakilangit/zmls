@@ -109,6 +109,19 @@ pub const MessageProtect =
 pub const CommitProcess =
     @import("client/commit_process.zig").CommitProcess;
 
+/// ProposalEncode — pure encoding of standalone proposals.
+pub const ProposalEncode =
+    @import("client/proposal_encode.zig").ProposalEncode;
+
+/// PendingProposalStore — client-side proposal cache.
+pub const PendingProposalStore =
+    @import("client/proposal_store.zig")
+        .PendingProposalStore;
+
+/// Client result type aliases.
+pub const ProposalCached = client_types.ProposalCached;
+pub const CommitApplied = client_types.CommitApplied;
+
 // ── Delivery Service ───────────────────────────────────────
 
 /// Delivery service (dumb relay).
