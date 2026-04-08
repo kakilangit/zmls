@@ -141,7 +141,7 @@ pub fn Client(comptime P: type) type {
         };
 
         pub const JoinError = GroupStore.Error ||
-            Allocator.Error || error{
+            KS.Error || Allocator.Error || error{
             ClientClosed,
             WelcomeDecodeFailed,
             NoPendingKeyPackage,
@@ -174,6 +174,18 @@ pub fn Client(comptime P: type) type {
             BundleDeserializeFailed,
             BundleSerializeFailed,
         } || Protect.DecryptError;
+
+        pub const ProcessIncomingError = GroupStore.Error ||
+            KS.Error || Allocator.Error || error{
+            ClientClosed,
+            GroupNotFound,
+            BundleDeserializeFailed,
+            BundleSerializeFailed,
+            WireDecodeFailed,
+            UnsupportedWireFormat,
+            ReceiverKeyNotFound,
+        } || Protect.DecryptError ||
+            CommitProc.ProcessError;
 
         // ────────────────────────────────────────────────
         // Lifecycle
@@ -554,6 +566,7 @@ pub fn Client(comptime P: type) type {
                 io,
                 group_id,
                 &key_package,
+                &bundle.group_state,
                 &commit_output,
             );
         }
@@ -564,6 +577,7 @@ pub fn Client(comptime P: type) type {
             io: Io,
             group_id: []const u8,
             key_package: *const KeyPackage,
+            pre_commit_state: *const GS,
             commit_output: *GS.CommitOutput,
         ) InviteError!InviteResult {
             var context_buffer: [max_group_context_buffer]u8 =
@@ -613,6 +627,7 @@ pub fn Client(comptime P: type) type {
                 allocator,
                 io,
                 group_id,
+                pre_commit_state,
                 commit_output,
                 &welcome_result,
             );
@@ -623,15 +638,16 @@ pub fn Client(comptime P: type) type {
             allocator: Allocator,
             io: Io,
             group_id: []const u8,
+            pre_commit_state: *const GS,
             commit_output: *GS.CommitOutput,
             welcome_result: *const zmls.group_welcome
                 .WelcomeResult,
         ) InviteError!InviteResult {
-            const commit_data = try allocator.dupe(
-                u8,
-                commit_output
-                    .commit_bytes[0..commit_output.commit_len],
-            );
+            const commit_data = encodeCommitAsWireMessage(
+                allocator,
+                pre_commit_state,
+                commit_output,
+            ) catch return error.EncodingFailed;
             errdefer allocator.free(commit_data);
 
             var welcome_buffer: [max_welcome_buffer]u8 =
@@ -780,6 +796,14 @@ pub fn Client(comptime P: type) type {
                 &bundle.group_state,
                 &bundle.secret_tree,
             );
+
+            try self.key_store.storeEncryptionKey(
+                io,
+                group_id,
+                @intFromEnum(opts.my_leaf_index),
+                &match.keys.enc_sk,
+            );
+
             _ = self.pending_key_packages.remove(
                 &match.ref,
             );
@@ -866,12 +890,12 @@ pub fn Client(comptime P: type) type {
             ) catch return error.CommitFailed;
             defer commit_output.deinit();
 
-            const commit_data = try allocator.dupe(
-                u8,
-                commit_output.commit_bytes[0..commit_output
-                    .commit_len],
-            );
-            errdefer allocator.free(commit_data);
+            const wire_bytes = encodeCommitAsWireMessage(
+                allocator,
+                &bundle.group_state,
+                &commit_output,
+            ) catch return error.CommitFailed;
+            errdefer allocator.free(wire_bytes);
 
             var secret_tree = try initSecretTree(
                 allocator,
@@ -886,7 +910,7 @@ pub fn Client(comptime P: type) type {
                 &secret_tree,
             );
 
-            return commit_data;
+            return wire_bytes;
         }
 
         // ────────────────────────────────────────────────
@@ -985,6 +1009,233 @@ pub fn Client(comptime P: type) type {
         }
 
         // ────────────────────────────────────────────────
+        // Incoming message dispatch
+        // ────────────────────────────────────────────────
+
+        /// Process an incoming wire message of unknown type.
+        ///
+        /// Peeks at the wire format to dispatch:
+        /// - PrivateMessage → decrypt as application message
+        /// - PublicMessage  → process as commit (proposals
+        ///   not yet supported)
+        ///
+        /// Returns a discriminated union describing what
+        /// happened. The caller does NOT need to know the
+        /// wire format in advance.
+        pub fn processIncoming(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            wire_bytes: []const u8,
+        ) ProcessIncomingError!ProcessingResult {
+            if (self.closed) return error.ClientClosed;
+
+            const wire_format = peekWireFormat(
+                wire_bytes,
+            ) catch return error.WireDecodeFailed;
+
+            return switch (wire_format) {
+                .mls_private_message => self.processPrivateMessage(
+                    allocator,
+                    io,
+                    group_id,
+                    wire_bytes,
+                ),
+                .mls_public_message => self.processPublicMessage(
+                    allocator,
+                    io,
+                    group_id,
+                    wire_bytes,
+                ),
+                else => error.UnsupportedWireFormat,
+            };
+        }
+
+        fn processPrivateMessage(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            wire_bytes: []const u8,
+        ) ProcessIncomingError!ProcessingResult {
+            var bundle = try self.loadBundle(
+                io,
+                group_id,
+            );
+            defer bundle.deinit(self.allocator);
+
+            var plaintext_buffer: [
+                protect_mod.wire_buffer_max
+            ]u8 = undefined;
+            const decrypted = try Protect
+                .decryptApplicationMessage(
+                &bundle.group_state,
+                &bundle.secret_tree,
+                wire_bytes,
+                &plaintext_buffer,
+            );
+
+            const owned_data = try allocator.dupe(
+                u8,
+                decrypted.plaintext,
+            );
+            errdefer allocator.free(owned_data);
+
+            try self.persistBundle(
+                io,
+                group_id,
+                &bundle.group_state,
+                &bundle.secret_tree,
+            );
+
+            return .{ .application = .{
+                .sender_leaf = decrypted.sender_leaf,
+                .data = owned_data,
+                .allocator = allocator,
+            } };
+        }
+
+        fn processPublicMessage(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            wire_bytes: []const u8,
+        ) ProcessIncomingError!ProcessingResult {
+            var bundle = try self.loadBundle(
+                io,
+                group_id,
+            );
+            defer bundle.deinit(self.allocator);
+
+            // Load receiver encryption key from store.
+            var receiver_secret_key: [P.nsk]u8 = undefined;
+            defer secureZeroSlice(&receiver_secret_key);
+
+            const leaf_index = @intFromEnum(
+                bundle.group_state.my_leaf_index,
+            );
+            const found = self.key_store
+                .loadEncryptionKey(
+                io,
+                group_id,
+                leaf_index,
+                &receiver_secret_key,
+            ) catch return error.ReceiverKeyNotFound;
+            if (!found) return error.ReceiverKeyNotFound;
+
+            // Derive public key from the leaf node.
+            const receiver_public_key = getLeafEncryptionKey(
+                &bundle.group_state,
+            ) catch return error.ReceiverKeyNotFound;
+
+            var result = try CommitProc
+                .processPublicCommit(
+                allocator,
+                &bundle.group_state,
+                wire_bytes,
+                &receiver_secret_key,
+                &receiver_public_key,
+            );
+
+            // Build new SecretTree for the new epoch.
+            var secret_tree = initSecretTree(
+                allocator,
+                &result.group_state,
+            ) catch {
+                result.deinit();
+                return error.BundleSerializeFailed;
+            };
+            defer secret_tree.deinit(allocator);
+
+            self.persistBundle(
+                io,
+                group_id,
+                &result.group_state,
+                &secret_tree,
+            ) catch |err| {
+                result.deinit();
+                return err;
+            };
+
+            // Store new encryption key for next epoch.
+            // (In a full implementation we'd extract the
+            // new leaf key from path processing. For now
+            // we re-store the same key.)
+
+            const commit_applied = buildCommitApplied(
+                allocator,
+                &result,
+            ) catch {
+                result.deinit();
+                return error.OutOfMemory;
+            };
+
+            // Transfer group_state ownership to result;
+            // we no longer need it here.
+            result.deinit();
+
+            return .{ .commit_applied = commit_applied };
+        }
+
+        fn peekWireFormat(
+            wire_bytes: []const u8,
+        ) error{TooShort}!zmls.types.WireFormat {
+            if (wire_bytes.len < 4) return error.TooShort;
+            const raw = std.mem.readInt(
+                u16,
+                wire_bytes[2..4],
+                .big,
+            );
+            return @enumFromInt(raw);
+        }
+
+        fn getLeafEncryptionKey(
+            group_state: *const GS,
+        ) error{LeafNotFound}![P.npk]u8 {
+            const leaf_index = group_state.my_leaf_index;
+            const leaf = group_state.tree.getLeaf(
+                leaf_index,
+            ) catch return error.LeafNotFound;
+            const leaf_node = leaf orelse
+                return error.LeafNotFound;
+            if (leaf_node.encryption_key.len != P.npk)
+                return error.LeafNotFound;
+            var key: [P.npk]u8 = undefined;
+            @memcpy(
+                &key,
+                leaf_node
+                    .encryption_key[0..P.npk],
+            );
+            return key;
+        }
+
+        fn buildCommitApplied(
+            allocator: Allocator,
+            result: *CommitProc.CommitResult,
+        ) Allocator.Error!client_types.CommitApplied {
+            const removed = try allocator.dupe(
+                u32,
+                result.removed_leaves[0..result
+                    .removed_count],
+            );
+            errdefer allocator.free(removed);
+
+            // CommitProcess counts adds but doesn't track
+            // leaf indices for them (they depend on tree
+            // state after apply). Return an empty slice.
+            const added = try allocator.alloc(u32, 0);
+
+            return .{
+                .new_epoch = result.new_epoch,
+                .removed_members = removed,
+                .added_members = added,
+                .allocator = allocator,
+            };
+        }
+
+        // ────────────────────────────────────────────────
         // Helpers
         // ────────────────────────────────────────────────
 
@@ -1015,6 +1266,147 @@ pub fn Client(comptime P: type) type {
                     .encryption_secret,
                 group_state.leafCount(),
             ) catch return error.BundleSerializeFailed;
+        }
+
+        // ── Wire encoding ─────────────────────────────
+
+        const PublicMsg =
+            zmls.public_msg.PublicMessage(P);
+        const Auth =
+            zmls.framing_auth.FramedContentAuthData(P);
+
+        /// Maximum buffer for PublicMessage + MLSMessage.
+        const max_wire_encode: u32 = 1 << 17;
+        const max_group_context_encode: u32 =
+            zmls.group_context.max_gc_encode;
+
+        /// Encode a commit output as an MLSMessage wire
+        /// message (PublicMessage format). Pure computation.
+        ///
+        /// Needs the pre-commit group state for the
+        /// membership key and group context serialization.
+        fn encodeCommitAsWireMessage(
+            allocator: Allocator,
+            pre_commit_state: *const GS,
+            commit_output: *const GS.CommitOutput,
+        ) error{
+            EncodingFailed,
+            OutOfMemory,
+        }![]u8 {
+            const framed_content = buildCommitFramedContent(
+                pre_commit_state,
+                commit_output,
+            );
+            const auth = buildCommitAuth(commit_output);
+
+            const membership_tag = computeCommitMembershipTag(
+                pre_commit_state,
+                &framed_content,
+                &auth,
+            ) catch return error.EncodingFailed;
+
+            return encodePublicMlsMessage(
+                allocator,
+                &framed_content,
+                &auth,
+                &membership_tag,
+            );
+        }
+
+        fn buildCommitFramedContent(
+            pre_commit_state: *const GS,
+            commit_output: *const GS.CommitOutput,
+        ) zmls.FramedContent {
+            return .{
+                .group_id = pre_commit_state.groupId(),
+                .epoch = pre_commit_state.epoch(),
+                .sender = .{
+                    .sender_type = .member,
+                    .leaf_index = @intFromEnum(
+                        pre_commit_state.my_leaf_index,
+                    ),
+                },
+                .authenticated_data = "",
+                .content_type = .commit,
+                .content = commit_output
+                    .commit_bytes[0..commit_output
+                    .commit_len],
+            };
+        }
+
+        fn buildCommitAuth(
+            commit_output: *const GS.CommitOutput,
+        ) Auth {
+            return .{
+                .signature = commit_output.signature,
+                .confirmation_tag = commit_output
+                    .confirmation_tag,
+            };
+        }
+
+        fn computeCommitMembershipTag(
+            pre_commit_state: *const GS,
+            framed_content: *const zmls.FramedContent,
+            auth: *const Auth,
+        ) ![P.nh]u8 {
+            var context_buffer: [
+                max_group_context_encode
+            ]u8 = undefined;
+            const context_bytes =
+                try pre_commit_state.serializeContext(
+                    &context_buffer,
+                );
+
+            return zmls.public_msg.computeMembershipTag(
+                P,
+                &pre_commit_state.epoch_secrets
+                    .membership_key,
+                framed_content,
+                auth,
+                context_bytes,
+            );
+        }
+
+        fn encodePublicMlsMessage(
+            allocator: Allocator,
+            framed_content: *const zmls.FramedContent,
+            auth: *const Auth,
+            membership_tag: *const [P.nh]u8,
+        ) error{
+            EncodingFailed,
+            OutOfMemory,
+        }![]u8 {
+            const public_message = PublicMsg{
+                .content = framed_content.*,
+                .auth = auth.*,
+                .membership_tag = membership_tag.*,
+            };
+
+            var pub_buffer: [max_wire_encode]u8 = undefined;
+            const pub_end = public_message.encode(
+                &pub_buffer,
+                0,
+            ) catch return error.EncodingFailed;
+
+            const mls_message =
+                zmls.mls_message.MLSMessage{
+                    .version = .mls10,
+                    .wire_format = .mls_public_message,
+                    .body = .{
+                        .public_message = pub_buffer[0..pub_end],
+                    },
+                };
+
+            var wire_buffer: [max_wire_encode]u8 = undefined;
+            const wire_end = mls_message.encode(
+                &wire_buffer,
+                0,
+            ) catch return error.EncodingFailed;
+
+            return allocator.dupe(
+                u8,
+                wire_buffer[0..wire_end],
+            );
         }
 
         fn buildLeafNode(
@@ -2059,5 +2451,224 @@ test "Client: Bob sends, Alice receives" {
     try testing.expectEqual(
         @as(u32, 1),
         received.sender_leaf,
+    );
+}
+
+test "Client: processIncoming decrypts application message" {
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_group_store,
+        &alice_key_store,
+        &bob_group_store,
+        &bob_key_store,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    const io = testIo();
+
+    // Alice sends via sendMessage.
+    const ciphertext = try alice.sendMessage(
+        testing.allocator,
+        io,
+        group_id,
+        "via processIncoming",
+    );
+    defer testing.allocator.free(ciphertext);
+
+    // Bob receives via processIncoming (not receiveMessage).
+    const result = try bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        ciphertext,
+    );
+
+    switch (result) {
+        .application => |received| {
+            var msg = received;
+            defer msg.deinit();
+            try testing.expectEqualSlices(
+                u8,
+                "via processIncoming",
+                msg.data,
+            );
+            try testing.expectEqual(
+                @as(u32, 0),
+                msg.sender_leaf,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "Client: processIncoming rejects garbage input" {
+    var group_store = MemGS(8).init();
+    defer group_store.deinit();
+    var key_store = MemKS(TestP, 8).init();
+    defer key_store.deinit();
+    var alice = try makeTestClient(
+        &group_store,
+        &key_store,
+    );
+    defer alice.deinit();
+
+    const io = testIo();
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    // Too short to even contain a wire format header.
+    const result_short = alice.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        &.{ 0x00, 0x01 },
+    );
+    try testing.expectError(
+        error.WireDecodeFailed,
+        result_short,
+    );
+
+    // Valid header length but unknown wire format.
+    const result_bad = alice.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        &.{ 0x00, 0x01, 0xFF, 0xFF },
+    );
+    try testing.expectError(
+        error.UnsupportedWireFormat,
+        result_bad,
+    );
+}
+
+fn makeTestClientCarol(
+    group_store: *MemGS(8),
+    key_store: *MemKS(TestP, 8),
+) !Client(TestP) {
+    const seed: [32]u8 = .{0x77} ** 32;
+    return Client(TestP).init(
+        testing.allocator,
+        "carol",
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &seed,
+        .{
+            .group_store = group_store.groupStore(),
+            .key_store = key_store.keyStore(),
+            .credential_validator = zmls.credential_validator
+                .AcceptAllValidator.validator(),
+        },
+    );
+}
+
+test "Client: processIncoming processes commit" {
+    const io = testIo();
+
+    // Set up Alice + Bob in a 2-member group (epoch 1).
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_group_store,
+        &alice_key_store,
+        &bob_group_store,
+        &bob_key_store,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    // Verify both at epoch 1 before the commit.
+    {
+        var bob_bundle = try bob.loadBundle(
+            io,
+            group_id,
+        );
+        defer bob_bundle.deinit(testing.allocator);
+        try testing.expectEqual(
+            @as(u64, 1),
+            bob_bundle.group_state.epoch(),
+        );
+    }
+
+    // Alice invites Carol → wire-encoded commit.
+    var carol_group_store = MemGS(8).init();
+    defer carol_group_store.deinit();
+    var carol_key_store = MemKS(TestP, 8).init();
+    defer carol_key_store.deinit();
+    var carol = try makeTestClientCarol(
+        &carol_group_store,
+        &carol_key_store,
+    );
+    defer carol.deinit();
+
+    const carol_key_package = try carol.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(carol_key_package.data);
+
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        group_id,
+        carol_key_package.data,
+    );
+    defer invite.deinit();
+
+    // Bob processes Alice's commit via processIncoming.
+    const result = try bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        invite.commit,
+    );
+
+    switch (result) {
+        .commit_applied => |applied| {
+            var ca = applied;
+            defer ca.deinit();
+            try testing.expectEqual(
+                @as(u64, 2),
+                ca.new_epoch,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Bob's persisted state should now be at epoch 2.
+    var bob_bundle = try bob.loadBundle(io, group_id);
+    defer bob_bundle.deinit(testing.allocator);
+    try testing.expectEqual(
+        @as(u64, 2),
+        bob_bundle.group_state.epoch(),
+    );
+    // Group should have 3 members now.
+    try testing.expectEqual(
+        @as(u32, 3),
+        bob_bundle.group_state.leafCount(),
     );
 }
