@@ -1489,6 +1489,7 @@ pub fn Client(comptime P: type) type {
             group_id: []const u8,
             allocator: Allocator,
             confirmed: bool,
+            staged_epoch: u64,
 
             pub fn deinit(
                 self_h: *StagedCommitHandle,
@@ -1513,15 +1514,36 @@ pub fn Client(comptime P: type) type {
                 self_h.* = undefined;
             }
 
+            pub const ConfirmError = GroupStore.Error ||
+                error{
+                    BundleSerializeFailed,
+                    BundleDeserializeFailed,
+                    GroupNotFound,
+                    ConflictingCommit,
+                };
+
             /// Persist the staged state, advancing the
-            /// group to the new epoch.
+            /// group to the new epoch. Returns
+            /// `error.ConflictingCommit` if the group
+            /// epoch has changed since staging.
             pub fn confirm(
                 self_h: *StagedCommitHandle,
                 client: *Self,
                 io: Io,
-            ) (GroupStore.Error || error{
-                BundleSerializeFailed,
-            })!void {
+            ) ConfirmError!void {
+                const current = try client.loadBundle(
+                    io,
+                    self_h.group_id,
+                );
+                var bundle = current;
+                defer bundle.deinit(client.allocator);
+
+                if (bundle.group_state.epoch() !=
+                    self_h.staged_epoch)
+                {
+                    return error.ConflictingCommit;
+                }
+
                 try client.persistBundle(
                     io,
                     self_h.group_id,
@@ -1586,6 +1608,10 @@ pub fn Client(comptime P: type) type {
             ) catch return error.CommitFailed;
             errdefer secret_tree.deinit(allocator);
 
+            // Record epoch at staging time for conflict
+            // detection in confirm().
+            const staged_epoch = bundle.group_state.epoch();
+
             // Move ownership of staged state to handle.
             const gs = commit_output.group_state;
             commit_output.group_state = undefined;
@@ -1603,6 +1629,7 @@ pub fn Client(comptime P: type) type {
                 .group_id = owned_gid,
                 .allocator = allocator,
                 .confirmed = false,
+                .staged_epoch = staged_epoch,
             };
         }
 
@@ -4919,4 +4946,62 @@ test "Client: stageCommit discard leaves epoch unchanged" {
         group_id,
     );
     try testing.expectEqual(@as(u64, 0), epoch_after);
+}
+
+test "Client: stageCommit conflicting commit" {
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+
+    var alice = try makeTestClient(
+        &alice_group_store,
+        &alice_key_store,
+    );
+    defer alice.deinit();
+
+    const io = testIo();
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    // Stage a commit at epoch 0.
+    var handle = try alice.stageCommit(
+        testing.allocator,
+        io,
+        group_id,
+        &.{},
+    );
+    try testing.expect(handle.commit_data.len > 0);
+
+    // Meanwhile, advance the epoch with selfUpdate.
+    const update_bytes = try alice.selfUpdate(
+        testing.allocator,
+        io,
+        group_id,
+    );
+    testing.allocator.free(update_bytes);
+
+    // Epoch should now be 1.
+    const epoch_now = try alice.groupEpoch(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(@as(u64, 1), epoch_now);
+
+    // Confirming the stale staged commit should fail.
+    try testing.expectError(
+        error.ConflictingCommit,
+        handle.confirm(&alice, io),
+    );
+
+    // Cleanup: discard and deinit.
+    handle.discard();
+    handle.deinit();
+
+    // Epoch should still be 1 (staged commit rejected).
+    const epoch_final = try alice.groupEpoch(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(@as(u64, 1), epoch_final);
 }
