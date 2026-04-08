@@ -92,6 +92,7 @@ pub const ExternalJoinResult = client_types.ExternalJoinResult;
 pub const ReceivedMessage = client_types.ReceivedMessage;
 pub const ProcessingResult = client_types.ProcessingResult;
 pub const MemberInfo = client_types.MemberInfo;
+pub const freeMemberList = client_types.freeMemberList;
 
 /// Pending KeyPackage map (bounded, secureZero on removal).
 pub const PendingKeyPackageMap =

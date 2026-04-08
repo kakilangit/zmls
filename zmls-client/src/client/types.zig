@@ -88,6 +88,18 @@ pub const MemberInfo = struct {
     identity: []const u8,
 };
 
+/// Free a slice of MemberInfo returned by groupMembers.
+/// Each identity slice and the outer slice itself are freed.
+pub fn freeMemberList(
+    allocator: Allocator,
+    members: []MemberInfo,
+) void {
+    for (members) |m| {
+        allocator.free(m.identity);
+    }
+    allocator.free(members);
+}
+
 /// Result of joinGroup: group_id of the joined group.
 pub const JoinGroupResult = struct {
     group_id: []u8,

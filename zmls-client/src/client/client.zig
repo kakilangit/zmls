@@ -1405,6 +1405,148 @@ pub fn Client(comptime P: type) type {
             } };
         }
 
+        // ────────────────────────────────────────────────
+        // Group queries (read-only, no persist)
+        // ────────────────────────────────────────────────
+
+        const QueryError = GroupStore.Error || error{
+            ClientClosed,
+            GroupNotFound,
+            BundleDeserializeFailed,
+        };
+
+        /// Return the current epoch of the group.
+        pub fn groupEpoch(
+            self: *Self,
+            io: Io,
+            group_id: []const u8,
+        ) QueryError!u64 {
+            if (self.closed) return error.ClientClosed;
+            var bundle = try self.loadBundle(io, group_id);
+            defer bundle.deinit(self.allocator);
+            return bundle.group_state.epoch();
+        }
+
+        /// Return the cipher suite negotiated for the group.
+        pub fn groupCipherSuite(
+            self: *Self,
+            io: Io,
+            group_id: []const u8,
+        ) QueryError!zmls.types.CipherSuite {
+            if (self.closed) return error.ClientClosed;
+            var bundle = try self.loadBundle(io, group_id);
+            defer bundle.deinit(self.allocator);
+            return bundle.group_state.cipherSuite();
+        }
+
+        /// Return this client's leaf index in the group.
+        pub fn myLeafIndex(
+            self: *Self,
+            io: Io,
+            group_id: []const u8,
+        ) QueryError!u32 {
+            if (self.closed) return error.ClientClosed;
+            var bundle = try self.loadBundle(io, group_id);
+            defer bundle.deinit(self.allocator);
+            return bundle.group_state
+                .my_leaf_index.toU32();
+        }
+
+        /// Return the number of leaf slots in the group's
+        /// ratchet tree (includes blank slots from removed
+        /// members).
+        pub fn groupLeafCount(
+            self: *Self,
+            io: Io,
+            group_id: []const u8,
+        ) QueryError!u32 {
+            if (self.closed) return error.ClientClosed;
+            var bundle = try self.loadBundle(io, group_id);
+            defer bundle.deinit(self.allocator);
+            return bundle.group_state.leafCount();
+        }
+
+        const MembersError = QueryError || error{
+            OutOfMemory,
+            TreeAccessFailed,
+        };
+
+        /// Return information about all occupied leaf slots.
+        ///
+        /// The returned slice is allocated with `allocator`
+        /// and must be freed by the caller. Identity slices
+        /// within each `MemberInfo` are copies owned by the
+        /// same allocator.
+        pub fn groupMembers(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+        ) MembersError![]client_types.MemberInfo {
+            if (self.closed) return error.ClientClosed;
+            var bundle = try self.loadBundle(io, group_id);
+            defer bundle.deinit(self.allocator);
+            return collectMembers(
+                allocator,
+                &bundle.group_state,
+            );
+        }
+
+        /// Pure extraction of member info from a GroupState.
+        fn collectMembers(
+            allocator: Allocator,
+            gs: *const GS,
+        ) (error{ OutOfMemory, TreeAccessFailed })![]client_types.MemberInfo {
+            const leaf_count = gs.leafCount();
+
+            // First pass: count occupied leaves.
+            var occupied: u32 = 0;
+            var i: u32 = 0;
+            while (i < leaf_count) : (i += 1) {
+                const leaf = gs.tree.getLeaf(
+                    zmls.LeafIndex.fromU32(i),
+                ) catch return error.TreeAccessFailed;
+                if (leaf != null) occupied += 1;
+            }
+
+            const members = allocator.alloc(
+                client_types.MemberInfo,
+                occupied,
+            ) catch return error.OutOfMemory;
+            errdefer allocator.free(members);
+
+            // Second pass: fill with identity copies.
+            var slot: u32 = 0;
+            i = 0;
+            while (i < leaf_count) : (i += 1) {
+                const leaf = gs.tree.getLeaf(
+                    zmls.LeafIndex.fromU32(i),
+                ) catch return error.TreeAccessFailed;
+                if (leaf) |ln| {
+                    const identity = allocator.dupe(
+                        u8,
+                        ln.credential.payload.basic,
+                    ) catch {
+                        // Free previously copied identities.
+                        var j: u32 = 0;
+                        while (j < slot) : (j += 1) {
+                            allocator.free(
+                                members[j].identity,
+                            );
+                        }
+                        return error.OutOfMemory;
+                    };
+                    members[slot] = .{
+                        .leaf_index = i,
+                        .identity = identity,
+                    };
+                    slot += 1;
+                }
+            }
+
+            return members;
+        }
+
         fn peekWireFormat(
             wire_bytes: []const u8,
         ) error{TooShort}!zmls.types.WireFormat {
@@ -3112,7 +3254,7 @@ test "Client: processIncoming caches received proposal" {
         .proposal_cached => |cached| {
             // ProposalType.remove = 3
             try testing.expectEqual(
-                @as(u8, 3),
+                @as(u16, 3),
                 cached.proposal_type,
             );
             // Sender is Alice (leaf 0).
@@ -3128,5 +3270,252 @@ test "Client: processIncoming caches received proposal" {
     try testing.expectEqual(
         @as(u32, 1),
         bob.proposal_store.count,
+    );
+}
+
+test "Client: groupEpoch returns current epoch" {
+    const io = testIo();
+
+    var group_store = MemGS(8).init();
+    defer group_store.deinit();
+    var key_store = MemKS(TestP, 8).init();
+    defer key_store.deinit();
+    var alice = try makeTestClient(
+        &group_store,
+        &key_store,
+    );
+    defer alice.deinit();
+
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    // Freshly created group is at epoch 0.
+    const epoch0 = try alice.groupEpoch(io, group_id);
+    try testing.expectEqual(@as(u64, 0), epoch0);
+
+    // selfUpdate advances epoch to 1.
+    const commit = try alice.selfUpdate(
+        testing.allocator,
+        io,
+        group_id,
+    );
+    defer testing.allocator.free(commit);
+
+    const epoch1 = try alice.groupEpoch(io, group_id);
+    try testing.expectEqual(@as(u64, 1), epoch1);
+}
+
+test "Client: groupCipherSuite returns negotiated suite" {
+    const io = testIo();
+
+    var group_store = MemGS(8).init();
+    defer group_store.deinit();
+    var key_store = MemKS(TestP, 8).init();
+    defer key_store.deinit();
+    var alice = try makeTestClient(
+        &group_store,
+        &key_store,
+    );
+    defer alice.deinit();
+
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    const suite = try alice.groupCipherSuite(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(
+        zmls.types.CipherSuite
+            .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        suite,
+    );
+}
+
+test "Client: myLeafIndex returns own position" {
+    const io = testIo();
+
+    var group_store = MemGS(8).init();
+    defer group_store.deinit();
+    var key_store = MemKS(TestP, 8).init();
+    defer key_store.deinit();
+    var alice = try makeTestClient(
+        &group_store,
+        &key_store,
+    );
+    defer alice.deinit();
+
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    // Creator is always leaf 0.
+    const my_leaf = try alice.myLeafIndex(io, group_id);
+    try testing.expectEqual(@as(u32, 0), my_leaf);
+}
+
+test "Client: groupLeafCount returns tree size" {
+    const io = testIo();
+
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+    var alice = try makeTestClient(
+        &alice_group_store,
+        &alice_key_store,
+    );
+    defer alice.deinit();
+
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    // Single-member group has 1 leaf.
+    const count1 = try alice.groupLeafCount(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(@as(u32, 1), count1);
+
+    // Add Bob — leaf count grows to 2.
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+    var bob = try makeTestClientBob(
+        &bob_group_store,
+        &bob_key_store,
+    );
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        group_id,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    const count2 = try alice.groupLeafCount(
+        io,
+        group_id,
+    );
+    try testing.expectEqual(@as(u32, 2), count2);
+}
+
+test "Client: groupMembers returns occupied leaves" {
+    const io = testIo();
+
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+    var alice = try makeTestClient(
+        &alice_group_store,
+        &alice_key_store,
+    );
+    defer alice.deinit();
+
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    // Single-member group: just Alice.
+    const members1 = try alice.groupMembers(
+        testing.allocator,
+        io,
+        group_id,
+    );
+    defer client_types.freeMemberList(
+        testing.allocator,
+        members1,
+    );
+
+    try testing.expectEqual(@as(usize, 1), members1.len);
+    try testing.expectEqual(@as(u32, 0), members1[0].leaf_index);
+    try testing.expectEqualSlices(
+        u8,
+        "alice",
+        members1[0].identity,
+    );
+
+    // Add Bob.
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+    var bob = try makeTestClientBob(
+        &bob_group_store,
+        &bob_key_store,
+    );
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        group_id,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    // Two members: Alice and Bob.
+    const members2 = try alice.groupMembers(
+        testing.allocator,
+        io,
+        group_id,
+    );
+    defer client_types.freeMemberList(
+        testing.allocator,
+        members2,
+    );
+
+    try testing.expectEqual(@as(usize, 2), members2.len);
+    try testing.expectEqual(
+        @as(u32, 0),
+        members2[0].leaf_index,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        "alice",
+        members2[0].identity,
+    );
+    try testing.expectEqual(
+        @as(u32, 1),
+        members2[1].leaf_index,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        "bob",
+        members2[1].identity,
+    );
+}
+
+test "Client: groupEpoch fails for unknown group" {
+    const io = testIo();
+
+    var group_store = MemGS(8).init();
+    defer group_store.deinit();
+    var key_store = MemKS(TestP, 8).init();
+    defer key_store.deinit();
+    var alice = try makeTestClient(
+        &group_store,
+        &key_store,
+    );
+    defer alice.deinit();
+
+    const result = alice.groupEpoch(io, "nonexistent");
+    try testing.expectError(
+        error.GroupNotFound,
+        result,
     );
 }
