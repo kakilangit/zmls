@@ -29,7 +29,7 @@ const GroupError = errors.GroupError;
 const ValidationError = errors.ValidationError;
 
 /// Maximum pending proposals per epoch.
-const max_pending: u32 = 256;
+pub const max_pending: u32 = 256;
 
 /// A cached proposal with its sender and computed reference.
 fn CacheEntry(comptime nh: u32) type {

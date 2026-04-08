@@ -554,6 +554,168 @@ pub fn SecretTree(comptime P: type) type {
             self.leaf_count = 0;
             self.* = undefined;
         }
+
+        // -- Serialization -------------------------------------------
+
+        /// Byte size of one ratchet state entry: secret + generation.
+        const ratchet_entry_size: u32 = P.nh + 4;
+
+        /// Byte size of the serialized form.
+        pub fn serializedSize(self: *const Self) u32 {
+            // header: leaf_count(4) + max_forward_ratchet(4)
+            // per leaf: 2 * ratchet_entry_size (handshake + app)
+            return 8 + self.leaf_count * 2 * ratchet_entry_size;
+        }
+
+        /// Serialize the secret tree state to a byte buffer.
+        ///
+        /// Format:
+        ///   leaf_count: u32 (big-endian)
+        ///   max_forward_ratchet: u32 (big-endian)
+        ///   For each leaf (0..leaf_count):
+        ///     handshake_secret: [nh]u8
+        ///     handshake_generation: u32 (big-endian)
+        ///     application_secret: [nh]u8
+        ///     application_generation: u32 (big-endian)
+        ///
+        /// Retained keys are NOT serialized (ephemeral
+        /// optimization only).
+        pub fn serialize(
+            self: *const Self,
+            allocator: std.mem.Allocator,
+        ) error{OutOfMemory}![]u8 {
+            const size = self.serializedSize();
+            const buf = try allocator.alloc(u8, size);
+            errdefer allocator.free(buf);
+
+            var pos: u32 = 0;
+            std.mem.writeInt(
+                u32,
+                buf[pos..][0..4],
+                self.leaf_count,
+                .big,
+            );
+            pos += 4;
+            std.mem.writeInt(
+                u32,
+                buf[pos..][0..4],
+                self.max_forward_ratchet,
+                .big,
+            );
+            pos += 4;
+
+            var i: u32 = 0;
+            while (i < self.leaf_count) : (i += 1) {
+                // Handshake
+                @memcpy(
+                    buf[pos..][0..P.nh],
+                    &self.handshake[i].secret,
+                );
+                pos += P.nh;
+                std.mem.writeInt(
+                    u32,
+                    buf[pos..][0..4],
+                    self.handshake[i].generation,
+                    .big,
+                );
+                pos += 4;
+
+                // Application
+                @memcpy(
+                    buf[pos..][0..P.nh],
+                    &self.application[i].secret,
+                );
+                pos += P.nh;
+                std.mem.writeInt(
+                    u32,
+                    buf[pos..][0..4],
+                    self.application[i].generation,
+                    .big,
+                );
+                pos += 4;
+            }
+
+            return buf;
+        }
+
+        /// Deserialize a secret tree from bytes produced by
+        /// `serialize`.
+        ///
+        /// Returns error if the data is truncated or the
+        /// leaf_count is zero.
+        pub fn deserialize(
+            allocator: std.mem.Allocator,
+            data: []const u8,
+        ) error{ Truncated, InvalidGroupState, OutOfMemory }!Self {
+            if (data.len < 8) return error.Truncated;
+
+            const leaf_count = std.mem.readInt(
+                u32,
+                data[0..4],
+                .big,
+            );
+            const max_fwd = std.mem.readInt(
+                u32,
+                data[4..8],
+                .big,
+            );
+
+            if (leaf_count == 0) return error.InvalidGroupState;
+
+            const expected: u64 =
+                8 + @as(u64, leaf_count) * 2 * ratchet_entry_size;
+            if (data.len < expected)
+                return error.Truncated;
+
+            const hs = try allocator.alloc(
+                RatchetState(P),
+                leaf_count,
+            );
+            errdefer allocator.free(hs);
+            const app = try allocator.alloc(
+                RatchetState(P),
+                leaf_count,
+            );
+            errdefer allocator.free(app);
+
+            var pos: u32 = 8;
+            var i: u32 = 0;
+            while (i < leaf_count) : (i += 1) {
+                @memcpy(
+                    &hs[i].secret,
+                    data[pos..][0..P.nh],
+                );
+                pos += P.nh;
+                hs[i].generation = std.mem.readInt(
+                    u32,
+                    data[pos..][0..4],
+                    .big,
+                );
+                pos += 4;
+
+                @memcpy(
+                    &app[i].secret,
+                    data[pos..][0..P.nh],
+                );
+                pos += P.nh;
+                app[i].generation = std.mem.readInt(
+                    u32,
+                    data[pos..][0..4],
+                    .big,
+                );
+                pos += 4;
+            }
+
+            return .{
+                .handshake = hs,
+                .application = app,
+                .leaf_count = leaf_count,
+                .max_forward_ratchet = max_fwd,
+                .retained = &.{},
+                .retained_cursor = 0,
+                .retain_capacity = 0,
+            };
+        }
     };
 }
 
@@ -965,4 +1127,91 @@ test "retained key matches sequential derivation" {
         &kn3_ret.nonce,
     );
     try testing.expectEqual(kn3_seq.generation, kn3_ret.generation);
+}
+
+test "serialize/deserialize round-trip preserves state" {
+    const enc_secret = [_]u8{0x42} ** Default.nh;
+    var st = try SecretTree(Default).init(
+        testing.allocator,
+        &enc_secret,
+        4,
+    );
+    defer st.deinit(testing.allocator);
+
+    // Consume some keys to advance generations.
+    _ = try st.consumeKey(0, 1); // app gen 0 for leaf 0
+    _ = try st.consumeKey(0, 1); // app gen 1 for leaf 0
+    _ = try st.consumeKey(1, 0); // hs gen 0 for leaf 1
+
+    // Serialize.
+    const data = try st.serialize(testing.allocator);
+    defer testing.allocator.free(data);
+
+    // Deserialize.
+    var st2 = try SecretTree(Default).deserialize(
+        testing.allocator,
+        data,
+    );
+    defer st2.deinit(testing.allocator);
+
+    // Verify leaf_count and max_forward_ratchet.
+    try testing.expectEqual(st.leaf_count, st2.leaf_count);
+    try testing.expectEqual(
+        st.max_forward_ratchet,
+        st2.max_forward_ratchet,
+    );
+
+    // Verify per-leaf state matches.
+    var i: u32 = 0;
+    while (i < st.leaf_count) : (i += 1) {
+        try testing.expectEqualSlices(
+            u8,
+            &st.handshake[i].secret,
+            &st2.handshake[i].secret,
+        );
+        try testing.expectEqual(
+            st.handshake[i].generation,
+            st2.handshake[i].generation,
+        );
+        try testing.expectEqualSlices(
+            u8,
+            &st.application[i].secret,
+            &st2.application[i].secret,
+        );
+        try testing.expectEqual(
+            st.application[i].generation,
+            st2.application[i].generation,
+        );
+    }
+
+    // Verify the deserialized tree produces the same keys.
+    const kn_orig = try st.consumeKey(0, 1);
+    const kn_deser = try st2.consumeKey(0, 1);
+    try testing.expectEqualSlices(
+        u8,
+        &kn_orig.key,
+        &kn_deser.key,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        &kn_orig.nonce,
+        &kn_deser.nonce,
+    );
+    try testing.expectEqual(
+        kn_orig.generation,
+        kn_deser.generation,
+    );
+}
+
+test "deserialize rejects truncated data" {
+    const ST = SecretTree(Default);
+    const result = ST.deserialize(testing.allocator, &[_]u8{0} ** 4);
+    try testing.expectError(error.Truncated, result);
+}
+
+test "deserialize rejects zero leaf_count" {
+    const ST = SecretTree(Default);
+    const data = [_]u8{0} ** 8; // leaf_count=0, max_fwd=0
+    const result = ST.deserialize(testing.allocator, &data);
+    try testing.expectError(error.InvalidGroupState, result);
 }

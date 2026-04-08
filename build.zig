@@ -76,19 +76,6 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_fuzz.step);
     }
 
-    // CLI example executable.
-    const cli_mod = b.createModule(.{
-        .root_source_file = b.path("examples/cli/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    cli_mod.addImport("zmls", mod);
-    const cli_exe = b.addExecutable(.{
-        .name = "zmls-cli",
-        .root_module = cli_mod,
-    });
-    b.installArtifact(cli_exe);
-
     // Benchmark executable.
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("benchmarks/bench.zig"),

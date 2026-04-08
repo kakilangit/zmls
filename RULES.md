@@ -89,15 +89,30 @@ Design goals, in order: **correct, simple, foolproof, fast**.
   error. Never assert on external input.
 - Prefer specific error values (`error.InvalidLeafIndex`) over generic ones
   (`error.InvalidArgument`).
+- **Never use a catch-all error for unrelated failure modes.** If a signing failure
+  and an encoding failure return the same error, the caller cannot distinguish them.
+  Each distinct failure cause deserves its own error value. When wrapping a lower-level
+  error set, map each variant to a meaningful client-level error rather than collapsing
+  them into one.
 
 ## 7. Functions
 
 - Hard limit: **70 lines per function**. If it does not fit, split it.
 - Good function shape: few parameters, simple return type, dense logic in the body.
+- **One function does one thing.** A function either computes a value or performs
+  an effect, not both. If a function loads state, transforms it, and persists
+  the result, split it into three.
+- **Separate pure computation from I/O.** Functions that encrypt, decrypt, serialize,
+  or validate should take immutable inputs and return a value. They must not load
+  from storage, persist state, or generate random bytes. Orchestration functions
+  (which combine I/O with computation) call the pure functions and manage state.
 - Push `if`s up and `for`s down. Parent functions handle branching; leaf functions are
   pure computation.
 - Centralize state mutation. Prefer helpers that compute a value over helpers that
   mutate state directly.
+- **Avoid side effects in helper functions.** A helper that "also mutates the bundle"
+  or "also persists state" is doing two things. Return the new state and let the
+  caller decide what to do with it.
 - For structs larger than 16 bytes, pass as `*const T` to avoid accidental copies.
 - Construct large structs in-place via an out-pointer `init` pattern:
 

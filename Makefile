@@ -1,7 +1,9 @@
-.PHONY: all fmt check build test test-cli bench bench-filter fetch-vectors clean
+.PHONY: all fmt check build test test-cli bench bench-filter fetch-vectors clean \
+       fmt-client check-client build-client test-client clean-client
 
 ZIG := zig
 SRC_DIR := src
+CLIENT_DIR := zmls-client
 BENCH_FILTER ?=
 
 # Pinned commit for RFC 9420 test vectors.
@@ -29,16 +31,16 @@ TV_FILES := \
 # Default target.
 all: fmt check build test
 
-# Format all Zig source files.
-fmt:
+# Format all Zig source files (core + client).
+fmt: fmt-client
 	$(ZIG) fmt $(SRC_DIR)
 
 # Check formatting without modifying files. Useful in CI.
-check:
+check: check-client
 	$(ZIG) fmt --check $(SRC_DIR)
 
 # Build the library in debug mode.
-build:
+build: build-client
 	$(ZIG) build
 
 # Build the library in release-safe mode.
@@ -60,7 +62,7 @@ fetch-vectors:
 	done
 
 # Run all tests (fetches test vectors first if missing).
-test: fetch-vectors
+test: fetch-vectors test-client
 	$(ZIG) build test
 
 # Run tests with a name filter. Usage: make test-filter TEST_FILTER="tree_math"
@@ -71,9 +73,9 @@ test-filter: fetch-vectors
 test-verbose: fetch-vectors
 	$(ZIG) build test -- --verbose
 
-# Run CLI end-to-end tests (builds CLI first).
-test-cli: build
-	examples/cli/test_e2e.sh "$(CURDIR)/zig-out/bin/zmls-cli"
+# Run CLI end-to-end tests (via zmls-client).
+test-cli:
+	@$(MAKE) -C $(CLIENT_DIR) test-cli
 
 # Run all benchmarks (ReleaseFast for meaningful results).
 bench:
@@ -84,5 +86,22 @@ bench-filter:
 	$(ZIG) build bench -Doptimize=ReleaseFast -- $(BENCH_FILTER)
 
 # Remove build artifacts.
-clean:
+clean: clean-client
 	rm -rf zig-out .zig-cache
+
+# ── zmls-client ─────────────────────────────────────────────
+
+fmt-client:
+	@$(MAKE) -C $(CLIENT_DIR) fmt
+
+check-client:
+	@$(MAKE) -C $(CLIENT_DIR) check
+
+test-client:
+	@$(MAKE) -C $(CLIENT_DIR) test
+
+build-client:
+	@$(MAKE) -C $(CLIENT_DIR) build
+
+clean-client:
+	@$(MAKE) -C $(CLIENT_DIR) clean

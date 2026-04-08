@@ -386,6 +386,98 @@ leaf index.
 
 ---
 
+## zmls-client -- Client & Delivery Service Layer
+
+A high-level client library on top of the zmls protocol core.
+Lives in `zmls-client/` as its own Zig package within the
+monorepo. Hexagonal architecture: applications supply adapters
+for storage, transport, and directory ports.
+
+### Design Principles
+
+1. **Pure computation separated from I/O.** Functions that
+   encrypt, decrypt, serialize, or process commits are pure --
+   they take immutable inputs and return values. No storage
+   access, no random byte generation inside computation
+   functions.
+
+2. **Orchestration at the edges.** Only the top-level `Client`
+   methods perform I/O (load state, persist state, generate
+   randomness via `Io`). They delegate all real work to pure
+   computation modules.
+
+3. **One function does one thing.** A function either computes
+   a value or performs an effect, never both. `sendMessage`
+   orchestrates: load bundle, call encrypt, persist bundle,
+   return bytes. `encryptApplicationMessage` is pure: takes
+   group state + secret tree state + plaintext, returns
+   ciphertext + consumed key metadata.
+
+4. **Specific errors.** Each failure mode has its own error
+   value. A signing failure is not the same as an encoding
+   failure. Callers can distinguish and handle them.
+
+5. **`Io` passed by value, never stored.** Aligns with Zig
+   0.16's `std.Io` structured concurrency model. Every
+   function that needs I/O receives `io: Io` as a parameter.
+
+### Module Structure
+
+```
+zmls-client/src/
+├── root.zig                   Re-exports public surface
+├── client/
+│   ├── client.zig             Client(P) -- thin orchestrator
+│   ├── types.zig              Result types, option types
+│   ├── pending.zig            PendingKeyPackageMap(P, N)
+│   ├── group_bundle.zig       GroupBundle, serialize, deserialize
+│   ├── message_protect.zig    encrypt/decrypt app messages (pure)
+│   └── commit_process.zig     process incoming commits (pure)
+├── delivery_service/
+│   ├── delivery_service.zig   DeliveryService struct
+│   └── types.zig              DS options, errors
+├── ports/                     Port interfaces (vtable-based)
+│   ├── group_store.zig
+│   ├── key_store.zig
+│   ├── transport.zig
+│   ├── group_directory.zig
+│   ├── kp_directory.zig
+│   └── gi_directory.zig
+├── adapters/                  In-memory reference adapters
+│   ├── memory_group_store.zig
+│   ├── memory_key_store.zig
+│   ├── loopback_transport.zig
+│   ├── memory_group_directory.zig
+│   ├── memory_kp_directory.zig
+│   └── memory_gi_directory.zig
+└── wire/
+    └── envelope.zig           Wire framing (length-prefixed)
+```
+
+### Client(P) as Orchestrator
+
+`Client(P)` is a facade (not a god object). It holds identity,
+ports, and configuration but delegates all computation:
+
+- **Group creation**: calls `zmls.createGroup`, wraps in bundle,
+  persists via `GroupStore`.
+- **Key package generation**: calls pure builder, stores pending
+  keys.
+- **Invite/join**: calls core `commit`/`joinViaWelcome`, wraps
+  results, persists.
+- **Send message**: loads bundle, calls pure `encryptApplicationMessage`,
+  persists updated bundle, returns wire bytes.
+- **Receive message**: loads bundle, calls pure `decryptApplicationMessage`,
+  persists updated bundle, returns plaintext.
+- **Process incoming**: loads bundle, dispatches by wire format to
+  pure `decryptApplicationMessage` or `processReceivedCommit`,
+  persists updated state, returns `ProcessingResult`.
+
+Each public method is a short orchestration function (<40 lines)
+that follows load-compute-persist.
+
+---
+
 ## Cross-Cutting Concerns
 
 ### Memory Management
