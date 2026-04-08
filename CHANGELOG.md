@@ -2,13 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.1.1] - 2026-04-08
 
 ### Added
 
-- **zmls-client** -- Client and Delivery Service framework. Hexagonal
-  port interfaces, in-memory adapters, Client(P), DeliveryService,
-  and wire protocol envelope framing.
+- **CI workflow** -- added `make test-cli` step to GitHub Actions.
+- **README** -- added Quick Start code example, Group Lifecycle,
+  Custom Cipher Suite section, cipher suites table, test coverage
+  table, and ASCII architecture diagram.
+- **Makefile targets** -- `build-client`, `test-cli`, `fmt-client`,
+  `check-client`, `test-client`, `clean-client` for zmls-client
+  integration.
+
+### Removed
+
+- **Root CLI** -- deleted `examples/cli/main.zig` and
+  `examples/cli/test_e2e.sh` (superseded by zmls-client CLI).
+- **Root CLI build target** -- removed CLI executable target from
+  root `build.zig`.
 
 ## [0.1.0] - 2026-04-07
 
@@ -25,7 +36,7 @@ Security).
   0x0004 (P-256/ChaCha20-Poly1305), 0x0006 (P-384/AES-256-GCM).
 - **Hexagonal architecture** -- core library has zero I/O dependency.
   CryptoProvider (comptime), CredentialValidator (runtime), and
-  KeyStore (runtime) ports.
+  PskLookup (runtime) ports.
 - **TLS codec** -- slice-based encode/decode with varint support.
 - **Ratchet tree** -- array-based binary tree with add/remove, tree
   hash, parent hash, UpdatePath generation and application.
@@ -33,8 +44,8 @@ Security).
   chaining, transcript hashes, MLS exporter, epoch key ring.
 - **Message framing** -- PublicMessage and PrivateMessage with AEAD
   encryption, sender data encryption, membership tags.
-- **Interop tests** -- 13 tests against official RFC 9420 test vectors
-  (fetched from GitHub at pinned commit).
+- **Interop tests** -- 16 categories against official RFC 9420 test
+  vectors (fetched from GitHub at pinned commit).
 - **Integration tests** -- 7 end-to-end protocol flow tests.
 - **Fuzz targets** -- codec, tree, proposals, and message decoding.
 - **CLI example** -- zmls-cli with init, key-package, add, remove,
