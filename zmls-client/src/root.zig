@@ -97,6 +97,18 @@ pub const MemberInfo = client_types.MemberInfo;
 pub const PendingKeyPackageMap =
     @import("client/pending.zig").PendingKeyPackageMap;
 
+/// GroupBundle — GroupState + SecretTree serialization.
+pub const GroupBundle =
+    @import("client/group_bundle.zig").GroupBundle;
+
+/// MessageProtect — pure encrypt/decrypt for app messages.
+pub const MessageProtect =
+    @import("client/message_protect.zig").MessageProtect;
+
+/// CommitProcess — pure processing of incoming commits.
+pub const CommitProcess =
+    @import("client/commit_process.zig").CommitProcess;
+
 // ── Delivery Service ───────────────────────────────────────
 
 /// Delivery service (dumb relay).
