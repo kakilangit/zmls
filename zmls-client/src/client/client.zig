@@ -147,6 +147,7 @@ pub fn Client(comptime P: type) type {
             EncodingFailed,
             KeyGenerationFailed,
             BundleSerializeFailed,
+            CredentialValidationFailed,
         };
 
         pub const JoinError = GroupStore.Error ||
@@ -156,10 +157,11 @@ pub fn Client(comptime P: type) type {
             NoPendingKeyPackage,
             WelcomeProcessingFailed,
             BundleSerializeFailed,
+            CredentialValidationFailed,
         };
 
         pub const MembershipError = GroupStore.Error ||
-            Allocator.Error || error{
+            KS.Error || Allocator.Error || error{
             ClientClosed,
             GroupNotFound,
             BundleDeserializeFailed,
@@ -193,6 +195,7 @@ pub fn Client(comptime P: type) type {
             WireDecodeFailed,
             UnsupportedWireFormat,
             ReceiverKeyNotFound,
+            CredentialValidationFailed,
         } || Protect.DecryptError ||
             CommitProc.ProcessError;
 
@@ -225,6 +228,7 @@ pub fn Client(comptime P: type) type {
             KeyGenerationFailed,
             BundleSerializeFailed,
             EncodingFailed,
+            CredentialValidationFailed,
         };
 
         pub const StageCommitError = GroupStore.Error ||
@@ -590,6 +594,11 @@ pub fn Client(comptime P: type) type {
             var key_package = decoded.value;
             defer key_package.deinit(allocator);
 
+            // Validate new member's credential.
+            self.credential_validator.validate(
+                &key_package.leaf_node.credential,
+            ) catch return error.CredentialValidationFailed;
+
             var bundle = try self.loadBundle(
                 io,
                 group_id,
@@ -823,6 +832,15 @@ pub fn Client(comptime P: type) type {
                 },
             ) catch return error.WelcomeProcessingFailed;
 
+            // Validate all leaves' credentials.
+            validateTreeCredentials(
+                self,
+                &group_state.tree,
+            ) catch {
+                group_state.deinit();
+                return error.CredentialValidationFailed;
+            };
+
             const group_id = group_state.groupId();
             const owned_group_id = try allocator.dupe(
                 u8,
@@ -876,16 +894,40 @@ pub fn Client(comptime P: type) type {
             target_leaf: u32,
         ) MembershipError![]u8 {
             if (self.closed) return error.ClientClosed;
-            return self.commitWithProposals(
+
+            var bundle = try self.loadBundle(
+                io,
+                group_id,
+            );
+            defer bundle.deinit(self.allocator);
+
+            const proposals = &.{zmls.Proposal{
+                .tag = .remove,
+                .payload = .{ .remove = .{
+                    .removed = target_leaf,
+                } },
+            }};
+
+            // Remove in a multi-member group requires an
+            // UpdatePath per RFC 9420 Section 12.4.
+            // When the tree has <= 2 leaves, removing one
+            // leaves a single-leaf tree with no path nodes,
+            // so skip path generation.
+            if (bundle.group_state.tree.leaf_count <= 2) {
+                return self.commitWithProposals(
+                    allocator,
+                    io,
+                    group_id,
+                    proposals,
+                );
+            }
+
+            return self.commitWithPath(
                 allocator,
                 io,
                 group_id,
-                &.{zmls.Proposal{
-                    .tag = .remove,
-                    .payload = .{ .remove = .{
-                        .removed = target_leaf,
-                    } },
-                }},
+                proposals,
+                &bundle,
             );
         }
 
@@ -1172,6 +1214,12 @@ pub fn Client(comptime P: type) type {
             // of ec, replacing ec.tree with a dummy. We
             // must free that dummy when ec goes out of scope.
             defer ec.tree.deinit();
+
+            // Validate existing members' credentials.
+            validateTreeCredentials(
+                self,
+                &parsed.tree,
+            ) catch return error.CredentialValidationFailed;
 
             return self.persistExternalJoinResult(
                 allocator,
@@ -1803,6 +1851,18 @@ pub fn Client(comptime P: type) type {
                 &secret_tree,
             );
 
+            // Store the new leaf encryption key so future
+            // processPublicCommit calls can find it.
+            const new_leaf_idx = @intFromEnum(
+                commit_output.group_state.my_leaf_index,
+            );
+            try self.key_store.storeEncryptionKey(
+                io,
+                group_id,
+                new_leaf_idx,
+                &enc_kp.sk,
+            );
+
             return wire_bytes;
         }
 
@@ -2067,6 +2127,16 @@ pub fn Client(comptime P: type) type {
                 &receiver_secret_key,
                 &receiver_public_key,
             );
+
+            // Validate credentials of all leaves in the
+            // resulting tree (catches newly added members).
+            validateTreeCredentials(
+                self,
+                &result.group_state.tree,
+            ) catch {
+                result.deinit();
+                return error.CredentialValidationFailed;
+            };
 
             var secret_tree = initSecretTree(
                 allocator,
@@ -2547,6 +2617,27 @@ pub fn Client(comptime P: type) type {
 
             result.len = pos;
             return result;
+        }
+
+        fn validateTreeCredentials(
+            self: *const Self,
+            tree: *const zmls.RatchetTree,
+        ) error{CredentialValidationFailed}!void {
+            var i: u32 = 0;
+            while (i < tree.leaf_count) : (i += 1) {
+                const li = @as(
+                    zmls.LeafIndex,
+                    @enumFromInt(i),
+                );
+                const leaf = tree.getLeaf(
+                    li,
+                ) catch continue;
+                const leaf_node = leaf orelse continue;
+                self.credential_validator.validate(
+                    &leaf_node.credential,
+                ) catch
+                    return error.CredentialValidationFailed;
+            }
         }
 
         fn getLeafEncryptionKey(
@@ -5004,4 +5095,97 @@ test "Client: stageCommit conflicting commit" {
         group_id,
     );
     try testing.expectEqual(@as(u64, 1), epoch_final);
+}
+
+test "Client: credential validator rejects Add" {
+    const io = testIo();
+    const gpa = testing.allocator;
+
+    const CV = zmls.credential_validator;
+
+    // Validator that rejects identities starting with
+    // "evil".
+    const RejectEvil = struct {
+        const instance: @This() = .{};
+
+        fn rejectEvil(
+            _: *const anyopaque,
+            cred: *const Credential,
+        ) zmls.errors.ValidationError!void {
+            const identity = switch (cred.tag) {
+                .basic => cred.payload.basic,
+                else => return,
+            };
+            if (identity.len >= 4 and
+                std.mem.eql(
+                    u8,
+                    identity[0..4],
+                    "evil",
+                )) return error.InvalidCredential;
+        }
+
+        pub fn validator() CV.CredentialValidator {
+            return .{
+                .context = @ptrCast(&instance),
+                .validate_fn = &rejectEvil,
+            };
+        }
+    };
+
+    var gs = MemGS(1).init();
+    defer gs.deinit();
+    var ks = MemKS(TestP, 1).init();
+    defer ks.deinit();
+
+    var alice = try Client(TestP).init(
+        gpa,
+        "alice",
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &[_]u8{0x01} ** 32,
+        .{
+            .group_store = gs.groupStore(),
+            .key_store = ks.keyStore(),
+            .credential_validator = RejectEvil
+                .validator(),
+        },
+    );
+    defer alice.deinit();
+
+    const group_id = try alice.createGroup(io);
+    defer gpa.free(group_id);
+
+    // Create Bob with "evil" identity.
+    var gs2 = MemGS(1).init();
+    defer gs2.deinit();
+    var ks2 = MemKS(TestP, 1).init();
+    defer ks2.deinit();
+
+    var bob = try Client(TestP).init(
+        gpa,
+        "evil-bob",
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &[_]u8{0x02} ** 32,
+        .{
+            .group_store = gs2.groupStore(),
+            .key_store = ks2.keyStore(),
+            .credential_validator = zmls
+                .credential_validator
+                .AcceptAllValidator.validator(),
+        },
+    );
+    defer bob.deinit();
+
+    const kp_result = try bob.freshKeyPackage(gpa, io);
+    defer gpa.free(kp_result.data);
+
+    // inviteMember should fail due to credential.
+    try testing.expectError(
+        error.CredentialValidationFailed,
+        alice.inviteMember(
+            gpa,
+            io,
+            group_id,
+            kp_result.data,
+        ),
+    );
 }
