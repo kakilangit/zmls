@@ -25,6 +25,7 @@ const client_types = @import("types.zig");
 pub const WireFormatPolicy = client_types.WireFormatPolicy;
 pub const InviteResult = client_types.InviteResult;
 pub const JoinGroupResult = client_types.JoinGroupResult;
+pub const ReceivedMessage = client_types.ReceivedMessage;
 
 /// Maximum pending KeyPackages a Client can hold.
 const max_pending_kps: u32 = 64;
@@ -42,10 +43,23 @@ pub fn Client(comptime P: type) type {
         const GS = zmls.GroupState(P);
         const Ser = zmls.serializer.Serializer(P);
         const KS = key_store_mod.KeyStore(P);
+        const ST = zmls.SecretTree(P);
         const PendingMap = pending_mod.PendingKeyPackageMap(
             P,
             max_pending_kps,
         );
+
+        /// A GroupState paired with its SecretTree.
+        const GroupBundle = struct {
+            gs: GS,
+            st: ST,
+
+            fn deinit(self: *GroupBundle, allocator: Allocator) void {
+                self.gs.deinit();
+                self.st.deinit(allocator);
+                self.* = undefined;
+            }
+        };
 
         // ── Identity (immutable after init) ────────────
         identity: []const u8,
@@ -157,15 +171,16 @@ pub fn Client(comptime P: type) type {
         }
 
         // ────────────────────────────────────────────────
-        // Internal: load / persist GroupState
+        // Internal: load / persist GroupState + SecretTree
         // ────────────────────────────────────────────────
 
-        /// Load and deserialize a GroupState from the store.
-        fn loadGroup(
+        /// Load and deserialize a GroupBundle (GroupState +
+        /// SecretTree) from the store.
+        fn loadBundle(
             self: *Self,
             io: Io,
             group_id: []const u8,
-        ) Error!GS {
+        ) Error!GroupBundle {
             const blob = (try self.group_store.load(
                 self.allocator,
                 io,
@@ -175,28 +190,145 @@ pub fn Client(comptime P: type) type {
                 secureZeroSlice(blob);
                 self.allocator.free(blob);
             }
-            return Ser.deserialize(
+            return deserializeBundle(
                 self.allocator,
                 blob,
             ) catch return error.SerializationFailed;
         }
 
-        /// Serialize and persist a GroupState to the store.
-        fn persistGroup(
+        /// Load only the GroupState (legacy compat, used by
+        /// tests and methods that don't need SecretTree).
+        fn loadGroup(
+            self: *Self,
+            io: Io,
+            group_id: []const u8,
+        ) Error!GS {
+            var bundle = try self.loadBundle(io, group_id);
+            bundle.st.deinit(self.allocator);
+            return bundle.gs;
+        }
+
+        /// Serialize and persist a GroupBundle.
+        fn persistBundle(
             self: *Self,
             io: Io,
             group_id: []const u8,
             gs: *const GS,
+            st: *const ST,
         ) Error!void {
-            const blob = Ser.serialize(
+            const blob = serializeBundle(
                 self.allocator,
                 gs,
+                st,
             ) catch return error.SerializationFailed;
             defer {
                 secureZeroSlice(blob);
                 self.allocator.free(blob);
             }
             try self.group_store.save(io, group_id, blob);
+        }
+
+        /// Serialize GroupState + SecretTree into a single
+        /// blob.
+        ///
+        /// Format:
+        ///   [4 bytes: GS blob length, big-endian u32]
+        ///   [GS blob]
+        ///   [SecretTree blob]
+        fn serializeBundle(
+            allocator: Allocator,
+            gs: *const GS,
+            st: *const ST,
+        ) error{ OutOfMemory, SerializationFailed }![]u8 {
+            const gs_data = Ser.serialize(
+                allocator,
+                gs,
+            ) catch return error.SerializationFailed;
+            defer {
+                secureZeroSlice(gs_data);
+                allocator.free(gs_data);
+            }
+
+            const st_data = st.serialize(
+                allocator,
+            ) catch return error.OutOfMemory;
+            defer {
+                secureZeroSlice(st_data);
+                allocator.free(st_data);
+            }
+
+            if (gs_data.len > std.math.maxInt(u32))
+                return error.SerializationFailed;
+
+            const total = 4 + gs_data.len + st_data.len;
+            const buf = allocator.alloc(
+                u8,
+                total,
+            ) catch return error.OutOfMemory;
+            errdefer allocator.free(buf);
+
+            std.mem.writeInt(
+                u32,
+                buf[0..4],
+                @intCast(gs_data.len),
+                .big,
+            );
+            @memcpy(buf[4..][0..gs_data.len], gs_data);
+            @memcpy(
+                buf[4 + gs_data.len ..][0..st_data.len],
+                st_data,
+            );
+
+            return buf;
+        }
+
+        /// Deserialize a GroupBundle from bytes produced by
+        /// `serializeBundle`.
+        fn deserializeBundle(
+            allocator: Allocator,
+            data: []const u8,
+        ) error{
+            OutOfMemory,
+            SerializationFailed,
+        }!GroupBundle {
+            if (data.len < 4)
+                return error.SerializationFailed;
+
+            const gs_len = std.mem.readInt(
+                u32,
+                data[0..4],
+                .big,
+            );
+            if (4 + @as(u64, gs_len) > data.len)
+                return error.SerializationFailed;
+
+            var gs = Ser.deserialize(
+                allocator,
+                data[4..][0..gs_len],
+            ) catch return error.SerializationFailed;
+            errdefer gs.deinit();
+
+            const st_data = data[4 + gs_len ..];
+            var st = ST.deserialize(
+                allocator,
+                st_data,
+            ) catch return error.SerializationFailed;
+            errdefer st.deinit(allocator);
+
+            return .{ .gs = gs, .st = st };
+        }
+
+        /// Create a fresh SecretTree from a GroupState's
+        /// encryption_secret.
+        fn initSecretTree(
+            allocator: Allocator,
+            gs: *const GS,
+        ) Error!ST {
+            return ST.init(
+                allocator,
+                &gs.epoch_secrets.encryption_secret,
+                gs.leafCount(),
+            ) catch return error.SerializationFailed;
         }
 
         // ────────────────────────────────────────────────
@@ -267,7 +399,10 @@ pub fn Client(comptime P: type) type {
             ) catch return error.SerializationFailed;
             defer gs.deinit();
 
-            try self.persistGroup(io, group_id, &gs);
+            var st = try initSecretTree(self.allocator, &gs);
+            defer st.deinit(self.allocator);
+
+            try self.persistBundle(io, group_id, &gs, &st);
 
             // Store encryption secret key.
             try self.key_store.storeEncryptionKey(
@@ -589,11 +724,18 @@ pub fn Client(comptime P: type) type {
             );
             errdefer allocator.free(welcome_data);
 
-            // Persist the new group state.
-            try self.persistGroup(
+            // Persist the new group state with fresh SecretTree.
+            var st = try initSecretTree(
+                allocator,
+                &co.group_state,
+            );
+            defer st.deinit(allocator);
+
+            try self.persistBundle(
                 io,
                 group_id,
                 &co.group_state,
+                &st,
             );
 
             return .{
@@ -714,7 +856,10 @@ pub fn Client(comptime P: type) type {
             );
             errdefer allocator.free(owned_gid);
 
-            try self.persistGroup(io, gid, &gs);
+            var st = try initSecretTree(allocator, &gs);
+            defer st.deinit(allocator);
+
+            try self.persistBundle(io, gid, &gs, &st);
             _ = self.pending_key_packages.remove(
                 &match.ref,
             );
@@ -768,10 +913,17 @@ pub fn Client(comptime P: type) type {
             );
             errdefer allocator.free(commit_data);
 
-            try self.persistGroup(
+            var st = try initSecretTree(
+                allocator,
+                &co.group_state,
+            );
+            defer st.deinit(allocator);
+
+            try self.persistBundle(
                 io,
                 group_id,
                 &co.group_state,
+                &st,
             );
 
             return commit_data;
@@ -822,13 +974,410 @@ pub fn Client(comptime P: type) type {
             );
             errdefer allocator.free(commit_data);
 
-            try self.persistGroup(
+            var st = try initSecretTree(
+                allocator,
+                &co.group_state,
+            );
+            defer st.deinit(allocator);
+
+            try self.persistBundle(
                 io,
                 group_id,
                 &co.group_state,
+                &st,
             );
 
             return commit_data;
+        }
+
+        // ────────────────────────────────────────────────
+        // Messaging
+        // ────────────────────────────────────────────────
+
+        /// Maximum wire message buffer size.
+        const max_wire_buf: u32 = 1 << 17;
+        /// Maximum GroupContext encode buffer.
+        const max_gc_enc: u32 = zmls.group_context.max_gc_encode;
+        /// Private content AAD buffer size.
+        const max_aad_buf: u32 = 8192;
+        /// SenderData encoded size (leaf_index + gen + guard).
+        const sd_enc_size: u32 = zmls.private_msg
+            .SenderData.encoded_size;
+        /// FramedContentAuthData type alias.
+        const Auth = zmls.framing_auth.FramedContentAuthData(P);
+
+        /// Encrypt and send an application message.
+        ///
+        /// Loads the group bundle, consumes a key from the
+        /// SecretTree, encrypts content as a PrivateMessage,
+        /// persists the updated SecretTree, and returns the
+        /// MLSMessage wire bytes.
+        pub fn sendMessage(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            plaintext: []const u8,
+        ) Error![]u8 {
+            if (self.closed) return error.ClientClosed;
+
+            var bundle = try self.loadBundle(io, group_id);
+            defer bundle.deinit(self.allocator);
+
+            const wire = try self.encryptAppMessage(
+                allocator,
+                io,
+                &bundle,
+                plaintext,
+                "",
+            );
+            errdefer allocator.free(wire);
+
+            // Persist updated SecretTree (key consumed).
+            try self.persistBundle(
+                io,
+                group_id,
+                &bundle.gs,
+                &bundle.st,
+            );
+
+            return wire;
+        }
+
+        /// Decrypt a received application message.
+        ///
+        /// Loads the group bundle, decrypts the PrivateMessage,
+        /// verifies the signature, persists the updated
+        /// SecretTree, and returns the plaintext.
+        pub fn receiveMessage(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            ciphertext: []const u8,
+        ) Error!ReceivedMessage {
+            if (self.closed) return error.ClientClosed;
+
+            var bundle = try self.loadBundle(io, group_id);
+            defer bundle.deinit(self.allocator);
+
+            const result = try self.decryptAppMessage(
+                allocator,
+                &bundle,
+                ciphertext,
+            );
+            errdefer {
+                var rm = result;
+                rm.deinit();
+            }
+
+            // Persist updated SecretTree (key consumed).
+            try self.persistBundle(
+                io,
+                group_id,
+                &bundle.gs,
+                &bundle.st,
+            );
+
+            return result;
+        }
+
+        /// Build a PrivateMessage from plaintext. Mutates
+        /// `bundle.st` (consumes a key). Returns MLSMessage
+        /// wire bytes (caller-owned).
+        fn encryptAppMessage(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            bundle: *GroupBundle,
+            plaintext: []const u8,
+            aad_data: []const u8,
+        ) Error![]u8 {
+            const gs = &bundle.gs;
+            const gid = gs.groupId();
+
+            // 1. Sign FramedContent.
+            var gc_buf: [max_gc_enc]u8 = undefined;
+            const gc_bytes = gs.serializeContext(
+                &gc_buf,
+            ) catch return error.SerializationFailed;
+
+            const fc = zmls.FramedContent{
+                .group_id = gid,
+                .epoch = gs.epoch(),
+                .sender = .{
+                    .sender_type = .member,
+                    .leaf_index = @intFromEnum(
+                        gs.my_leaf_index,
+                    ),
+                },
+                .authenticated_data = aad_data,
+                .content_type = .application,
+                .content = plaintext,
+            };
+
+            const auth = zmls.signFramedContent(
+                P,
+                &fc,
+                .mls_private_message,
+                gc_bytes,
+                &self.sign_sk,
+                null,
+                null,
+            ) catch return error.SerializationFailed;
+
+            // 2. Consume encryption key from SecretTree.
+            const leaf_u32 = @intFromEnum(gs.my_leaf_index);
+            var kn = bundle.st.consumeKey(
+                leaf_u32,
+                1, // application
+            ) catch return error.SerializationFailed;
+            defer kn.zeroize();
+
+            // 3. Generate reuse guard.
+            var reuse_guard: [4]u8 = undefined;
+            io.randomSecure(&reuse_guard) catch
+                return error.KeyGenerationFailed;
+            zmls.private_msg.applyReuseGuard(
+                P,
+                &kn.nonce,
+                &reuse_guard,
+            );
+
+            // 4. Build content AAD.
+            var c_aad_buf: [max_aad_buf]u8 = undefined;
+            const c_aad_len = zmls.private_msg
+                .buildPrivateContentAad(
+                &c_aad_buf,
+                gid,
+                gs.epoch(),
+                .application,
+                aad_data,
+            ) catch return error.SerializationFailed;
+
+            // 5. Encrypt content.
+            var ct_buf: [max_wire_buf]u8 = undefined;
+            const ct_len = zmls.encryptContent(
+                P,
+                plaintext,
+                .application,
+                &auth,
+                self.padding_block,
+                &kn.key,
+                &kn.nonce,
+                c_aad_buf[0..c_aad_len],
+                &ct_buf,
+            ) catch return error.SerializationFailed;
+
+            // 6. Build and encrypt SenderData.
+            const sd = zmls.private_msg.SenderData{
+                .leaf_index = leaf_u32,
+                .generation = kn.generation,
+                .reuse_guard = reuse_guard,
+            };
+
+            var sd_aad_buf: [max_aad_buf]u8 = undefined;
+            const sd_aad_len = zmls.private_msg
+                .buildSenderDataAad(
+                &sd_aad_buf,
+                gid,
+                gs.epoch(),
+                .application,
+            ) catch return error.SerializationFailed;
+
+            var enc_sd: [sd_enc_size]u8 = undefined;
+            var sd_tag: [P.nt]u8 = undefined;
+
+            // Ciphertext sample = first min(nh, ct_len) bytes.
+            const sample_len = @min(P.nh, ct_len);
+            zmls.private_msg.encryptSenderData(
+                P,
+                &sd,
+                &gs.epoch_secrets.sender_data_secret,
+                ct_buf[0..sample_len],
+                sd_aad_buf[0..sd_aad_len],
+                &enc_sd,
+                &sd_tag,
+            );
+
+            // 7. Combine encrypted_sender_data = ct + tag.
+            var full_enc_sd: [sd_enc_size + P.nt]u8 = undefined;
+            @memcpy(
+                full_enc_sd[0..sd_enc_size],
+                &enc_sd,
+            );
+            @memcpy(
+                full_enc_sd[sd_enc_size..],
+                &sd_tag,
+            );
+
+            // 8. Assemble PrivateMessage and encode.
+            const pm = zmls.private_msg.PrivateMessage{
+                .group_id = gid,
+                .epoch = gs.epoch(),
+                .content_type = .application,
+                .authenticated_data = aad_data,
+                .encrypted_sender_data = &full_enc_sd,
+                .ciphertext = ct_buf[0..ct_len],
+            };
+
+            var wire_buf: [max_wire_buf]u8 = undefined;
+            // MLSMessage header: version(u16) + wire_format(u16)
+            const ver: u16 = @intFromEnum(
+                zmls.ProtocolVersion.mls10,
+            );
+            const wf: u16 = @intFromEnum(
+                zmls.types.WireFormat.mls_private_message,
+            );
+            std.mem.writeInt(u16, wire_buf[0..2], ver, .big);
+            std.mem.writeInt(u16, wire_buf[2..4], wf, .big);
+            const pm_end = pm.encode(
+                &wire_buf,
+                4,
+            ) catch return error.SerializationFailed;
+
+            return allocator.dupe(u8, wire_buf[0..pm_end]);
+        }
+
+        /// Decrypt a PrivateMessage. Mutates `bundle.st`
+        /// (consumes/forward-ratchets a key). Returns
+        /// `ReceivedMessage` with plaintext.
+        fn decryptAppMessage(
+            _: *Self,
+            allocator: Allocator,
+            bundle: *GroupBundle,
+            wire_bytes: []const u8,
+        ) Error!ReceivedMessage {
+            const gs = &bundle.gs;
+            const gid = gs.groupId();
+
+            // 1. Decode MLSMessage header.
+            const msg = zmls.mls_message.MLSMessage.decodeExact(
+                wire_bytes,
+            ) catch return error.SerializationFailed;
+
+            const pm = switch (msg.body) {
+                .private_message => |p| p,
+                else => return error.SerializationFailed,
+            };
+
+            // 2. Verify epoch matches.
+            if (pm.epoch != gs.epoch())
+                return error.SerializationFailed;
+
+            // 3. Decrypt SenderData.
+            var sd_aad_buf: [max_aad_buf]u8 = undefined;
+            const sd_aad_len = zmls.private_msg
+                .buildSenderDataAad(
+                &sd_aad_buf,
+                gid,
+                pm.epoch,
+                pm.content_type,
+            ) catch return error.SerializationFailed;
+
+            const sample_len = @min(
+                P.nh,
+                @as(u32, @intCast(pm.ciphertext.len)),
+            );
+            const sd = zmls.private_msg.decryptSenderData(
+                P,
+                pm.encrypted_sender_data,
+                &gs.epoch_secrets.sender_data_secret,
+                pm.ciphertext[0..sample_len],
+                sd_aad_buf[0..sd_aad_len],
+            ) catch return error.SerializationFailed;
+
+            // 4. Validate sender leaf index.
+            zmls.validateSenderLeafIndex(
+                sd,
+                gs.leafCount(),
+            ) catch return error.SerializationFailed;
+
+            // 5. Get key from SecretTree (forward ratchet).
+            var kn = bundle.st.forwardRatchet(
+                sd.leaf_index,
+                1, // application
+                sd.generation,
+            ) catch return error.SerializationFailed;
+            defer kn.zeroize();
+
+            // 6. Apply reuse guard.
+            zmls.private_msg.applyReuseGuard(
+                P,
+                &kn.nonce,
+                &sd.reuse_guard,
+            );
+
+            // 7. Decrypt content.
+            var c_aad_buf: [max_aad_buf]u8 = undefined;
+            const c_aad_len = zmls.private_msg
+                .buildPrivateContentAad(
+                &c_aad_buf,
+                gid,
+                pm.epoch,
+                pm.content_type,
+                pm.authenticated_data,
+            ) catch return error.SerializationFailed;
+
+            var pt_buf: [max_wire_buf]u8 = undefined;
+            const decrypted = zmls.decryptContent(
+                P,
+                pm.ciphertext,
+                pm.content_type,
+                &kn.key,
+                &kn.nonce,
+                c_aad_buf[0..c_aad_len],
+                &pt_buf,
+            ) catch return error.SerializationFailed;
+
+            // 8. Verify signature.
+            var gc_buf: [max_gc_enc]u8 = undefined;
+            const gc_bytes = gs.serializeContext(
+                &gc_buf,
+            ) catch return error.SerializationFailed;
+
+            // Reconstruct FramedContent for verification.
+            const fc = zmls.FramedContent{
+                .group_id = gid,
+                .epoch = pm.epoch,
+                .sender = .{
+                    .sender_type = .member,
+                    .leaf_index = sd.leaf_index,
+                },
+                .authenticated_data = pm.authenticated_data,
+                .content_type = pm.content_type,
+                .content = decrypted.content,
+            };
+
+            // Get sender's verification key from the tree.
+            const sender_leaf = gs.tree.getLeaf(
+                zmls.LeafIndex.fromU32(sd.leaf_index),
+            ) catch return error.SerializationFailed;
+            const leaf_node = sender_leaf orelse
+                return error.SerializationFailed;
+            if (leaf_node.signature_key.len !=
+                P.sign_pk_len)
+                return error.SerializationFailed;
+
+            zmls.verifyFramedContent(
+                P,
+                &fc,
+                .mls_private_message,
+                gc_bytes,
+                leaf_node.signature_key[0..P.sign_pk_len],
+                &decrypted.auth,
+            ) catch return error.SerializationFailed;
+
+            // 9. Return plaintext.
+            const owned = try allocator.dupe(
+                u8,
+                decrypted.content,
+            );
+            return .{
+                .sender_leaf = sd.leaf_index,
+                .data = owned,
+                .allocator = allocator,
+            };
         }
 
         // ────────────────────────────────────────────────
@@ -1569,4 +2118,231 @@ test "Client: leaveGroup deletes state from store" {
     // Bob's group state should be gone from the store.
     const load_result = bob.loadGroup(io, join.group_id);
     try testing.expectError(error.GroupNotFound, load_result);
+}
+
+/// Helper: set up a two-member group (Alice + Bob) where
+/// both have joined. Returns group_id, and callers must
+/// defer-free it.
+///
+/// IMPORTANT: Stores are passed by pointer to avoid
+/// interior-pointer invalidation on struct move (RULES.md
+/// Section 0).
+fn setupTwoMemberGroup(
+    a_gs: *MemGS(8),
+    a_ks: *MemKS(TestP, 8),
+    b_gs: *MemGS(8),
+    b_ks: *MemKS(TestP, 8),
+    alice: *Client(TestP),
+    bob: *Client(TestP),
+) ![]u8 {
+    const io = testIo();
+
+    alice.* = try makeTestClient(a_gs, a_ks);
+    bob.* = try makeTestClientBob(b_gs, b_ks);
+
+    const gid = try alice.createGroup(io);
+    errdefer testing.allocator.free(gid);
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        gid,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    var a_state = try alice.loadGroup(io, gid);
+    defer a_state.deinit();
+    var tree_copy = try a_state.tree.clone();
+    defer tree_copy.deinit();
+
+    var join = try bob.joinGroup(
+        testing.allocator,
+        io,
+        invite.welcome,
+        .{
+            .ratchet_tree = tree_copy,
+            .signer_verify_key = &alice.sign_pk,
+            .my_leaf_index = zmls.LeafIndex.fromU32(1),
+        },
+    );
+    defer join.deinit();
+
+    return gid;
+}
+
+test "Client: sendMessage + receiveMessage round-trip" {
+    var a_gs = MemGS(8).init();
+    defer a_gs.deinit();
+    var a_ks = MemKS(TestP, 8).init();
+    defer a_ks.deinit();
+    var b_gs = MemGS(8).init();
+    defer b_gs.deinit();
+    var b_ks = MemKS(TestP, 8).init();
+    defer b_ks.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const gid = try setupTwoMemberGroup(
+        &a_gs,
+        &a_ks,
+        &b_gs,
+        &b_ks,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(gid);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    const io = testIo();
+
+    // Alice sends a message.
+    const ct = try alice.sendMessage(
+        testing.allocator,
+        io,
+        gid,
+        "hello bob",
+    );
+    defer testing.allocator.free(ct);
+
+    try testing.expect(ct.len > 0);
+
+    // Bob receives the message.
+    var rm = try bob.receiveMessage(
+        testing.allocator,
+        io,
+        gid,
+        ct,
+    );
+    defer rm.deinit();
+
+    try testing.expectEqualSlices(u8, "hello bob", rm.data);
+    try testing.expectEqual(@as(u32, 0), rm.sender_leaf);
+}
+
+test "Client: multiple send/receive preserves ordering" {
+    var a_gs = MemGS(8).init();
+    defer a_gs.deinit();
+    var a_ks = MemKS(TestP, 8).init();
+    defer a_ks.deinit();
+    var b_gs = MemGS(8).init();
+    defer b_gs.deinit();
+    var b_ks = MemKS(TestP, 8).init();
+    defer b_ks.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const gid = try setupTwoMemberGroup(
+        &a_gs,
+        &a_ks,
+        &b_gs,
+        &b_ks,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(gid);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    const io = testIo();
+
+    // Alice sends two messages.
+    const ct1 = try alice.sendMessage(
+        testing.allocator,
+        io,
+        gid,
+        "message one",
+    );
+    defer testing.allocator.free(ct1);
+
+    const ct2 = try alice.sendMessage(
+        testing.allocator,
+        io,
+        gid,
+        "message two",
+    );
+    defer testing.allocator.free(ct2);
+
+    // Bob receives both in order.
+    var rm1 = try bob.receiveMessage(
+        testing.allocator,
+        io,
+        gid,
+        ct1,
+    );
+    defer rm1.deinit();
+
+    var rm2 = try bob.receiveMessage(
+        testing.allocator,
+        io,
+        gid,
+        ct2,
+    );
+    defer rm2.deinit();
+
+    try testing.expectEqualSlices(
+        u8,
+        "message one",
+        rm1.data,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        "message two",
+        rm2.data,
+    );
+}
+
+test "Client: Bob sends, Alice receives" {
+    var a_gs = MemGS(8).init();
+    defer a_gs.deinit();
+    var a_ks = MemKS(TestP, 8).init();
+    defer a_ks.deinit();
+    var b_gs = MemGS(8).init();
+    defer b_gs.deinit();
+    var b_ks = MemKS(TestP, 8).init();
+    defer b_ks.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const gid = try setupTwoMemberGroup(
+        &a_gs,
+        &a_ks,
+        &b_gs,
+        &b_ks,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(gid);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    const io = testIo();
+
+    // Bob sends a message to Alice.
+    const ct = try bob.sendMessage(
+        testing.allocator,
+        io,
+        gid,
+        "hello alice",
+    );
+    defer testing.allocator.free(ct);
+
+    // Alice receives.
+    var rm = try alice.receiveMessage(
+        testing.allocator,
+        io,
+        gid,
+        ct,
+    );
+    defer rm.deinit();
+
+    try testing.expectEqualSlices(u8, "hello alice", rm.data);
+    try testing.expectEqual(@as(u32, 1), rm.sender_leaf);
 }
