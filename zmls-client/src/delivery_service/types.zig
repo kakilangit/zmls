@@ -1,9 +1,9 @@
-//! Server types — Options and error types.
+//! DeliveryService types — Options and error types.
 
 const std = @import("std");
 
-/// Server configuration options.
-pub const ServerOptions = struct {
+/// DeliveryService configuration options.
+pub const DeliveryServiceOptions = struct {
     /// Maximum message payload size (bytes).
     max_message_size: u32 = 4 * 1024 * 1024,
     /// Maximum KeyPackage size (bytes).
@@ -12,8 +12,8 @@ pub const ServerOptions = struct {
     max_group_info_size: u32 = 256 * 1024,
 };
 
-/// Server-specific errors (beyond port errors).
-pub const ServerError = error{
+/// DeliveryService-specific errors (beyond port errors).
+pub const DeliveryServiceError = error{
     MessageTooLarge,
     KeyPackageTooLarge,
     GroupInfoTooLarge,

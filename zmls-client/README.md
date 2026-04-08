@@ -80,13 +80,13 @@ method that performs I/O takes `io: std.Io` by value.
 | `MemoryKeyPackageDirectory(cap)` | `KeyPackageDirectory` | Single-use consume |
 | `MemoryGroupInfoDirectory(cap)` | `GroupInfoDirectory` | Overwrite semantics |
 
-### Client and Server
+### Client and DeliveryService
 
 - **`Client(P)`** wraps `GroupState(P)` from the zmls protocol core with
   persistent storage, key management, and transport. Parameterized over
   `CryptoProvider` at comptime.
-- **`Server`** is an opaque byte relay (delivery service). Not
-  parameterized by `CryptoProvider` — it never interprets MLS content.
+- **`DeliveryService`** is an opaque byte relay. Not parameterized by
+  `CryptoProvider` — it never interprets MLS content.
 
 ### Wire Protocol
 
@@ -105,9 +105,9 @@ zmls-client/
     adapters/             in-memory adapters (6 files)
     wire/                 envelope framing
     client/               Client(P), types, pending KP map
-    server/               Server, types
+    delivery_service/     DeliveryService, types
   tests/
-    integration_test.zig  Client + Server lifecycle tests
+    integration_test.zig  Client + DeliveryService lifecycle tests
   examples/
     cli/main.zig          CLI placeholder
 ```

@@ -96,10 +96,12 @@ pub const MemberInfo = client_types.MemberInfo;
 pub const PendingKeyPackageMap =
     @import("client/pending.zig").PendingKeyPackageMap;
 
-// ── Server ─────────────────────────────────────────────────
+// ── Delivery Service ───────────────────────────────────────
 
 /// Delivery service (dumb relay).
-pub const Server = @import("server/server.zig").Server;
+pub const DeliveryService =
+    @import("delivery_service/delivery_service.zig")
+        .DeliveryService;
 
 test {
     // Pull in tests from all submodules.

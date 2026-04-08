@@ -1,4 +1,4 @@
-//! Server — Delivery service (dumb relay).
+//! DeliveryService — Dumb relay for MLS messages.
 //!
 //! Routes opaque MLS messages between clients. Does NOT
 //! depend on the zmls protocol core — it handles raw bytes
@@ -17,31 +17,35 @@ const GroupInfoDirectory =
 const transport_mod = @import("../ports/transport.zig");
 const MessageType = transport_mod.MessageType;
 const ReceivedEnvelope = transport_mod.ReceivedEnvelope;
-const server_types = @import("types.zig");
-const ServerOptions = server_types.ServerOptions;
+const ds_types = @import("types.zig");
+const DeliveryServiceOptions = ds_types.DeliveryServiceOptions;
 
-/// Delivery service server.
+/// Delivery service (dumb relay).
 ///
 /// Routes messages between group members, manages the
 /// KeyPackage and GroupInfo directories. All message payloads
-/// are opaque byte slices — the server never interprets MLS
+/// are opaque byte slices — the relay never interprets MLS
 /// content.
-pub const Server = struct {
+pub const DeliveryService = struct {
     group_directory: GroupDirectory,
     kp_directory: KeyPackageDirectory,
     gi_directory: GroupInfoDirectory,
-    options: ServerOptions,
+    options: DeliveryServiceOptions,
     allocator: Allocator,
 
-    pub const Error = GroupDirectory.Error || KeyPackageDirectory.Error || GroupInfoDirectory.Error || server_types.ServerError || Allocator.Error;
+    pub const Error = GroupDirectory.Error ||
+        KeyPackageDirectory.Error ||
+        GroupInfoDirectory.Error ||
+        ds_types.DeliveryServiceError ||
+        Allocator.Error;
 
     pub fn init(
         allocator: Allocator,
         group_directory: GroupDirectory,
         kp_directory: KeyPackageDirectory,
         gi_directory: GroupInfoDirectory,
-        options: ServerOptions,
-    ) Server {
+        options: DeliveryServiceOptions,
+    ) DeliveryService {
         return .{
             .group_directory = group_directory,
             .kp_directory = kp_directory,
@@ -51,13 +55,13 @@ pub const Server = struct {
         };
     }
 
-    pub fn deinit(self: *Server) void {
+    pub fn deinit(self: *DeliveryService) void {
         self.* = undefined;
     }
 
     /// Route a message to all group members except sender.
     pub fn processMessage(
-        self: *Server,
+        self: *DeliveryService,
         io: Io,
         sender_id: []const u8,
         group_id: []const u8,
@@ -77,7 +81,7 @@ pub const Server = struct {
 
     /// Fetch the next queued message for a member.
     pub fn fetchMessage(
-        self: *Server,
+        self: *DeliveryService,
         allocator: Allocator,
         io: Io,
         group_id: []const u8,
@@ -93,7 +97,7 @@ pub const Server = struct {
 
     /// Upload a KeyPackage for later retrieval.
     pub fn uploadKeyPackage(
-        self: *Server,
+        self: *DeliveryService,
         io: Io,
         owner_id: []const u8,
         kp_bytes: []const u8,
@@ -105,7 +109,7 @@ pub const Server = struct {
 
     /// Download (and consume) a KeyPackage.
     pub fn downloadKeyPackage(
-        self: *Server,
+        self: *DeliveryService,
         allocator: Allocator,
         io: Io,
         target_id: []const u8,
@@ -119,7 +123,7 @@ pub const Server = struct {
 
     /// Publish GroupInfo for external joiners.
     pub fn publishGroupInfo(
-        self: *Server,
+        self: *DeliveryService,
         io: Io,
         group_id: []const u8,
         data: []const u8,
@@ -131,7 +135,7 @@ pub const Server = struct {
 
     /// Get published GroupInfo for a group.
     pub fn getGroupInfo(
-        self: *Server,
+        self: *DeliveryService,
         allocator: Allocator,
         io: Io,
         group_id: []const u8,
@@ -162,7 +166,7 @@ fn testIo() Io {
     return threaded.io();
 }
 
-test "Server: message routing" {
+test "DeliveryService: message routing" {
     var gd = MemGD(4, 8, 16).init();
     defer gd.deinit();
     var kpd = MemKPD(8).init();
@@ -171,25 +175,25 @@ test "Server: message routing" {
     defer gid.deinit();
     const io = testIo();
 
-    var server = Server.init(
+    var ds = DeliveryService.init(
         testing.allocator,
         gd.groupDirectory(),
         kpd.keyPackageDirectory(),
         gid.groupInfoDirectory(),
         .{},
     );
-    defer server.deinit();
+    defer ds.deinit();
 
     // Set up a group.
-    try server.group_directory.createGroup(
+    try ds.group_directory.createGroup(
         io,
         "g1",
         "alice",
     );
-    try server.group_directory.addMember(io, "g1", "bob");
+    try ds.group_directory.addMember(io, "g1", "bob");
 
     // Alice sends a message.
-    try server.processMessage(
+    try ds.processMessage(
         io,
         "alice",
         "g1",
@@ -198,7 +202,7 @@ test "Server: message routing" {
     );
 
     // Bob receives it.
-    var env = (try server.fetchMessage(
+    var env = (try ds.fetchMessage(
         testing.allocator,
         io,
         "g1",
@@ -213,7 +217,7 @@ test "Server: message routing" {
     );
 }
 
-test "Server: KP upload/download/consume" {
+test "DeliveryService: KP upload/download/consume" {
     var gd = MemGD(4, 4, 4).init();
     defer gd.deinit();
     var kpd = MemKPD(8).init();
@@ -222,18 +226,18 @@ test "Server: KP upload/download/consume" {
     defer gid.deinit();
     const io = testIo();
 
-    var server = Server.init(
+    var ds = DeliveryService.init(
         testing.allocator,
         gd.groupDirectory(),
         kpd.keyPackageDirectory(),
         gid.groupInfoDirectory(),
         .{},
     );
-    defer server.deinit();
+    defer ds.deinit();
 
-    try server.uploadKeyPackage(io, "bob", "bob-kp-data");
+    try ds.uploadKeyPackage(io, "bob", "bob-kp-data");
 
-    const fetched = try server.downloadKeyPackage(
+    const fetched = try ds.downloadKeyPackage(
         testing.allocator,
         io,
         "bob",
@@ -246,7 +250,7 @@ test "Server: KP upload/download/consume" {
     );
 
     // Second fetch returns null (consumed).
-    const again = try server.downloadKeyPackage(
+    const again = try ds.downloadKeyPackage(
         testing.allocator,
         io,
         "bob",
@@ -254,7 +258,7 @@ test "Server: KP upload/download/consume" {
     try testing.expectEqual(null, again);
 }
 
-test "Server: GroupInfo publish/fetch" {
+test "DeliveryService: GroupInfo publish/fetch" {
     var gd = MemGD(4, 4, 4).init();
     defer gd.deinit();
     var kpd = MemKPD(4).init();
@@ -263,18 +267,18 @@ test "Server: GroupInfo publish/fetch" {
     defer gid.deinit();
     const io = testIo();
 
-    var server = Server.init(
+    var ds = DeliveryService.init(
         testing.allocator,
         gd.groupDirectory(),
         kpd.keyPackageDirectory(),
         gid.groupInfoDirectory(),
         .{},
     );
-    defer server.deinit();
+    defer ds.deinit();
 
-    try server.publishGroupInfo(io, "g1", "gi-blob");
+    try ds.publishGroupInfo(io, "g1", "gi-blob");
 
-    const got = try server.getGroupInfo(
+    const got = try ds.getGroupInfo(
         testing.allocator,
         io,
         "g1",
@@ -283,7 +287,7 @@ test "Server: GroupInfo publish/fetch" {
     try testing.expectEqualSlices(u8, "gi-blob", got.?);
 }
 
-test "Server: oversized message rejected" {
+test "DeliveryService: oversized message rejected" {
     var gd = MemGD(4, 4, 4).init();
     defer gd.deinit();
     var kpd = MemKPD(4).init();
@@ -292,22 +296,22 @@ test "Server: oversized message rejected" {
     defer gid.deinit();
     const io = testIo();
 
-    var server = Server.init(
+    var ds = DeliveryService.init(
         testing.allocator,
         gd.groupDirectory(),
         kpd.keyPackageDirectory(),
         gid.groupInfoDirectory(),
         .{ .max_message_size = 10 },
     );
-    defer server.deinit();
+    defer ds.deinit();
 
-    try server.group_directory.createGroup(
+    try ds.group_directory.createGroup(
         io,
         "g1",
         "alice",
     );
 
-    const result = server.processMessage(
+    const result = ds.processMessage(
         io,
         "alice",
         "g1",
