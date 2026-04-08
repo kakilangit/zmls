@@ -726,6 +726,112 @@ pub fn Client(comptime P: type) type {
         }
 
         // ────────────────────────────────────────────────
+        // Remove / Leave / Self-update
+        // ────────────────────────────────────────────────
+
+        /// Remove a member by leaf index.
+        ///
+        /// Creates a Remove proposal, commits, persists the
+        /// new state, and returns the commit bytes.
+        pub fn removeMember(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            target_leaf: u32,
+        ) Error![]u8 {
+            if (self.closed) return error.ClientClosed;
+
+            var gs = try self.loadGroup(io, group_id);
+            defer gs.deinit();
+
+            const remove_prop = zmls.Proposal{
+                .tag = .remove,
+                .payload = .{ .remove = .{
+                    .removed = target_leaf,
+                } },
+            };
+            const props = [_]zmls.Proposal{remove_prop};
+
+            var co = gs.commit(
+                allocator,
+                .{
+                    .proposals = &props,
+                    .sign_key = &self.sign_sk,
+                },
+            ) catch return error.SerializationFailed;
+            defer co.deinit();
+
+            const commit_data = try allocator.dupe(
+                u8,
+                co.commit_bytes[0..co.commit_len],
+            );
+            errdefer allocator.free(commit_data);
+
+            try self.persistGroup(
+                io,
+                group_id,
+                &co.group_state,
+            );
+
+            return commit_data;
+        }
+
+        /// Leave the group (delete local state).
+        ///
+        /// Deletes the group state from the store. The actual
+        /// protocol-level removal (Remove proposal + commit)
+        /// is another member's responsibility.
+        pub fn leaveGroup(
+            self: *Self,
+            io: Io,
+            group_id: []const u8,
+        ) Error!void {
+            if (self.closed) return error.ClientClosed;
+            try self.group_store.delete(io, group_id);
+        }
+
+        /// Self-update: empty commit with path (key rotation).
+        ///
+        /// Commits with no proposals (empty commit), which
+        /// updates the committer's key material. Persists the
+        /// new state and returns the commit bytes.
+        pub fn selfUpdate(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+        ) Error![]u8 {
+            if (self.closed) return error.ClientClosed;
+
+            var gs = try self.loadGroup(io, group_id);
+            defer gs.deinit();
+
+            var co = gs.commit(
+                allocator,
+                .{
+                    .proposals = &.{},
+                    .sign_key = &self.sign_sk,
+                },
+            ) catch return error.SerializationFailed;
+            defer co.deinit();
+
+            const commit_data = try allocator.dupe(
+                u8,
+                co.commit_bytes[0..co.commit_len],
+            );
+            errdefer allocator.free(commit_data);
+
+            try self.persistGroup(
+                io,
+                group_id,
+                &co.group_state,
+            );
+
+            return commit_data;
+        }
+
+        // ────────────────────────────────────────────────
         // Helpers
         // ────────────────────────────────────────────────
 
@@ -1322,4 +1428,145 @@ test "Client: joinGroup fails without pending KP" {
         error.NoPendingKeyPackage,
         result,
     );
+}
+
+test "Client: removeMember produces commit bytes" {
+    const io = testIo();
+
+    // Alice creates group, invites Bob.
+    var a_gs = MemGS(8).init();
+    defer a_gs.deinit();
+    var a_ks = MemKS(TestP, 8).init();
+    defer a_ks.deinit();
+    var alice = try makeTestClient(&a_gs, &a_ks);
+    defer alice.deinit();
+
+    const gid = try alice.createGroup(io);
+    defer testing.allocator.free(gid);
+
+    var b_gs = MemGS(8).init();
+    defer b_gs.deinit();
+    var b_ks = MemKS(TestP, 8).init();
+    defer b_ks.deinit();
+    var bob = try makeTestClientBob(&b_gs, &b_ks);
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        gid,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    // Alice removes Bob (leaf index 1).
+    const commit = try alice.removeMember(
+        testing.allocator,
+        io,
+        gid,
+        1,
+    );
+    defer testing.allocator.free(commit);
+
+    try testing.expect(commit.len > 0);
+
+    // Alice's state should advance to epoch 2.
+    var gs = try alice.loadGroup(io, gid);
+    defer gs.deinit();
+    try testing.expectEqual(@as(u64, 2), gs.epoch());
+}
+
+test "Client: selfUpdate advances epoch" {
+    const io = testIo();
+
+    var gs_store = MemGS(8).init();
+    defer gs_store.deinit();
+    var ks_store = MemKS(TestP, 8).init();
+    defer ks_store.deinit();
+    var alice = try makeTestClient(&gs_store, &ks_store);
+    defer alice.deinit();
+
+    const gid = try alice.createGroup(io);
+    defer testing.allocator.free(gid);
+
+    // Self-update (empty commit with path).
+    const commit = try alice.selfUpdate(
+        testing.allocator,
+        io,
+        gid,
+    );
+    defer testing.allocator.free(commit);
+
+    try testing.expect(commit.len > 0);
+
+    // Epoch should advance from 0 to 1.
+    var gs = try alice.loadGroup(io, gid);
+    defer gs.deinit();
+    try testing.expectEqual(@as(u64, 1), gs.epoch());
+}
+
+test "Client: leaveGroup deletes state from store" {
+    const io = testIo();
+
+    // Alice creates group, invites Bob, Bob joins.
+    var a_gs = MemGS(8).init();
+    defer a_gs.deinit();
+    var a_ks = MemKS(TestP, 8).init();
+    defer a_ks.deinit();
+    var alice = try makeTestClient(&a_gs, &a_ks);
+    defer alice.deinit();
+
+    const gid = try alice.createGroup(io);
+    defer testing.allocator.free(gid);
+
+    var b_gs = MemGS(8).init();
+    defer b_gs.deinit();
+    var b_ks = MemKS(TestP, 8).init();
+    defer b_ks.deinit();
+    var bob = try makeTestClientBob(&b_gs, &b_ks);
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        gid,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    var a_state = try alice.loadGroup(io, gid);
+    defer a_state.deinit();
+    var tree_copy = try a_state.tree.clone();
+    defer tree_copy.deinit();
+
+    var join = try bob.joinGroup(
+        testing.allocator,
+        io,
+        invite.welcome,
+        .{
+            .ratchet_tree = tree_copy,
+            .signer_verify_key = &alice.sign_pk,
+            .my_leaf_index = zmls.LeafIndex.fromU32(1),
+        },
+    );
+    defer join.deinit();
+
+    // Bob leaves (deletes local state).
+    try bob.leaveGroup(io, join.group_id);
+
+    // Bob's group state should be gone from the store.
+    const load_result = bob.loadGroup(io, join.group_id);
+    try testing.expectError(error.GroupNotFound, load_result);
 }
