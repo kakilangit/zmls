@@ -1492,6 +1492,104 @@ pub fn Client(comptime P: type) type {
             );
         }
 
+        /// Derive an exported secret from the group's epoch.
+        ///
+        /// Implements MLS Exporter (RFC 9420 Section 8.5).
+        /// `out` determines the export length; it is filled
+        /// with the derived keying material.
+        pub fn exportSecret(
+            self: *Self,
+            io: Io,
+            group_id: []const u8,
+            label: []const u8,
+            context: []const u8,
+            out: []u8,
+        ) QueryError!void {
+            if (self.closed) return error.ClientClosed;
+            var bundle = try self.loadBundle(io, group_id);
+            defer bundle.deinit(self.allocator);
+            zmls.mlsExporter(
+                P,
+                &bundle.group_state
+                    .epoch_secrets.exporter_secret,
+                label,
+                context,
+                out,
+            );
+        }
+
+        /// Return the epoch authenticator for the current
+        /// epoch (RFC 9420 Section 8.7).
+        ///
+        /// Copies the authenticator into `out`. Returns the
+        /// number of bytes written (always `P.nh`).
+        pub fn epochAuthenticator(
+            self: *Self,
+            io: Io,
+            group_id: []const u8,
+            out: *[P.nh]u8,
+        ) QueryError!void {
+            if (self.closed) return error.ClientClosed;
+            var bundle = try self.loadBundle(io, group_id);
+            defer bundle.deinit(self.allocator);
+            out.* = bundle.group_state
+                .epochAuthenticator().*;
+        }
+
+        /// Clear all pending proposals for a group without
+        /// committing them.
+        pub fn cancelPendingProposals(
+            self: *Self,
+            group_id: []const u8,
+        ) void {
+            self.proposal_store.clearGroup(group_id);
+        }
+
+        /// Encrypt and send an application message with
+        /// additional authenticated data.
+        pub fn sendMessageWithAad(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            plaintext: []const u8,
+            authenticated_data: []const u8,
+        ) SendError![]u8 {
+            if (self.closed) return error.ClientClosed;
+
+            var bundle = try self.loadBundle(
+                io,
+                group_id,
+            );
+            defer bundle.deinit(self.allocator);
+
+            var reuse_guard: [4]u8 = undefined;
+            io.randomSecure(&reuse_guard) catch
+                return error.KeyGenerationFailed;
+
+            const wire = try Protect
+                .encryptApplicationMessage(
+                allocator,
+                &bundle.group_state,
+                &bundle.secret_tree,
+                &self.signing_secret_key,
+                plaintext,
+                authenticated_data,
+                &reuse_guard,
+                self.padding_block,
+            );
+            errdefer allocator.free(wire);
+
+            try self.persistBundle(
+                io,
+                group_id,
+                &bundle.group_state,
+                &bundle.secret_tree,
+            );
+
+            return wire;
+        }
+
         /// Pure extraction of member info from a GroupState.
         fn collectMembers(
             allocator: Allocator,
@@ -3518,4 +3616,187 @@ test "Client: groupEpoch fails for unknown group" {
         error.GroupNotFound,
         result,
     );
+}
+
+test "Client: exportSecret derives keying material" {
+    const io = testIo();
+
+    var group_store = MemGS(8).init();
+    defer group_store.deinit();
+    var key_store = MemKS(TestP, 8).init();
+    defer key_store.deinit();
+    var alice = try makeTestClient(
+        &group_store,
+        &key_store,
+    );
+    defer alice.deinit();
+
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    var out1: [32]u8 = undefined;
+    var out2: [32]u8 = undefined;
+    try alice.exportSecret(
+        io,
+        group_id,
+        "test-label",
+        "test-context",
+        &out1,
+    );
+    // Same inputs produce same output.
+    try alice.exportSecret(
+        io,
+        group_id,
+        "test-label",
+        "test-context",
+        &out2,
+    );
+    try testing.expectEqualSlices(u8, &out1, &out2);
+
+    // Different label produces different output.
+    var out3: [32]u8 = undefined;
+    try alice.exportSecret(
+        io,
+        group_id,
+        "other-label",
+        "test-context",
+        &out3,
+    );
+    try testing.expect(
+        !std.mem.eql(u8, &out1, &out3),
+    );
+}
+
+test "Client: epochAuthenticator returns non-zero bytes" {
+    const io = testIo();
+
+    var group_store = MemGS(8).init();
+    defer group_store.deinit();
+    var key_store = MemKS(TestP, 8).init();
+    defer key_store.deinit();
+    var alice = try makeTestClient(
+        &group_store,
+        &key_store,
+    );
+    defer alice.deinit();
+
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    var auth1: [TestP.nh]u8 = undefined;
+    try alice.epochAuthenticator(io, group_id, &auth1);
+
+    // Should not be all zeros.
+    const zeros: [TestP.nh]u8 = .{0} ** TestP.nh;
+    try testing.expect(
+        !std.mem.eql(u8, &auth1, &zeros),
+    );
+
+    // Advance epoch — authenticator should change.
+    const commit = try alice.selfUpdate(
+        testing.allocator,
+        io,
+        group_id,
+    );
+    defer testing.allocator.free(commit);
+
+    var auth2: [TestP.nh]u8 = undefined;
+    try alice.epochAuthenticator(io, group_id, &auth2);
+
+    try testing.expect(
+        !std.mem.eql(u8, &auth1, &auth2),
+    );
+}
+
+test "Client: cancelPendingProposals clears cache" {
+    const io = testIo();
+
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = setupTwoMemberGroup(
+        &alice_group_store,
+        &alice_key_store,
+        &bob_group_store,
+        &bob_key_store,
+        &alice,
+        &bob,
+    ) catch return error.SkipZigTest;
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    // Alice proposes removing Bob.
+    const proposal_bytes = try alice.proposeRemove(
+        testing.allocator,
+        io,
+        group_id,
+        1,
+    );
+    defer testing.allocator.free(proposal_bytes);
+
+    // Bob receives and caches it.
+    _ = try bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        proposal_bytes,
+    );
+    try testing.expectEqual(
+        @as(u32, 1),
+        bob.proposal_store.count,
+    );
+
+    // Bob cancels pending proposals.
+    bob.cancelPendingProposals(group_id);
+    try testing.expectEqual(
+        @as(u32, 0),
+        bob.proposal_store.count,
+    );
+}
+
+test "Client: sendMessageWithAad round-trips" {
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = setupTwoMemberGroup(
+        &alice_group_store,
+        &alice_key_store,
+        &bob_group_store,
+        &bob_key_store,
+        &alice,
+        &bob,
+    ) catch return error.SkipZigTest;
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    const ciphertext = try alice.sendMessageWithAad(
+        testing.allocator,
+        testIo(),
+        group_id,
+        "hello with aad",
+        "extra-context",
+    );
+    defer testing.allocator.free(ciphertext);
+
+    try testing.expect(ciphertext.len > 0);
 }
