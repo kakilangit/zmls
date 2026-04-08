@@ -439,6 +439,168 @@ pub fn Client(comptime P: type) type {
         }
 
         // ────────────────────────────────────────────────
+        // Membership operations
+        // ────────────────────────────────────────────────
+
+        /// Maximum Welcome encoding buffer size.
+        const max_welcome_buf: u32 = 1 << 17;
+        /// Maximum GroupContext encoding buffer size.
+        const max_gc_buf: u32 = 8192;
+
+        /// Invite a member by their KeyPackage bytes.
+        ///
+        /// Creates an Add proposal, commits it, and builds
+        /// a Welcome for the new member. Returns both the
+        /// commit and welcome as TLS-encoded bytes.
+        pub fn inviteMember(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            kp_bytes: []const u8,
+        ) Error!InviteResult {
+            if (self.closed) return error.ClientClosed;
+
+            // Decode the joiner's KeyPackage.
+            const kp_dec = KeyPackage.decode(
+                allocator,
+                kp_bytes,
+                0,
+            ) catch return error.SerializationFailed;
+            var kp = kp_dec.value;
+            defer kp.deinit(allocator);
+
+            // Load current group state.
+            var gs = try self.loadGroup(io, group_id);
+            defer gs.deinit();
+
+            // Build Add proposal and commit.
+            const add_prop = zmls.Proposal{
+                .tag = .add,
+                .payload = .{ .add = .{
+                    .key_package = kp,
+                } },
+            };
+            const props = [_]zmls.Proposal{add_prop};
+
+            var co = gs.commit(
+                allocator,
+                .{
+                    .proposals = &props,
+                    .sign_key = &self.sign_sk,
+                },
+            ) catch return error.SerializationFailed;
+            defer co.deinit();
+
+            return self.buildInviteResult(
+                allocator,
+                io,
+                group_id,
+                &kp,
+                &co,
+            );
+        }
+
+        /// Build the InviteResult from a CommitOutput.
+        fn buildInviteResult(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            kp: *const KeyPackage,
+            co: *GS.CommitOutput,
+        ) Error!InviteResult {
+            // Serialize GroupContext for buildWelcome.
+            var gc_buf: [max_gc_buf]u8 = undefined;
+            const gc_end = co.group_state.group_context
+                .encode(&gc_buf, 0) catch
+                return error.SerializationFailed;
+
+            // Compute KP ref and generate ephemeral seed.
+            const kp_ref = kp.makeRef(
+                P,
+            ) catch return error.KeyGenerationFailed;
+            var eph_seed: [32]u8 = undefined;
+            io.randomSecure(&eph_seed) catch
+                return error.KeyGenerationFailed;
+            defer secureZeroSlice(&eph_seed);
+
+            const members = [_]zmls.group_welcome
+                .NewMemberEntry{.{
+                .kp_ref = &kp_ref,
+                .init_pk = kp.init_key,
+                .eph_seed = &eph_seed,
+            }};
+
+            var wr = co.group_state.buildWelcome(
+                allocator,
+                .{
+                    .gc_bytes = gc_buf[0..gc_end],
+                    .confirmation_tag = &co.confirmation_tag,
+                    .welcome_secret = &co.welcome_secret,
+                    .joiner_secret = &co.joiner_secret,
+                    .sign_key = &self.sign_sk,
+                    .signer = @intFromEnum(
+                        co.group_state.my_leaf_index,
+                    ),
+                    .cipher_suite = self.cipher_suite,
+                    .new_members = &members,
+                },
+            ) catch return error.SerializationFailed;
+            defer wr.deinit(allocator);
+
+            return self.encodeInviteResult(
+                allocator,
+                io,
+                group_id,
+                co,
+                &wr,
+            );
+        }
+
+        /// Encode commit + welcome to bytes, persist state.
+        fn encodeInviteResult(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            co: *GS.CommitOutput,
+            wr: *const zmls.group_welcome.WelcomeResult,
+        ) Error!InviteResult {
+            const commit_data = try allocator.dupe(
+                u8,
+                co.commit_bytes[0..co.commit_len],
+            );
+            errdefer allocator.free(commit_data);
+
+            // Encode Welcome to TLS bytes.
+            var w_buf: [max_welcome_buf]u8 = undefined;
+            const w_end = wr.welcome.encode(
+                &w_buf,
+                0,
+            ) catch return error.SerializationFailed;
+
+            const welcome_data = try allocator.dupe(
+                u8,
+                w_buf[0..w_end],
+            );
+            errdefer allocator.free(welcome_data);
+
+            // Persist the new group state.
+            try self.persistGroup(
+                io,
+                group_id,
+                &co.group_state,
+            );
+
+            return .{
+                .commit = commit_data,
+                .welcome = welcome_data,
+                .allocator = allocator,
+            };
+        }
+
+        // ────────────────────────────────────────────────
         // Helpers
         // ────────────────────────────────────────────────
 
@@ -709,4 +871,132 @@ test "Client: multiple freshKeyPackages get distinct refs" {
         @as(u32, 2),
         client.pending_key_packages.count,
     );
+}
+
+fn makeTestClientBob(
+    gs_store: *MemGS(8),
+    ks_store: *MemKS(TestP, 8),
+) !Client(TestP) {
+    const seed: [32]u8 = .{0x99} ** 32;
+    return Client(TestP).init(
+        testing.allocator,
+        "bob",
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &seed,
+        .{
+            .group_store = gs_store.groupStore(),
+            .key_store = ks_store.keyStore(),
+            .credential_validator = zmls.credential_validator
+                .AcceptAllValidator.validator(),
+        },
+    );
+}
+
+test "Client: inviteMember produces valid commit and welcome" {
+    const io = testIo();
+
+    // Alice: create a group.
+    var a_gs = MemGS(8).init();
+    defer a_gs.deinit();
+    var a_ks = MemKS(TestP, 8).init();
+    defer a_ks.deinit();
+    var alice = try makeTestClient(&a_gs, &a_ks);
+    defer alice.deinit();
+
+    const gid = try alice.createGroup(io);
+    defer testing.allocator.free(gid);
+
+    // Bob: generate a KeyPackage.
+    var b_gs = MemGS(8).init();
+    defer b_gs.deinit();
+    var b_ks = MemKS(TestP, 8).init();
+    defer b_ks.deinit();
+    var bob = try makeTestClientBob(&b_gs, &b_ks);
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    // Alice invites Bob.
+    var result = try alice.inviteMember(
+        testing.allocator,
+        io,
+        gid,
+        bob_kp.data,
+    );
+    defer result.deinit();
+
+    // Commit and Welcome must be non-empty.
+    try testing.expect(result.commit.len > 0);
+    try testing.expect(result.welcome.len > 0);
+
+    // Welcome bytes must be decodable.
+    const w_dec = try zmls.Welcome.decode(
+        testing.allocator,
+        result.welcome,
+        0,
+    );
+    var w = w_dec.value;
+    defer w.deinit(testing.allocator);
+
+    try testing.expectEqual(
+        @as(u32, @intCast(result.welcome.len)),
+        w_dec.pos,
+    );
+
+    // Welcome should target exactly one recipient.
+    try testing.expectEqual(
+        @as(usize, 1),
+        w.secrets.len,
+    );
+}
+
+test "Client: inviteMember persists updated group state" {
+    const io = testIo();
+
+    // Alice: create a group.
+    var a_gs = MemGS(8).init();
+    defer a_gs.deinit();
+    var a_ks = MemKS(TestP, 8).init();
+    defer a_ks.deinit();
+    var alice = try makeTestClient(&a_gs, &a_ks);
+    defer alice.deinit();
+
+    const gid = try alice.createGroup(io);
+    defer testing.allocator.free(gid);
+
+    // Bob: generate a KeyPackage.
+    var b_gs = MemGS(8).init();
+    defer b_gs.deinit();
+    var b_ks = MemKS(TestP, 8).init();
+    defer b_ks.deinit();
+    var bob = try makeTestClientBob(&b_gs, &b_ks);
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    // Alice invites Bob.
+    var result = try alice.inviteMember(
+        testing.allocator,
+        io,
+        gid,
+        bob_kp.data,
+    );
+    defer result.deinit();
+
+    // Reload Alice's group — epoch should have advanced.
+    var gs = try alice.loadGroup(io, gid);
+    defer gs.deinit();
+
+    try testing.expectEqual(@as(u64, 1), gs.epoch());
+
+    // Tree should now have 2 leaf slots (Alice + Bob).
+    try testing.expectEqual(@as(u32, 2), gs.leafCount());
 }
