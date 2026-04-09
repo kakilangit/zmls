@@ -18,8 +18,65 @@ const ProposalType = types.ProposalType;
 const SenderType = types.SenderType;
 const LeafIndex = types.LeafIndex;
 const CommitSender = evolution.CommitSender;
+const KeyPackage = mls.KeyPackage;
+const Credential = mls.Credential;
 
 // ── Helpers ─────────────────────────────────────────────────
+
+/// Build an Add proposal with a minimal KeyPackage.
+fn makeAdd(tag: u8) Proposal {
+    const id: []const u8 = @as(
+        [*]const u8,
+        @ptrCast(&tag),
+    )[0..1];
+    const versions = comptime [_]types.ProtocolVersion{
+        .mls10,
+    };
+    const suites = comptime [_]types.CipherSuite{
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+    };
+    const cred_types = comptime [_]types.CredentialType{
+        .basic,
+    };
+    return .{
+        .tag = .add,
+        .payload = .{
+            .add = .{
+                .key_package = .{
+                    .version = .mls10,
+                    .cipher_suite = .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+                    .init_key = id,
+                    .leaf_node = .{
+                        .encryption_key = id,
+                        .signature_key = id,
+                        .credential = Credential.initBasic(
+                            id,
+                        ),
+                        .capabilities = .{
+                            .versions = &versions,
+                            .cipher_suites = &suites,
+                            .extensions = &.{},
+                            .proposals = &.{},
+                            .credentials = &cred_types,
+                        },
+                        .source = .key_package,
+                        .lifetime = .{
+                            .not_before = 0,
+                            .not_after = std.math.maxInt(
+                                u64,
+                            ),
+                        },
+                        .parent_hash = null,
+                        .extensions = &.{},
+                        .signature = id,
+                    },
+                    .extensions = &.{},
+                    .signature = id,
+                },
+            },
+        },
+    };
+}
 
 /// Build a Remove proposal targeting the given leaf index.
 fn makeRemove(leaf: u32) Proposal {
@@ -80,6 +137,7 @@ fn makeGCE() Proposal {
 // ── Fuzz: validateProposalList ──────────────────────────────
 
 const Choice = enum(u3) {
+    add,
     remove_low,
     remove_high,
     psk,
@@ -100,6 +158,14 @@ fn fuzzValidateProposals(
 
         const choice = smith.value(Choice);
         switch (choice) {
+            .add => {
+                const tag = smith.valueRangeAtMost(
+                    u8,
+                    0,
+                    255,
+                );
+                proposals[len] = makeAdd(tag);
+            },
             .remove_low => {
                 const leaf = smith.valueRangeAtMost(
                     u32,
@@ -156,6 +222,9 @@ fn fuzzProposalCodec(
     // Build a random proposal and encode it, then decode.
     const choice = smith.value(Choice);
     const prop: Proposal = switch (choice) {
+        .add => makeAdd(
+            smith.valueRangeAtMost(u8, 0, 255),
+        ),
         .remove_low => makeRemove(
             smith.valueRangeAtMost(u32, 0, 255),
         ),
@@ -168,17 +237,18 @@ fn fuzzProposalCodec(
     };
 
     // Encode.
-    var buf: [512]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     const end = prop.encode(&buf, 0) catch return;
 
     // Decode.
     const alloc = testing.allocator;
-    const r = Proposal.decode(alloc, &buf, 0) catch return;
-    _ = r;
+    var r = Proposal.decode(alloc, &buf, 0) catch return;
+    r.value.deinit(alloc);
 
     // Verify position matches.
-    const r2 = Proposal.decode(alloc, buf[0..end], 0) catch
+    var r2 = Proposal.decode(alloc, buf[0..end], 0) catch
         return;
+    defer r2.value.deinit(alloc);
     try testing.expectEqual(end, r2.pos);
 }
 
