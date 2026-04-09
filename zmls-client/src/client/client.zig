@@ -1099,13 +1099,13 @@ pub fn Client(comptime P: type) type {
                 ) catch return error.Truncated;
                 if (pres.value != 0) {
                     const nd = zmls.tree_node.Node.decode(
-                        std.heap.page_allocator,
+                        allocator,
                         data,
                         pres.pos,
                     ) catch return error.Truncated;
                     var node_copy = nd.value;
                     node_copy.deinit(
-                        std.heap.page_allocator,
+                        allocator,
                     );
                     count_pos = nd.pos;
                 } else {
@@ -1129,7 +1129,7 @@ pub fn Client(comptime P: type) type {
                 );
                 if (pres.value != 0) {
                     const nd = try zmls.tree_node.Node.decode(
-                        std.heap.page_allocator,
+                        allocator,
                         data,
                         pres.pos,
                     );
@@ -1142,6 +1142,7 @@ pub fn Client(comptime P: type) type {
                 ni += 1;
             }
 
+            tree.owns_contents = true;
             return tree;
         }
 
@@ -1162,6 +1163,7 @@ pub fn Client(comptime P: type) type {
             joiner_leaf.source = .commit;
 
             const eph_count = countEphSeeds(
+                allocator,
                 &parsed.tree,
                 parsed.tree.leaf_count,
             ) catch return error.ExternalCommitFailed;
@@ -1241,6 +1243,7 @@ pub fn Client(comptime P: type) type {
         }
 
         fn countEphSeeds(
+            allocator: Allocator,
             tree: *const zmls.RatchetTree,
             leaf_count: u32,
         ) error{CountFailed}!u32 {
@@ -1254,7 +1257,7 @@ pub fn Client(comptime P: type) type {
             );
 
             var extended_tree = zmls.RatchetTree.init(
-                std.heap.page_allocator,
+                allocator,
                 padded_lc,
             ) catch return error.CountFailed;
             defer extended_tree.deinit();
