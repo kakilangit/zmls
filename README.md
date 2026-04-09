@@ -86,6 +86,12 @@ transport, or storage.
 | MLS_256_DHKEMP256_CHACHA20POLY1305_SHA256_P256 | 0x0004 | P-256 | ChaCha20-Poly1305 | SHA-256 | ECDSA P-256 |
 | MLS_256_DHKEMP384_AES256GCM_SHA384_P384 | 0x0006 | P-384 | AES-256-GCM | SHA-384 | ECDSA P-384 |
 
+Suites 0x0005 (`MLS_256_DHKEMX448_AES256GCM_SHA512_Ed448`) and
+0x0007 (`MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448`) are
+**not supported**. X448 and Ed448 are not available in Zig's
+standard library, and these suites see negligible adoption in
+practice.
+
 ### Source Layout
 
 ```
