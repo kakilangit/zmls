@@ -1184,6 +1184,852 @@ test "method API: createCommit + joinViaWelcome" {
     );
 }
 
+// ── Test: PSK proposal end-to-end ───────────────────────────
+//
+// Create → add B → commit with external PSK → both agree.
+
+test "PSK proposal: external PSK through commit pipeline" {
+    const alloc = testing.allocator;
+
+    // Alice creates a group.
+    const alice_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0xA1),
+    );
+    const alice_sign = try Default.signKeypairFromSeed(
+        &testSeed(0xA2),
+    );
+
+    var gs = try mls.createGroup(
+        Default,
+        alloc,
+        "psk-test",
+        makeTestLeafWithKeys(&alice_enc.pk, &alice_sign.pk),
+        suite,
+        &.{},
+    );
+    defer gs.deinit();
+
+    // Add Bob.
+    var bob_tkp: TestKP = undefined;
+    try bob_tkp.init(0xB1, 0xB3, 0xB2);
+
+    const add_bob = [_]Proposal{.{
+        .tag = .add,
+        .payload = .{
+            .add = .{ .key_package = bob_tkp.kp },
+        },
+    }};
+
+    var cr1 = try mls.createCommit(
+        Default,
+        alloc,
+        &gs.group_context,
+        &gs.tree,
+        gs.my_leaf_index,
+        &add_bob,
+        &alice_sign.sk,
+        &gs.interim_transcript_hash,
+        &gs.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr1.tree.deinit();
+    defer cr1.deinit(alloc);
+
+    // Set up PSK store with a shared external PSK.
+    const psk_id = "test-external-psk";
+    const psk_secret = [_]u8{0xDE} ** Default.nh;
+    const psk_nonce = [_]u8{0x01} ** Default.nh;
+    var psk_store = mls.InMemoryPskStore.init();
+    _ = psk_store.addPsk(psk_id, &psk_secret);
+
+    var res_ring = mls.ResumptionPskRing(Default).init(0);
+
+    const resolver: mls.PskResolver(Default) = .{
+        .external = psk_store.lookup(),
+        .resumption = &res_ring,
+    };
+
+    // PSK proposal (external).
+    const psk_prop = Proposal{
+        .tag = .psk,
+        .payload = .{
+            .psk = .{
+                .psk = .{
+                    .psk_type = .external,
+                    .external_psk_id = psk_id,
+                    .psk_nonce = &psk_nonce,
+                    .resumption_usage = .application,
+                    .resumption_group_id = &.{},
+                    .resumption_epoch = 0,
+                },
+            },
+        },
+    };
+    const psk_proposals = [_]Proposal{psk_prop};
+
+    // Alice commits with PSK (no path needed for PSK-only).
+    var cr2 = try mls.createCommit(
+        Default,
+        alloc,
+        &cr1.group_context,
+        &cr1.tree,
+        gs.my_leaf_index,
+        &psk_proposals,
+        &alice_sign.sk,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+        null,
+        resolver,
+        .mls_public_message,
+    );
+    defer cr2.tree.deinit();
+    defer cr2.deinit(alloc);
+
+    try testing.expectEqual(@as(u64, 2), cr2.new_epoch);
+
+    // Bob processes the PSK commit.
+    const fc = FramedContent{
+        .group_id = cr1.group_context.group_id,
+        .epoch = cr1.group_context.epoch,
+        .sender = Sender.member(gs.my_leaf_index),
+        .authenticated_data = "",
+        .content_type = .commit,
+        .content = cr2.commit_bytes[0..cr2.commit_len],
+    };
+
+    var pr = try mls.processCommit(
+        Default,
+        alloc,
+        .{
+            .fc = &fc,
+            .signature = &cr2.signature,
+            .confirmation_tag = &cr2.confirmation_tag,
+            .proposals = &psk_proposals,
+            .sender_verify_key = &alice_sign.pk,
+            .psk_resolver = resolver,
+        },
+        &cr1.group_context,
+        &cr1.tree,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+    );
+    defer pr.tree.deinit();
+    defer pr.deinit(alloc);
+
+    // Both agree on epoch secrets.
+    try testing.expectEqual(cr2.new_epoch, pr.new_epoch);
+    try testing.expectEqualSlices(
+        u8,
+        &cr2.epoch_secrets.epoch_secret,
+        &pr.epoch_secrets.epoch_secret,
+    );
+}
+
+// ── Test: Mixed Add+Remove in same commit ───────────────────
+//
+// Create → add B, C, D → commit Remove(B) + Add(E) → verify.
+
+test "mixed Add+Remove: same commit adds and removes" {
+    const alloc = testing.allocator;
+
+    const alice_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0xA1),
+    );
+    const alice_sign = try Default.signKeypairFromSeed(
+        &testSeed(0xA2),
+    );
+
+    var gs = try mls.createGroup(
+        Default,
+        alloc,
+        "mixed-add-rm",
+        makeTestLeafWithKeys(&alice_enc.pk, &alice_sign.pk),
+        suite,
+        &.{},
+    );
+    defer gs.deinit();
+
+    // Add Bob, Carol, Dave (4 leaves).
+    var bob_tkp: TestKP = undefined;
+    try bob_tkp.init(0xB1, 0xB4, 0xB2);
+    var carol_tkp: TestKP = undefined;
+    try carol_tkp.init(0xC1, 0xC4, 0xC2);
+    var dave_tkp: TestKP = undefined;
+    try dave_tkp.init(0xD1, 0xD4, 0xD2);
+
+    const add_three = [_]Proposal{
+        .{
+            .tag = .add,
+            .payload = .{
+                .add = .{ .key_package = bob_tkp.kp },
+            },
+        },
+        .{
+            .tag = .add,
+            .payload = .{
+                .add = .{ .key_package = carol_tkp.kp },
+            },
+        },
+        .{
+            .tag = .add,
+            .payload = .{
+                .add = .{ .key_package = dave_tkp.kp },
+            },
+        },
+    };
+
+    var cr1 = try mls.createCommit(
+        Default,
+        alloc,
+        &gs.group_context,
+        &gs.tree,
+        gs.my_leaf_index,
+        &add_three,
+        &alice_sign.sk,
+        &gs.interim_transcript_hash,
+        &gs.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr1.tree.deinit();
+    defer cr1.deinit(alloc);
+
+    try testing.expectEqual(@as(u32, 4), cr1.tree.leaf_count);
+
+    // Now: commit with Remove(Bob, leaf 1) + Add(Eve).
+    var eve_tkp: TestKP = undefined;
+    try eve_tkp.init(0xE1, 0xE4, 0xE2);
+
+    const mixed_proposals = [_]Proposal{
+        // Remove Bob (leaf 1).
+        .{
+            .tag = .remove,
+            .payload = .{ .remove = .{ .removed = 1 } },
+        },
+        // Add Eve.
+        .{
+            .tag = .add,
+            .payload = .{
+                .add = .{ .key_package = eve_tkp.kp },
+            },
+        },
+    };
+
+    // Remove requires a path.
+    // 4-leaf tree, Alice at leaf 0:
+    //   direct path = [1, 3], copath = [2(bob), 5].
+    //   Bob (node 2) removed → resolution({}) = 0 seeds.
+    //   Node 5: left=4(carol), right=6(dave) → 2 seeds.
+    //   But after remove, Add(eve) fills blank leaf 1.
+    //   So at commit time the tree before add has 3 members.
+    //   Eph seeds: for the copath after remove. Bob leaf is
+    //   removed → blank. Eve is added after. We need seeds
+    //   for current resolution of each copath node.
+    const leaf_secret = [_]u8{0xF0} ** Default.nh;
+    const eph_seeds = [_][32]u8{
+        [_]u8{0xE0} ** 32,
+        [_]u8{0xE1} ** 32,
+    };
+
+    const new_alice_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0xA3),
+    );
+    const new_alice = makeTestLeafWithKeys(
+        &new_alice_enc.pk,
+        &alice_sign.pk,
+    );
+
+    const pp: mls.PathParams(Default) = .{
+        .allocator = alloc,
+        .new_leaf = new_alice,
+        .leaf_secret = &leaf_secret,
+        .eph_seeds = &eph_seeds,
+    };
+
+    var cr2 = try mls.createCommit(
+        Default,
+        alloc,
+        &cr1.group_context,
+        &cr1.tree,
+        gs.my_leaf_index,
+        &mixed_proposals,
+        &alice_sign.sk,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+        pp,
+        null,
+        .mls_public_message,
+    );
+    defer cr2.tree.deinit();
+    defer cr2.deinit(alloc);
+
+    try testing.expectEqual(@as(u64, 2), cr2.new_epoch);
+
+    // Bob's leaf (1) should now be Eve (Add fills blank).
+    const leaf1 = try cr2.tree.getLeaf(LeafIndex.fromU32(1));
+    try testing.expect(leaf1 != null);
+    // Eve's signature key should be in the leaf.
+    try testing.expectEqualSlices(
+        u8,
+        &eve_tkp.sign_pk,
+        leaf1.?.signature_key,
+    );
+
+    // Carol (leaf 2) and Dave (leaf 3) still present.
+    try testing.expect(
+        (try cr2.tree.getLeaf(LeafIndex.fromU32(2))) != null,
+    );
+    try testing.expect(
+        (try cr2.tree.getLeaf(LeafIndex.fromU32(3))) != null,
+    );
+
+    // Carol processes the commit with path decryption.
+    const commit_data = cr2.commit_bytes[0..cr2.commit_len];
+    var dec = try mls.Commit.decode(alloc, commit_data, 0);
+    defer dec.value.deinit(alloc);
+
+    const fc = FramedContent{
+        .group_id = cr1.group_context.group_id,
+        .epoch = cr1.group_context.epoch,
+        .sender = Sender.member(gs.my_leaf_index),
+        .authenticated_data = "",
+        .content_type = .commit,
+        .content = commit_data,
+    };
+
+    const rp: mls.ReceiverPathParams(Default) = .{
+        .receiver = LeafIndex.fromU32(2),
+        .receiver_sk = &carol_tkp.enc_sk,
+        .receiver_pk = &carol_tkp.enc_pk,
+    };
+
+    var pr = try mls.processCommit(
+        Default,
+        alloc,
+        .{
+            .fc = &fc,
+            .signature = &cr2.signature,
+            .confirmation_tag = &cr2.confirmation_tag,
+            .proposals = &mixed_proposals,
+            .update_path = if (dec.value.path) |*p| p else null,
+            .sender_verify_key = &alice_sign.pk,
+            .receiver_params = rp,
+        },
+        &cr1.group_context,
+        &cr1.tree,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+    );
+    defer pr.tree.deinit();
+    defer pr.deinit(alloc);
+
+    // Carol agrees on epoch secrets.
+    try testing.expectEqual(cr2.new_epoch, pr.new_epoch);
+    try testing.expectEqualSlices(
+        u8,
+        &cr2.epoch_secrets.epoch_secret,
+        &pr.epoch_secrets.epoch_secret,
+    );
+}
+
+// ── Test: Concurrent commits (WrongEpoch) ───────────────────
+//
+// Create → add B, C → both B and C commit at same epoch →
+// second commit rejected with WrongEpoch.
+
+test "concurrent commits: second commit rejected" {
+    const alloc = testing.allocator;
+
+    const alice_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0x11),
+    );
+    const alice_sign = try Default.signKeypairFromSeed(
+        &testSeed(0x12),
+    );
+
+    var gs = try mls.createGroup(
+        Default,
+        alloc,
+        "concurrent-test",
+        makeTestLeafWithKeys(&alice_enc.pk, &alice_sign.pk),
+        suite,
+        &.{},
+    );
+    defer gs.deinit();
+
+    // Add Bob and Carol to get a 3-member group.
+    var bob_tkp: TestKP = undefined;
+    try bob_tkp.init(0x21, 0x24, 0x22);
+    var carol_tkp: TestKP = undefined;
+    try carol_tkp.init(0x31, 0x34, 0x32);
+
+    const add_two = [_]Proposal{
+        .{
+            .tag = .add,
+            .payload = .{
+                .add = .{ .key_package = bob_tkp.kp },
+            },
+        },
+        .{
+            .tag = .add,
+            .payload = .{
+                .add = .{ .key_package = carol_tkp.kp },
+            },
+        },
+    };
+
+    var cr1 = try mls.createCommit(
+        Default,
+        alloc,
+        &gs.group_context,
+        &gs.tree,
+        gs.my_leaf_index,
+        &add_two,
+        &alice_sign.sk,
+        &gs.interim_transcript_hash,
+        &gs.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr1.tree.deinit();
+    defer cr1.deinit(alloc);
+
+    try testing.expectEqual(@as(u32, 3), cr1.tree.leaf_count);
+
+    // Both Alice and Bob create commits at epoch 1.
+    // Alice's commit: add Dave.
+    var dave_tkp: TestKP = undefined;
+    try dave_tkp.init(0x41, 0x44, 0x42);
+
+    const add_dave = [_]Proposal{.{
+        .tag = .add,
+        .payload = .{
+            .add = .{ .key_package = dave_tkp.kp },
+        },
+    }};
+
+    var cr_alice = try mls.createCommit(
+        Default,
+        alloc,
+        &cr1.group_context,
+        &cr1.tree,
+        gs.my_leaf_index,
+        &add_dave,
+        &alice_sign.sk,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr_alice.tree.deinit();
+    defer cr_alice.deinit(alloc);
+
+    // Bob's commit: empty commit with path at same epoch.
+    const bob_leaf_secret = [_]u8{0xF1} ** Default.nh;
+    // 3-leaf tree, Bob at leaf 1:
+    //   Copath = [node 0 (alice), node 4 (carol)].
+    //   resolution(alice)={alice}, resolution(carol)={carol}
+    //   → 2 eph seeds.
+    const bob_eph_seeds = [_][32]u8{
+        [_]u8{0xE1} ** 32,
+        [_]u8{0xE2} ** 32,
+    };
+    const new_bob_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0x25),
+    );
+    const new_bob_leaf = makeTestLeafWithKeys(
+        &new_bob_enc.pk,
+        &bob_tkp.sign_pk,
+    );
+    const bob_pp: mls.PathParams(Default) = .{
+        .allocator = alloc,
+        .new_leaf = new_bob_leaf,
+        .leaf_secret = &bob_leaf_secret,
+        .eph_seeds = &bob_eph_seeds,
+    };
+
+    const empty = [_]Proposal{};
+    var cr_bob = try mls.createCommit(
+        Default,
+        alloc,
+        &cr1.group_context,
+        &cr1.tree,
+        LeafIndex.fromU32(1),
+        &empty,
+        &bob_tkp.sign_sk,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+        bob_pp,
+        null,
+        .mls_public_message,
+    );
+    defer cr_bob.tree.deinit();
+    defer cr_bob.deinit(alloc);
+
+    // Carol processes Alice's commit first (succeeds).
+    const fc_alice = FramedContent{
+        .group_id = cr1.group_context.group_id,
+        .epoch = cr1.group_context.epoch,
+        .sender = Sender.member(gs.my_leaf_index),
+        .authenticated_data = "",
+        .content_type = .commit,
+        .content = cr_alice.commit_bytes[0..cr_alice.commit_len],
+    };
+
+    var pr_alice = try mls.processCommit(
+        Default,
+        alloc,
+        .{
+            .fc = &fc_alice,
+            .signature = &cr_alice.signature,
+            .confirmation_tag = &cr_alice.confirmation_tag,
+            .proposals = &add_dave,
+            .sender_verify_key = &alice_sign.pk,
+        },
+        &cr1.group_context,
+        &cr1.tree,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+    );
+    defer pr_alice.tree.deinit();
+    defer pr_alice.deinit(alloc);
+
+    try testing.expectEqual(@as(u64, 2), pr_alice.new_epoch);
+
+    // Carol tries to process Bob's commit (same epoch 1).
+    // Should fail with WrongEpoch since Carol is now at epoch 2.
+    const fc_bob = FramedContent{
+        .group_id = cr1.group_context.group_id,
+        .epoch = cr1.group_context.epoch,
+        .sender = Sender.member(LeafIndex.fromU32(1)),
+        .authenticated_data = "",
+        .content_type = .commit,
+        .content = cr_bob.commit_bytes[0..cr_bob.commit_len],
+    };
+
+    const bob_commit_data =
+        cr_bob.commit_bytes[0..cr_bob.commit_len];
+    var dec_bob = try mls.Commit.decode(
+        alloc,
+        bob_commit_data,
+        0,
+    );
+    defer dec_bob.value.deinit(alloc);
+
+    try testing.expectError(
+        error.WrongEpoch,
+        mls.processCommit(
+            Default,
+            alloc,
+            .{
+                .fc = &fc_bob,
+                .signature = &cr_bob.signature,
+                .confirmation_tag = &cr_bob.confirmation_tag,
+                .proposals = &empty,
+                .update_path = if (dec_bob.value.path) |*p|
+                    p
+                else
+                    null,
+                .sender_verify_key = &bob_tkp.sign_pk,
+            },
+            &pr_alice.group_context,
+            &pr_alice.tree,
+            &pr_alice.interim_transcript_hash,
+            &pr_alice.epoch_secrets.init_secret,
+        ),
+    );
+}
+
+// ── Test: GCE proposal end-to-end ───────────────────────────
+//
+// Create → add B → GCE commit with path → verify extensions
+// updated.
+
+test "GCE proposal: extensions updated through commit" {
+    const alloc = testing.allocator;
+
+    // Both members must support the extension type we're going
+    // to set via GCE. Use a non-default extension type (>5)
+    // since default types (1-5) must NOT appear in capabilities.
+    const custom_ext_type: mls.ExtensionType = @enumFromInt(
+        0xFF01,
+    );
+    const ext_types = [_]mls.ExtensionType{custom_ext_type};
+
+    // Helper to build leaf with extension support.
+    const versions = comptime [_]ProtocolVersion{.mls10};
+    const suites = comptime [_]CipherSuite{
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+    };
+    const prop_types = comptime [_]mls.types.ProposalType{};
+    const cred_types = comptime [_]mls.types.CredentialType{
+        .basic,
+    };
+
+    const alice_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0xA1),
+    );
+    const alice_sign = try Default.signKeypairFromSeed(
+        &testSeed(0xA2),
+    );
+
+    const alice_leaf = LeafNode{
+        .encryption_key = &alice_enc.pk,
+        .signature_key = &alice_sign.pk,
+        .credential = Credential.initBasic(&alice_sign.pk),
+        .capabilities = .{
+            .versions = &versions,
+            .cipher_suites = &suites,
+            .extensions = &ext_types,
+            .proposals = &prop_types,
+            .credentials = &cred_types,
+        },
+        .source = .key_package,
+        .lifetime = .{
+            .not_before = 0,
+            .not_after = 0xFFFFFFFFFFFFFFFF,
+        },
+        .parent_hash = null,
+        .extensions = &.{},
+        .signature = &[_]u8{0xAA} ** 64,
+    };
+
+    var gs = try mls.createGroup(
+        Default,
+        alloc,
+        "gce-test",
+        alice_leaf,
+        suite,
+        &.{},
+    );
+    defer gs.deinit();
+
+    // Add Bob with extension support.
+    const bob_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0xB1),
+    );
+    const bob_init = try Default.dhKeypairFromSeed(
+        &testSeed(0xB3),
+    );
+    const bob_sign = try Default.signKeypairFromSeed(
+        &testSeed(0xB2),
+    );
+
+    var bob_leaf_sig: [Default.sig_len]u8 = undefined;
+    var bob_kp_sig: [Default.sig_len]u8 = undefined;
+
+    var bob_leaf_node = LeafNode{
+        .encryption_key = &bob_enc.pk,
+        .signature_key = &bob_sign.pk,
+        .credential = Credential.initBasic(&bob_sign.pk),
+        .capabilities = .{
+            .versions = &versions,
+            .cipher_suites = &suites,
+            .extensions = &ext_types,
+            .proposals = &prop_types,
+            .credentials = &cred_types,
+        },
+        .source = .key_package,
+        .lifetime = .{
+            .not_before = 0,
+            .not_after = 0xFFFFFFFFFFFFFFFF,
+        },
+        .parent_hash = null,
+        .extensions = &.{},
+        .signature = &bob_leaf_sig,
+    };
+
+    try bob_leaf_node.signLeafNode(
+        Default,
+        &bob_sign.sk,
+        &bob_leaf_sig,
+        null,
+        null,
+    );
+
+    var bob_kp = KeyPackage{
+        .version = .mls10,
+        .cipher_suite = suite,
+        .init_key = &bob_init.pk,
+        .leaf_node = bob_leaf_node,
+        .extensions = &.{},
+        .signature = &bob_kp_sig,
+    };
+    try bob_kp.signKeyPackage(
+        Default,
+        &bob_sign.sk,
+        &bob_kp_sig,
+    );
+
+    const add_bob = [_]Proposal{.{
+        .tag = .add,
+        .payload = .{ .add = .{ .key_package = bob_kp } },
+    }};
+
+    var cr1 = try mls.createCommit(
+        Default,
+        alloc,
+        &gs.group_context,
+        &gs.tree,
+        gs.my_leaf_index,
+        &add_bob,
+        &alice_sign.sk,
+        &gs.interim_transcript_hash,
+        &gs.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr1.tree.deinit();
+    defer cr1.deinit(alloc);
+
+    // GCE commit: set application_id extension.
+    const gce_data = "my-application-id";
+    const gce_ext = Extension{
+        .extension_type = custom_ext_type,
+        .data = gce_data,
+    };
+    const gce_exts = [_]Extension{gce_ext};
+    const gce_prop = Proposal{
+        .tag = .group_context_extensions,
+        .payload = .{
+            .group_context_extensions = .{
+                .extensions = &gce_exts,
+            },
+        },
+    };
+    const gce_proposals = [_]Proposal{gce_prop};
+
+    // GCE requires a path (zmls intentional strictness).
+    // 2-leaf tree: copath = [bob's leaf] → 1 eph seed.
+    const leaf_secret = [_]u8{0xF0} ** Default.nh;
+    const eph_seeds = [_][32]u8{[_]u8{0xE0} ** 32};
+    const new_alice_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0xA3),
+    );
+
+    const new_alice_leaf = LeafNode{
+        .encryption_key = &new_alice_enc.pk,
+        .signature_key = &alice_sign.pk,
+        .credential = Credential.initBasic(&alice_sign.pk),
+        .capabilities = .{
+            .versions = &versions,
+            .cipher_suites = &suites,
+            .extensions = &ext_types,
+            .proposals = &prop_types,
+            .credentials = &cred_types,
+        },
+        .source = .commit,
+        .lifetime = null,
+        .parent_hash = null,
+        .extensions = &.{},
+        .signature = &[_]u8{0xAA} ** 64,
+    };
+
+    const pp: mls.PathParams(Default) = .{
+        .allocator = alloc,
+        .new_leaf = new_alice_leaf,
+        .leaf_secret = &leaf_secret,
+        .eph_seeds = &eph_seeds,
+    };
+
+    var cr2 = try mls.createCommit(
+        Default,
+        alloc,
+        &cr1.group_context,
+        &cr1.tree,
+        gs.my_leaf_index,
+        &gce_proposals,
+        &alice_sign.sk,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+        pp,
+        null,
+        .mls_public_message,
+    );
+    defer cr2.tree.deinit();
+    defer cr2.deinit(alloc);
+
+    try testing.expectEqual(@as(u64, 2), cr2.new_epoch);
+
+    // Verify the new group context has the GCE extensions.
+    try testing.expectEqual(
+        @as(usize, 1),
+        cr2.group_context.extensions.len,
+    );
+    try testing.expectEqual(
+        custom_ext_type,
+        cr2.group_context.extensions[0].extension_type,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        gce_data,
+        cr2.group_context.extensions[0].data,
+    );
+
+    // Bob processes the GCE commit with path decryption.
+    const commit_data = cr2.commit_bytes[0..cr2.commit_len];
+    var dec = try mls.Commit.decode(alloc, commit_data, 0);
+    defer dec.value.deinit(alloc);
+
+    const fc = FramedContent{
+        .group_id = cr1.group_context.group_id,
+        .epoch = cr1.group_context.epoch,
+        .sender = Sender.member(gs.my_leaf_index),
+        .authenticated_data = "",
+        .content_type = .commit,
+        .content = commit_data,
+    };
+
+    const rp: mls.ReceiverPathParams(Default) = .{
+        .receiver = LeafIndex.fromU32(1),
+        .receiver_sk = &bob_enc.sk,
+        .receiver_pk = &bob_enc.pk,
+    };
+
+    var pr = try mls.processCommit(
+        Default,
+        alloc,
+        .{
+            .fc = &fc,
+            .signature = &cr2.signature,
+            .confirmation_tag = &cr2.confirmation_tag,
+            .proposals = &gce_proposals,
+            .update_path = if (dec.value.path) |*p| p else null,
+            .sender_verify_key = &alice_sign.pk,
+            .receiver_params = rp,
+        },
+        &cr1.group_context,
+        &cr1.tree,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+    );
+    defer pr.tree.deinit();
+    defer pr.deinit(alloc);
+
+    // Bob agrees: epoch, secrets, and extensions.
+    try testing.expectEqual(cr2.new_epoch, pr.new_epoch);
+    try testing.expectEqualSlices(
+        u8,
+        &cr2.epoch_secrets.epoch_secret,
+        &pr.epoch_secrets.epoch_secret,
+    );
+    try testing.expectEqual(
+        @as(usize, 1),
+        pr.group_context.extensions.len,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        gce_data,
+        pr.group_context.extensions[0].data,
+    );
+}
+
 test "unified API: commit + applyCommit + joinViaWelcome" {
     const alloc = testing.allocator;
 
