@@ -2140,3 +2140,309 @@ test "unified API: commit + applyCommit + joinViaWelcome" {
         bob_gs.epochAuthenticator(),
     );
 }
+
+// ── Adversarial / negative tests (P6.5) ─────────────────────
+
+test "replay: same commit processed twice rejected" {
+    const alloc = testing.allocator;
+
+    // Create 1-member group (Alice).
+    const alice_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0xA1),
+    );
+    const alice_sign = try Default.signKeypairFromSeed(
+        &testSeed(0xA2),
+    );
+
+    var gs = try mls.createGroup(
+        Default,
+        alloc,
+        "replay-test",
+        makeTestLeafWithKeys(&alice_enc.pk, &alice_sign.pk),
+        suite,
+        &.{},
+    );
+    defer gs.deinit();
+
+    var bob_tkp: TestKP = undefined;
+    try bob_tkp.init(0xB1, 0xB3, 0xB2);
+
+    var carol_tkp: TestKP = undefined;
+    try carol_tkp.init(0xC1, 0xC3, 0xC2);
+
+    // Add Bob (epoch 0 → 1).
+    const add_bob = [_]Proposal{.{
+        .tag = .add,
+        .payload = .{
+            .add = .{ .key_package = bob_tkp.kp },
+        },
+    }};
+
+    var cr1 = try mls.createCommit(
+        Default,
+        alloc,
+        &gs.group_context,
+        &gs.tree,
+        gs.my_leaf_index,
+        &add_bob,
+        &alice_sign.sk,
+        &gs.interim_transcript_hash,
+        &gs.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr1.tree.deinit();
+    defer cr1.deinit(alloc);
+
+    // Add Carol at epoch 1.
+    const add_carol = [_]Proposal{.{
+        .tag = .add,
+        .payload = .{
+            .add = .{ .key_package = carol_tkp.kp },
+        },
+    }};
+
+    var cr2 = try mls.createCommit(
+        Default,
+        alloc,
+        &cr1.group_context,
+        &cr1.tree,
+        gs.my_leaf_index,
+        &add_carol,
+        &alice_sign.sk,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr2.tree.deinit();
+    defer cr2.deinit(alloc);
+
+    const fc2 = FramedContent{
+        .group_id = cr1.group_context.group_id,
+        .epoch = cr1.group_context.epoch,
+        .sender = Sender.member(gs.my_leaf_index),
+        .authenticated_data = "",
+        .content_type = .commit,
+        .content = cr2.commit_bytes[0..cr2.commit_len],
+    };
+
+    // Bob processes Alice's epoch-1 commit (succeeds).
+    var pr = try mls.processCommit(
+        Default,
+        alloc,
+        .{
+            .fc = &fc2,
+            .signature = &cr2.signature,
+            .confirmation_tag = &cr2.confirmation_tag,
+            .proposals = &add_carol,
+            .sender_verify_key = &alice_sign.pk,
+        },
+        &cr1.group_context,
+        &cr1.tree,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+    );
+    defer pr.tree.deinit();
+    defer pr.deinit(alloc);
+
+    try testing.expectEqual(@as(u64, 2), pr.new_epoch);
+
+    // Replay: Bob tries to process the same commit again.
+    // Now Bob is at epoch 2, commit is for epoch 1 → WrongEpoch.
+    try testing.expectError(
+        error.WrongEpoch,
+        mls.processCommit(
+            Default,
+            alloc,
+            .{
+                .fc = &fc2,
+                .signature = &cr2.signature,
+                .confirmation_tag = &cr2.confirmation_tag,
+                .proposals = &add_carol,
+                .sender_verify_key = &alice_sign.pk,
+            },
+            &pr.group_context,
+            &pr.tree,
+            &pr.interim_transcript_hash,
+            &pr.epoch_secrets.init_secret,
+        ),
+    );
+}
+
+test "forward secrecy: epoch secrets differ after advance" {
+    const alloc = testing.allocator;
+
+    const alice_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0xF1),
+    );
+    const alice_sign = try Default.signKeypairFromSeed(
+        &testSeed(0xF2),
+    );
+
+    var gs = try mls.createGroup(
+        Default,
+        alloc,
+        "forward-secrecy",
+        makeTestLeafWithKeys(&alice_enc.pk, &alice_sign.pk),
+        suite,
+        &.{},
+    );
+    defer gs.deinit();
+
+    // Capture epoch 0 secrets.
+    const epoch0_auth = gs.epoch_secrets.epoch_authenticator;
+    const epoch0_init = gs.epoch_secrets.init_secret;
+
+    // Empty commit → epoch 1.
+    const empty = [_]Proposal{};
+    var cr = try mls.createCommit(
+        Default,
+        alloc,
+        &gs.group_context,
+        &gs.tree,
+        gs.my_leaf_index,
+        &empty,
+        &alice_sign.sk,
+        &gs.interim_transcript_hash,
+        &gs.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr.tree.deinit();
+    defer cr.deinit(alloc);
+
+    // Epoch 1 secrets must differ from epoch 0.
+    const epoch1_auth = cr.epoch_secrets.epoch_authenticator;
+    const epoch1_init = cr.epoch_secrets.init_secret;
+
+    // Epoch authenticators must differ.
+    try testing.expect(!std.mem.eql(
+        u8,
+        &epoch0_auth,
+        &epoch1_auth,
+    ));
+
+    // Init secrets must differ.
+    try testing.expect(!std.mem.eql(
+        u8,
+        &epoch0_init,
+        &epoch1_init,
+    ));
+
+    // Another commit → epoch 2.
+    var cr2 = try mls.createCommit(
+        Default,
+        alloc,
+        &cr.group_context,
+        &cr.tree,
+        gs.my_leaf_index,
+        &empty,
+        &alice_sign.sk,
+        &cr.interim_transcript_hash,
+        &cr.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr2.tree.deinit();
+    defer cr2.deinit(alloc);
+
+    const epoch2_auth = cr2.epoch_secrets.epoch_authenticator;
+
+    // All three must be mutually distinct.
+    try testing.expect(!std.mem.eql(
+        u8,
+        &epoch1_auth,
+        &epoch2_auth,
+    ));
+    try testing.expect(!std.mem.eql(
+        u8,
+        &epoch0_auth,
+        &epoch2_auth,
+    ));
+}
+
+test "tampered commit signature rejected" {
+    const alloc = testing.allocator;
+
+    const alice_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0xE1),
+    );
+    const alice_sign = try Default.signKeypairFromSeed(
+        &testSeed(0xE2),
+    );
+
+    var gs = try mls.createGroup(
+        Default,
+        alloc,
+        "tamper-test",
+        makeTestLeafWithKeys(&alice_enc.pk, &alice_sign.pk),
+        suite,
+        &.{},
+    );
+    defer gs.deinit();
+
+    var bob_tkp: TestKP = undefined;
+    try bob_tkp.init(0xE3, 0xE4, 0xE5);
+
+    const add_bob = [_]Proposal{.{
+        .tag = .add,
+        .payload = .{
+            .add = .{ .key_package = bob_tkp.kp },
+        },
+    }};
+
+    var cr = try mls.createCommit(
+        Default,
+        alloc,
+        &gs.group_context,
+        &gs.tree,
+        gs.my_leaf_index,
+        &add_bob,
+        &alice_sign.sk,
+        &gs.interim_transcript_hash,
+        &gs.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr.tree.deinit();
+    defer cr.deinit(alloc);
+
+    // Tamper with the signature: flip one bit.
+    var tampered_sig = cr.signature;
+    tampered_sig[0] ^= 0x01;
+
+    const fc = FramedContent{
+        .group_id = gs.group_context.group_id,
+        .epoch = gs.group_context.epoch,
+        .sender = Sender.member(gs.my_leaf_index),
+        .authenticated_data = "",
+        .content_type = .commit,
+        .content = cr.commit_bytes[0..cr.commit_len],
+    };
+
+    // processCommit with tampered signature should fail.
+    try testing.expectError(
+        error.SignatureVerifyFailed,
+        mls.processCommit(
+            Default,
+            alloc,
+            .{
+                .fc = &fc,
+                .signature = &tampered_sig,
+                .confirmation_tag = &cr.confirmation_tag,
+                .proposals = &add_bob,
+                .sender_verify_key = &alice_sign.pk,
+            },
+            &gs.group_context,
+            &gs.tree,
+            &gs.interim_transcript_hash,
+            &gs.epoch_secrets.init_secret,
+        ),
+    );
+}
