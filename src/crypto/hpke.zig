@@ -51,6 +51,13 @@ fn hpkeSuiteId(
 /// so the buffer must accommodate the largest context plus
 /// overhead. 68 KB covers the 65536-byte max_gi_buf + tag +
 /// HPKE framing.
+///
+/// NOTE: Each call to hpkeLabeledExtract/hpkeLabeledExpand
+/// places this buffer on the stack. Peak transient stack usage
+/// during keyScheduleBase is ~68 KB (one buffer per call, not
+/// concurrent). To reduce this, kdfExtract/kdfExpand would need
+/// incremental update support, requiring changes to all crypto
+/// provider backends.
 const max_labeled_buf: u32 = 68 * 1024;
 
 /// HPKE base mode bound to a specific CryptoProvider.

@@ -242,6 +242,11 @@ pub fn decryptWithLabel(
 /// Build the EncryptContext info blob:
 ///   varint(len("MLS 1.0 " || label)) || "MLS 1.0 " || label
 ///   || varint(len(context)) || context
+///
+/// NOTE: This struct is ~65 KB. It is returned by value from
+/// buildEncryptContext and relies on compiler RVO to avoid a
+/// memcpy. If a future compiler does not perform RVO here,
+/// consider passing as an out-pointer parameter.
 const EncryptContextBuf = struct {
     buf: [65536 + 128]u8 = undefined,
     len: u32 = 0,
