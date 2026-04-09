@@ -66,6 +66,103 @@ pub fn Client(comptime P: type) type {
         const PropStore =
             proposal_store_mod.PendingProposalStore(P);
 
+        /// In-memory cache of serialized group bundles.
+        /// Keyed by group_id. Eliminates GroupStore I/O
+        /// for repeated loads of the same group.
+        const BlobCache = struct {
+            /// Maximum cached entries. Oldest entry is
+            /// evicted when capacity is reached.
+            const max_entries: u32 = 16;
+
+            map: std.StringArrayHashMapUnmanaged([]u8),
+            alloc: Allocator,
+
+            fn init(allocator: Allocator) BlobCache {
+                return .{
+                    .map = .empty,
+                    .alloc = allocator,
+                };
+            }
+
+            fn deinit(self: *BlobCache) void {
+                var it = self.map.iterator();
+                while (it.next()) |e| {
+                    secureZeroSlice(e.value_ptr.*);
+                    self.alloc.free(e.value_ptr.*);
+                    self.alloc.free(e.key_ptr.*);
+                }
+                self.map.deinit(self.alloc);
+            }
+
+            /// Look up a cached blob. Returns a borrowed
+            /// slice (valid until the next put/evict).
+            fn get(self: *BlobCache, gid: []const u8) ?[]const u8 {
+                return self.map.get(gid);
+            }
+
+            /// Insert or replace a blob for a group.
+            /// The cache takes ownership of a copy.
+            fn put(
+                self: *BlobCache,
+                gid: []const u8,
+                blob: []const u8,
+            ) void {
+                // Replace existing entry if present.
+                if (self.map.getEntry(gid)) |e| {
+                    secureZeroSlice(e.value_ptr.*);
+                    self.alloc.free(e.value_ptr.*);
+                    const copy = self.alloc.dupe(
+                        u8,
+                        blob,
+                    ) catch return; // best-effort
+                    e.value_ptr.* = copy;
+                    return;
+                }
+
+                // Evict oldest if at capacity.
+                if (self.map.count() >= max_entries) {
+                    // ArrayHashMap preserves insertion order.
+                    // Entry 0 is the oldest.
+                    const keys = self.map.keys();
+                    const vals = self.map.values();
+                    secureZeroSlice(vals[0]);
+                    self.alloc.free(vals[0]);
+                    self.alloc.free(keys[0]);
+                    self.map.swapRemoveAt(0);
+                }
+
+                const key = self.alloc.dupe(
+                    u8,
+                    gid,
+                ) catch return;
+                const val = self.alloc.dupe(
+                    u8,
+                    blob,
+                ) catch {
+                    self.alloc.free(key);
+                    return;
+                };
+                self.map.put(
+                    self.alloc,
+                    key,
+                    val,
+                ) catch {
+                    self.alloc.free(key);
+                    secureZeroSlice(val);
+                    self.alloc.free(val);
+                };
+            }
+
+            /// Remove a cached entry for a group.
+            fn evict(self: *BlobCache, gid: []const u8) void {
+                if (self.map.fetchSwapRemove(gid)) |e| {
+                    secureZeroSlice(e.value);
+                    self.alloc.free(e.value);
+                    self.alloc.free(e.key);
+                }
+            }
+        };
+
         // ── Identity (immutable after init) ────────────
         identity: []const u8,
         cipher_suite: zmls.CipherSuite,
@@ -88,6 +185,9 @@ pub fn Client(comptime P: type) type {
 
         // ── Pending proposals (survives serialization) ─
         proposal_store: PropStore,
+
+        // ── Bundle cache (in-memory, avoids store I/O) ─
+        bundle_cache: BlobCache,
 
         // ── Allocator (managed pattern) ────────────────
         allocator: Allocator,
@@ -278,6 +378,7 @@ pub fn Client(comptime P: type) type {
                     .wire_format_policy,
                 .pending_key_packages = PendingMap.init(),
                 .proposal_store = PropStore.init(),
+                .bundle_cache = BlobCache.init(allocator),
                 .allocator = allocator,
                 .closed = false,
             };
@@ -287,6 +388,7 @@ pub fn Client(comptime P: type) type {
             secureZeroSlice(&self.signing_secret_key);
             secureZeroSlice(&self.signing_public_key);
             self.pending_key_packages.deinit();
+            self.bundle_cache.deinit();
             self.allocator.free(self.identity);
             self.identity = &.{};
             self.closed = true;
@@ -304,6 +406,15 @@ pub fn Client(comptime P: type) type {
             GroupNotFound,
             BundleDeserializeFailed,
         })!Bundle {
+            // Fast path: use cached serialized blob.
+            if (self.bundle_cache.get(group_id)) |cached| {
+                return Bundle.deserialize(
+                    self.allocator,
+                    cached,
+                ) catch return error.BundleDeserializeFailed;
+            }
+
+            // Slow path: load from store, populate cache.
             const blob = (try self.group_store.load(
                 self.allocator,
                 io,
@@ -313,10 +424,12 @@ pub fn Client(comptime P: type) type {
                 secureZeroSlice(blob);
                 self.allocator.free(blob);
             }
-            return Bundle.deserialize(
+            const bundle = Bundle.deserialize(
                 self.allocator,
                 blob,
             ) catch return error.BundleDeserializeFailed;
+            self.bundle_cache.put(group_id, blob);
+            return bundle;
         }
 
         fn persistBundle(
@@ -338,6 +451,8 @@ pub fn Client(comptime P: type) type {
                 self.allocator.free(blob);
             }
             try self.group_store.save(io, group_id, blob);
+            // Write-through: update cache with fresh blob.
+            self.bundle_cache.put(group_id, blob);
         }
 
         // ────────────────────────────────────────────────
@@ -1027,6 +1142,7 @@ pub fn Client(comptime P: type) type {
                 ) catch {};
             } else |_| {}
 
+            self.bundle_cache.evict(group_id);
             try self.group_store.delete(io, group_id);
         }
 
@@ -2456,6 +2572,17 @@ pub fn Client(comptime P: type) type {
             group_id: []const u8,
         ) void {
             self.proposal_store.clearGroup(group_id);
+        }
+
+        /// Evict a group's cached bundle blob, forcing the
+        /// next loadBundle to read from the GroupStore. Use
+        /// this after external store modifications that
+        /// bypass the Client API.
+        pub fn invalidateGroupCache(
+            self: *Self,
+            group_id: []const u8,
+        ) void {
+            self.bundle_cache.evict(group_id);
         }
 
         /// Encrypt and send an application message with

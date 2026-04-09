@@ -1379,6 +1379,7 @@ test "Client: commitPending preserves proposals on failure" {
     // Delete Bob's group state so commitPending will fail
     // during loadBundle.
     try bob_group_store.groupStore().delete(io, group_id);
+    bob.invalidateGroupCache(group_id);
 
     // commitPending should fail (GroupNotFound).
     const result = bob.commitPending(
