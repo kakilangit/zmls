@@ -238,14 +238,7 @@ pub fn processWelcome(
         &tree,
         &gi,
     );
-    errdefer gc.deinit(allocator);
-
-    // OWNERSHIP: gc.group_id and gc.extensions are heap-allocated
-    // by `allocator` during GroupContext.decode. On the success
-    // path below, these slices are moved (by copy) into the
-    // returned GroupState.group_context. Therefore gc must NOT be
-    // deinited on success — only via errdefer on error paths.
-    // Do NOT add `defer gc.deinit(allocator)` here.
+    defer gc.deinit(allocator);
 
     // RFC 9420 S12.4.3.1: cipher suite must match.
     if (welcome.cipher_suite != gc.cipher_suite)
@@ -272,7 +265,7 @@ pub fn processWelcome(
     );
 
     // 11. Build GroupState.
-    return buildWelcomeGroupState(
+    return try buildWelcomeGroupState(
         P,
         allocator,
         tree,
@@ -620,11 +613,8 @@ fn deriveWelcomeEpochState(
 
 /// Step 11: Assemble the final GroupState from components.
 ///
-/// OWNERSHIP: The returned GroupState takes ownership of
-/// `gc.group_id` and `gc.extensions` slices by shallow copy.
-/// The caller must NOT deinit `gc` after this call succeeds;
-/// the returned GroupState is responsible for freeing these
-/// allocations via its own deinit.
+/// Clones `gc.group_id` and `gc.extensions` so the caller
+/// retains full ownership of `gc` and can deinit it normally.
 fn buildWelcomeGroupState(
     comptime P: type,
     allocator: std.mem.Allocator,
@@ -632,17 +622,24 @@ fn buildWelcomeGroupState(
     gc: *const context_mod.GroupContext(P.nh),
     epoch_out: WelcomeEpochOutput(P),
     my_leaf_index: LeafIndex,
-) GroupState(P) {
+) error{OutOfMemory}!GroupState(P) {
+    const gid = try allocator.dupe(u8, gc.group_id);
+    errdefer allocator.free(gid);
+    const exts = try node_mod.cloneExtensions(
+        allocator,
+        gc.extensions,
+    );
+
     return .{
         .tree = tree,
         .group_context = .{
             .version = gc.version,
             .cipher_suite = gc.cipher_suite,
-            .group_id = gc.group_id,
+            .group_id = gid,
             .epoch = gc.epoch,
             .tree_hash = gc.tree_hash,
             .confirmed_transcript_hash = gc.confirmed_transcript_hash,
-            .extensions = gc.extensions,
+            .extensions = exts,
         },
         .epoch_secrets = epoch_out.epoch_secrets,
         .interim_transcript_hash = epoch_out.interim_th,
