@@ -59,11 +59,14 @@ pub fn PublicMessage(comptime P: type) type {
         const Self = @This();
 
         /// Encode this PublicMessage into `buf` at `pos`.
+        ///
+        /// Returns `error.InvalidMembershipTagLength` if this is a
+        /// member-sender message with no membership tag.
         pub fn encode(
             self: *const Self,
             buf: []u8,
             pos: u32,
-        ) EncodeError!u32 {
+        ) (EncodeError || DecodeError)!u32 {
             var p = pos;
 
             // FramedContent
@@ -76,15 +79,16 @@ pub fn PublicMessage(comptime P: type) type {
                 self.content.content_type,
             );
 
-            // membership_tag (only for member senders)
+            // membership_tag (required for member senders per
+            // RFC 9420 Section 6.2).
             if (self.content.sender.sender_type == .member) {
-                if (self.membership_tag) |tag| {
-                    p = try codec.encodeVarVector(
-                        buf,
-                        p,
-                        &tag,
-                    );
-                }
+                const tag = self.membership_tag orelse
+                    return error.InvalidMembershipTagLength;
+                p = try codec.encodeVarVector(
+                    buf,
+                    p,
+                    &tag,
+                );
             }
 
             return p;
@@ -109,7 +113,8 @@ pub fn PublicMessage(comptime P: type) type {
             );
             p = ad.pos;
 
-            // membership_tag
+            // membership_tag (required for member senders per
+            // RFC 9420 Section 6.2).
             var tag: ?[P.nh]u8 = null;
             if (fc.value.sender.sender_type == .member) {
                 const tag_data = try codec.decodeVarVectorSlice(
@@ -117,11 +122,12 @@ pub fn PublicMessage(comptime P: type) type {
                     p,
                 );
                 p = tag_data.pos;
-                if (tag_data.value.len == P.nh) {
-                    var t: [P.nh]u8 = undefined;
-                    @memcpy(&t, tag_data.value);
-                    tag = t;
+                if (tag_data.value.len != P.nh) {
+                    return error.InvalidMembershipTagLength;
                 }
+                var t: [P.nh]u8 = undefined;
+                @memcpy(&t, tag_data.value);
+                tag = t;
             }
 
             return .{
@@ -384,4 +390,67 @@ test "PublicMessage without membership tag for external sender" {
     const result = try Pub.decode(&buf, 0);
     try testing.expectEqual(end, result.pos);
     try testing.expect(result.value.membership_tag == null);
+}
+
+test "PublicMessage decode rejects wrong-length membership tag" {
+    // Manually construct a PublicMessage wire payload where the
+    // membership tag vector has length 1 instead of P.nh (32).
+    const Pub = PublicMessage(Default);
+    const AuthData = auth_mod.FramedContentAuthData(Default);
+
+    const content = makeTestContent();
+    const sig = [_]u8{0xAA} ** Default.sig_len;
+    const tag = [_]u8{0xBB} ** Default.nh;
+
+    // Encode a valid message first to get the base bytes.
+    const msg = Pub{
+        .content = content,
+        .auth = AuthData{
+            .signature = sig,
+            .confirmation_tag = null,
+        },
+        .membership_tag = tag,
+    };
+
+    var buf: [512]u8 = undefined;
+    const end = try msg.encode(&buf, 0);
+
+    // Replace the membership tag with a 1-byte vector.
+    // The tag is the last field. Back up past the tag:
+    // varint(32) = 1 byte + 32 bytes = 33 bytes total.
+    // Replace with varint(1) = 1 byte + 1 byte = 2 bytes.
+    const tag_start = end - 33;
+    buf[tag_start] = 0x01; // varint(1)
+    buf[tag_start + 1] = 0xFF; // single byte
+
+    const result = Pub.decode(&buf, 0);
+    try testing.expectError(
+        error.InvalidMembershipTagLength,
+        result,
+    );
+}
+
+test "PublicMessage encode rejects member sender without tag" {
+    const Pub = PublicMessage(Default);
+    const AuthData = auth_mod.FramedContentAuthData(Default);
+
+    const content = makeTestContent();
+    const sig = [_]u8{0xAA} ** Default.sig_len;
+
+    // Member sender with null membership_tag.
+    const msg = Pub{
+        .content = content,
+        .auth = AuthData{
+            .signature = sig,
+            .confirmation_tag = null,
+        },
+        .membership_tag = null,
+    };
+
+    var buf: [512]u8 = undefined;
+    const result = msg.encode(&buf, 0);
+    try testing.expectError(
+        error.InvalidMembershipTagLength,
+        result,
+    );
 }

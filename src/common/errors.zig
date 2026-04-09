@@ -27,6 +27,8 @@ pub const DecodeError = error{
     DuplicateExtensionType,
     /// Deserialized state contains invalid/degenerate values.
     CorruptState,
+    /// A membership tag has the wrong length for the cipher suite.
+    InvalidMembershipTagLength,
 };
 
 /// Errors from cryptographic operations.
