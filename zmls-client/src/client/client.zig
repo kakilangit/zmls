@@ -1518,9 +1518,9 @@ pub fn Client(comptime P: type) type {
                 io,
                 group_id,
                 proposals,
-            );
+            ) catch |err| return err;
 
-            // Clear after commit regardless of success.
+            // Clear proposals only after successful commit.
             self.proposal_store.clearGroup(group_id);
 
             return wire_bytes;
