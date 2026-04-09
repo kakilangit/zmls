@@ -34,6 +34,7 @@ const ProposalType = types.ProposalType;
 const SenderType = types.SenderType;
 const Extension = node_mod.Extension;
 const Credential = cred_mod.Credential;
+const Certificate = cred_mod.Certificate;
 const CredentialValidator = validator_mod.CredentialValidator;
 const DecodeError = errors.DecodeError;
 const ValidationError = errors.ValidationError;
@@ -44,6 +45,10 @@ const max_external_senders: u32 = 64;
 
 // -- ExternalSender ----------------------------------------------------------
 
+/// Maximum number of certificates in an X.509 chain for
+/// zero-copy external sender decoding.
+const max_cert_chain_len: u32 = 32;
+
 /// An external sender entry per RFC 9420 Section 12.1.8.1.
 ///
 ///   struct {
@@ -53,9 +58,17 @@ const max_external_senders: u32 = 64;
 ///
 /// Slices point into the original extension data bytes and
 /// are only valid as long as those bytes are alive.
+///
+/// For X.509 credentials, the certificate chain is stored in
+/// `cert_store` and `credential.payload.x509` points into it.
 pub const ExternalSender = struct {
     signature_key: []const u8,
     credential: Credential,
+    /// Inline storage for X.509 certificate chain (zero-copy).
+    /// Only valid when credential.tag == .x509; the
+    /// credential.payload.x509 slice points into this array.
+    cert_store: [max_cert_chain_len]Certificate =
+        [_]Certificate{.{ .data = &.{} }} ** max_cert_chain_len,
 };
 
 /// Parsed list of external senders from the extension data.
@@ -120,15 +133,32 @@ pub fn parseExternalSenders(
         );
         pos = sig_r.pos;
 
-        // Decode Credential. We use zero-copy decoding:
-        // CredentialType (u16) + basic identity<V>.
-        const cred_r = try decodeCredentialSlice(data, pos);
+        // Decode Credential with zero-copy. For X.509,
+        // cert data slices point into `data` and
+        // Certificate structs go into the sender's cert_store.
+        const idx = result.len;
+        const cred_r = try decodeCredentialSlice(
+            data,
+            pos,
+            &result.senders[idx].cert_store,
+        );
         pos = cred_r.pos;
 
-        result.senders[result.len] = .{
+        result.senders[idx] = .{
             .signature_key = sig_r.value,
             .credential = cred_r.value,
+            .cert_store = result.senders[idx].cert_store,
         };
+
+        // Fix up the x509 slice to point into the sender's
+        // own cert_store (struct assignment above may have
+        // invalidated the slice from decodeCredentialSlice).
+        if (cred_r.value.tag == .x509) {
+            result.senders[idx].credential.payload = .{
+                .x509 = result.senders[idx]
+                    .cert_store[0..cred_r.cert_count],
+            };
+        }
         result.len += 1;
     }
 
@@ -140,15 +170,19 @@ pub fn parseExternalSenders(
 
 /// Zero-copy credential decode for external sender parsing.
 ///
-/// Only basic credentials can be decoded without allocation
-/// (the identity is a slice into the source buffer). X.509
-/// credentials require allocation for the certificate chain,
-/// but for external senders in the extension data we use
-/// zero-copy slices into the extension bytes.
+/// Decodes basic and X.509 credentials without heap allocation.
+/// For basic credentials, the identity slice points into `data`.
+/// For X.509 credentials, certificate data slices point into
+/// `data` and the Certificate structs are stored in `cert_buf`.
+///
+/// Returns the decoded credential and updated position. For
+/// X.509, the credential's x509 payload slice points into
+/// `cert_buf[0..cert_count]`.
 fn decodeCredentialSlice(
     data: []const u8,
     pos: u32,
-) DecodeError!struct { value: Credential, pos: u32 } {
+    cert_buf: []Certificate,
+) DecodeError!struct { value: Credential, pos: u32, cert_count: u32 } {
     const type_r = try codec.decodeUint16(data, pos);
     const cred_type: types.CredentialType = @enumFromInt(
         type_r.value,
@@ -166,10 +200,70 @@ fn decodeCredentialSlice(
                     .payload = .{ .basic = id_r.value },
                 },
                 .pos = id_r.pos,
+                .cert_count = 0,
+            };
+        },
+        .x509 => {
+            const chain_r = try decodeCertChainSlice(
+                data,
+                type_r.pos,
+                cert_buf,
+            );
+            return .{
+                .value = .{
+                    .tag = .x509,
+                    .payload = .{
+                        .x509 = cert_buf[0..chain_r.count],
+                    },
+                },
+                .pos = chain_r.pos,
+                .cert_count = chain_r.count,
             };
         },
         else => return error.InvalidEnumValue,
     }
+}
+
+/// Zero-copy certificate chain decode.
+///
+/// Parses a varint-prefixed list of certificates, storing
+/// each Certificate (with data slicing into `data`) into
+/// `cert_buf`. Returns the number of certificates decoded
+/// and the position after the chain.
+fn decodeCertChainSlice(
+    data: []const u8,
+    pos: u32,
+    cert_buf: []Certificate,
+) DecodeError!struct { count: u32, pos: u32 } {
+    const vr = try varint.decode(data, pos);
+    const total_len = vr.value;
+    var p = vr.pos;
+
+    if (total_len > types.max_vec_length) {
+        return error.VectorTooLarge;
+    }
+    if (p + total_len > data.len) return error.Truncated;
+
+    const chain_end = p + total_len;
+    var count: u32 = 0;
+
+    while (p < chain_end) {
+        if (count >= cert_buf.len) {
+            return error.VectorTooLarge;
+        }
+        // Each certificate is: opaque cert_data<V>
+        const cert_r = try codec.decodeVarVectorSlice(
+            data,
+            p,
+        );
+        cert_buf[count] = .{ .data = cert_r.value };
+        count += 1;
+        p = cert_r.pos;
+    }
+
+    if (p != chain_end) return error.Truncated;
+
+    return .{ .count = count, .pos = p };
 }
 
 /// Find and parse the external_senders extension from a list
@@ -811,4 +905,129 @@ test "multiple external senders with different indices" {
         null,
     );
     try testing.expectError(error.UnknownMember, result);
+}
+
+test "parseExternalSenders x509 credential round-trip" {
+    // Construct an ExternalSender with an X.509 credential
+    // containing two certificates.
+    var certs = [_]Certificate{
+        .{ .data = "cert-der-1" },
+        .{ .data = "cert-der-2" },
+    };
+    const senders = [_]ExternalSender{
+        .{
+            .signature_key = "x509-sig-key",
+            .credential = Credential.initX509(&certs),
+        },
+    };
+
+    var buf: [1024]u8 = undefined;
+    const len = try encodeExternalSenderList(
+        &senders,
+        &buf,
+    );
+
+    const parsed = try parseExternalSenders(buf[0..len]);
+    try testing.expectEqual(@as(u32, 1), parsed.len);
+    try testing.expectEqualSlices(
+        u8,
+        "x509-sig-key",
+        parsed.senders[0].signature_key,
+    );
+    try testing.expectEqual(
+        types.CredentialType.x509,
+        parsed.senders[0].credential.tag,
+    );
+
+    const dec_certs = parsed.senders[0].credential.payload.x509;
+    try testing.expectEqual(@as(usize, 2), dec_certs.len);
+    try testing.expectEqualSlices(
+        u8,
+        "cert-der-1",
+        dec_certs[0].data,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        "cert-der-2",
+        dec_certs[1].data,
+    );
+}
+
+test "parseExternalSenders mixed basic and x509" {
+    var certs = [_]Certificate{
+        .{ .data = "leaf-cert" },
+    };
+    const senders = [_]ExternalSender{
+        .{
+            .signature_key = "basic-key",
+            .credential = Credential.initBasic("alice"),
+        },
+        .{
+            .signature_key = "x509-key",
+            .credential = Credential.initX509(&certs),
+        },
+    };
+
+    var buf: [1024]u8 = undefined;
+    const len = try encodeExternalSenderList(
+        &senders,
+        &buf,
+    );
+
+    const parsed = try parseExternalSenders(buf[0..len]);
+    try testing.expectEqual(@as(u32, 2), parsed.len);
+
+    // First sender: basic.
+    try testing.expectEqual(
+        types.CredentialType.basic,
+        parsed.senders[0].credential.tag,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        "alice",
+        parsed.senders[0].credential.payload.basic,
+    );
+
+    // Second sender: x509.
+    try testing.expectEqual(
+        types.CredentialType.x509,
+        parsed.senders[1].credential.tag,
+    );
+    const dec_certs = parsed.senders[1].credential.payload.x509;
+    try testing.expectEqual(@as(usize, 1), dec_certs.len);
+    try testing.expectEqualSlices(
+        u8,
+        "leaf-cert",
+        dec_certs[0].data,
+    );
+}
+
+test "validateExternalSenderProposal accepts x509 sender" {
+    var certs = [_]Certificate{
+        .{ .data = "leaf-cert" },
+    };
+    const senders = [_]ExternalSender{
+        .{
+            .signature_key = "x509-key",
+            .credential = Credential.initX509(&certs),
+        },
+    };
+
+    var ext_buf: [1024]u8 = undefined;
+    const ext = try makeExternalSendersExtension(
+        &senders,
+        &ext_buf,
+    );
+    const exts = [_]Extension{ext};
+
+    const es = try validateExternalSenderProposal(
+        &exts,
+        0,
+        .add,
+        AcceptAllValidator.validator(),
+    );
+    try testing.expectEqual(
+        types.CredentialType.x509,
+        es.credential.tag,
+    );
 }
