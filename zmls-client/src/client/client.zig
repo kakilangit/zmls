@@ -1141,14 +1141,25 @@ pub fn Client(comptime P: type) type {
             if (hdr_end + payload_len > data.len)
                 return error.Truncated;
 
+            // Single-pass decode: collect nodes into a
+            // dynamic list, then transfer to RatchetTree.
+            var nodes: std.ArrayList(
+                ?zmls.tree_node.Node,
+            ) = .empty;
+            defer nodes.deinit(allocator);
+            // On error, free any decoded node contents.
+            errdefer for (nodes.items) |*slot| {
+                if (slot.*) |*n| {
+                    @constCast(n).deinit(allocator);
+                }
+            };
+
             var pos: u32 = hdr_end;
             const end: u32 = hdr_end + payload_len;
-            var node_count: u32 = 0;
-            var count_pos = pos;
-            while (count_pos < end) {
+            while (pos < end) {
                 const pres = zmls.codec.decodeUint8(
                     data,
-                    count_pos,
+                    pos,
                 ) catch return error.Truncated;
                 if (pres.value != 0) {
                     const nd = zmls.tree_node.Node.decode(
@@ -1156,47 +1167,37 @@ pub fn Client(comptime P: type) type {
                         data,
                         pres.pos,
                     ) catch return error.Truncated;
-                    var node_copy = nd.value;
-                    node_copy.deinit(
+                    nodes.append(
                         allocator,
-                    );
-                    count_pos = nd.pos;
-                } else {
-                    count_pos = pres.pos;
-                }
-                node_count += 1;
-            }
-
-            const leaf_count = (node_count + 1) / 2;
-            var tree = zmls.RatchetTree.init(
-                allocator,
-                leaf_count,
-            ) catch
-                return error.Truncated;
-
-            var ni: u32 = 0;
-            while (pos < end) {
-                const pres = try zmls.codec.decodeUint8(
-                    data,
-                    pos,
-                );
-                if (pres.value != 0) {
-                    const nd = try zmls.tree_node.Node.decode(
-                        allocator,
-                        data,
-                        pres.pos,
-                    );
-                    tree.nodes[ni] = nd.value;
+                        nd.value,
+                    ) catch return error.Truncated;
                     pos = nd.pos;
                 } else {
-                    tree.nodes[ni] = null;
+                    nodes.append(
+                        allocator,
+                        null,
+                    ) catch return error.Truncated;
                     pos = pres.pos;
                 }
-                ni += 1;
             }
 
-            tree.owns_contents = true;
-            return tree;
+            const node_count = nodes.items.len;
+            const leaf_count: u32 = @intCast(
+                (node_count + 1) / 2,
+            );
+            if (leaf_count == 0) return error.Truncated;
+
+            // Transfer ownership: take the list's backing
+            // allocation and wrap it in a RatchetTree.
+            const owned = nodes.toOwnedSlice(
+                allocator,
+            ) catch return error.Truncated;
+            return .{
+                .nodes = owned,
+                .leaf_count = leaf_count,
+                .allocator = allocator,
+                .owns_contents = true,
+            };
         }
 
         fn executeExternalJoin(
