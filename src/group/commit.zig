@@ -549,65 +549,47 @@ pub fn ProcessResult(comptime P: type) type {
 ///   12. Update interim transcript hash.
 ///
 /// Parameters:
-///   - `fc`: the FramedContent (content_type = .commit).
-///   - `signature`: the signature from FramedContentAuthData.
-///   - `confirmation_tag`: the confirmation tag from auth data.
-///   - `proposals`: the decoded proposals from the Commit body.
-///   - `update_path`: the decoded UpdatePath from the Commit
-///     (null if the Commit has no path).
+///   - `opts`: message-level parameters (FramedContent,
+///     signature, proposals, UpdatePath, etc.).
 ///   - `group_context`: the receiver's current GroupContext.
 ///   - `tree`: the receiver's current RatchetTree.
-///   - `sender_verify_key`: the committer's signature pub key.
-///   - `interim_transcript_hash`: current interim transcript hash.
+///   - `interim_transcript_hash`: current interim transcript
+///     hash.
 ///   - `init_secret`: current epoch init_secret.
-///   - `receiver_params`: receiver's leaf index + encryption
-///     keys for decrypting the UpdatePath. Required when
-///     update_path is non-null.
 ///
 /// Returns a ProcessResult with the verified new group state.
 pub fn processCommit(
     comptime P: type,
     allocator: std.mem.Allocator,
-    fc: *const FramedContent,
-    signature: *const [P.sig_len]u8,
-    confirmation_tag: *const [P.nh]u8,
-    proposals: []const Proposal,
-    update_path: ?*const UpdatePath,
+    opts: ProcessCommitOpts(P),
     group_context: *const context_mod.GroupContext(P.nh),
     tree: *const RatchetTree,
-    sender_verify_key: *const [P.sign_pk_len]u8,
     interim_transcript_hash: *const [P.nh]u8,
     init_secret: *const [P.nh]u8,
-    receiver_params: ?ReceiverPathParams(P),
-    psk_resolver: ?PskResolver(P),
-    proposal_senders: ?[]const Sender,
-    membership_key: ?*const [P.nh]u8,
-    membership_tag: ?*const [P.nh]u8,
-    wire_format: WireFormat,
 ) CommitError!ProcessResult(P) {
-    assert(fc.content_type == .commit);
+    assert(opts.fc.content_type == .commit);
     assert(tree.leaf_count > 0);
     // 0-4. Verify membership tag, epoch, sender, content type,
     // signature.
     try verifyCommitPreconditions(
         P,
-        fc,
+        opts.fc,
         group_context,
-        signature,
-        confirmation_tag,
-        sender_verify_key,
-        membership_key,
-        membership_tag,
-        wire_format,
+        opts.signature,
+        opts.confirmation_tag,
+        opts.sender_verify_key,
+        opts.membership_key,
+        opts.membership_tag,
+        opts.wire_format,
     );
 
     // 5. Validate proposals.
-    const sender_leaf = LeafIndex.fromU32(fc.sender.leaf_index);
+    const sender_leaf = LeafIndex.fromU32(opts.fc.sender.leaf_index);
     const validated = try validateProcessProposals(
         P,
-        proposals,
+        opts.proposals,
         sender_leaf,
-        proposal_senders,
+        opts.proposal_senders,
         group_context,
         tree,
     );
@@ -619,15 +601,15 @@ pub fn processCommit(
         &new_tree,
     );
     // 7. Check path presence (single-leaf is vacuously ok).
-    if (isPathRequired(&validated) and update_path == null and
+    if (isPathRequired(&validated) and opts.update_path == null and
         new_tree.leaf_count > 1) return error.MissingPath;
     // 8. Process UpdatePath if present.
     const new_ext = resolveExtensions(&apply_result, group_context);
     var path_out = processUpdatePath(
         P,
         allocator,
-        update_path,
-        receiver_params,
+        opts.update_path,
+        opts.receiver_params,
         &new_tree,
         sender_leaf,
         group_context,
@@ -639,9 +621,9 @@ pub fn processCommit(
     return deriveProcessEpochState(
         P,
         allocator,
-        fc,
-        signature,
-        confirmation_tag,
+        opts.fc,
+        opts.signature,
+        opts.confirmation_tag,
         group_context,
         &new_tree,
         &validated,
@@ -649,11 +631,11 @@ pub fn processCommit(
         interim_transcript_hash,
         init_secret,
         &path_out.commit_secret,
-        psk_resolver,
+        opts.psk_resolver,
         apply_result,
         path_out.derived_path_keys,
         path_out.derived_key_count,
-        wire_format,
+        opts.wire_format,
     );
 }
 
@@ -2355,22 +2337,17 @@ test "processCommit round-trip with createCommit" {
     var pr = try processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &proposals,
-        null, // no UpdatePath
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        null, // no receiver path params
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     defer pr.tree.deinit();
     defer pr.deinit(testing.allocator);
@@ -2449,22 +2426,17 @@ test "processCommit rejects wrong epoch" {
     const result = processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &proposals,
-        null,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     try testing.expectError(error.WrongEpoch, result);
 }
@@ -2521,22 +2493,17 @@ test "processCommit rejects invalid confirmation tag" {
     const result = processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &bad_tag,
-        &proposals,
-        null,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &bad_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     try testing.expectError(
         error.ConfirmationTagMismatch,
@@ -2587,22 +2554,17 @@ test "processCommit rejects wrong signature key" {
     const result = processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &proposals,
-        null,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &wrong_kp.pk,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &wrong_kp.pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     try testing.expectError(
         error.SignatureVerifyFailed,
@@ -2648,22 +2610,17 @@ test "processCommit rejects non-member sender" {
     const result = processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &proposals,
-        null,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     try testing.expectError(error.NotAMember, result);
 }
@@ -2715,22 +2672,17 @@ test "processCommit two-epoch chain matches createCommit" {
     var pr1 = try processCommit(
         Default,
         testing.allocator,
-        &fc1,
-        &cr1.signature,
-        &cr1.confirmation_tag,
-        &p1,
-        null,
+        .{
+            .fc = &fc1,
+            .signature = &cr1.signature,
+            .confirmation_tag = &cr1.confirmation_tag,
+            .proposals = &p1,
+            .sender_verify_key = &tg.sign_pk,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     defer pr1.tree.deinit();
     defer pr1.deinit(testing.allocator);
@@ -2776,22 +2728,17 @@ test "processCommit two-epoch chain matches createCommit" {
     var pr2 = try processCommit(
         Default,
         testing.allocator,
-        &fc2,
-        &cr2.signature,
-        &cr2.confirmation_tag,
-        &p2,
-        null,
+        .{
+            .fc = &fc2,
+            .signature = &cr2.signature,
+            .confirmation_tag = &cr2.confirmation_tag,
+            .proposals = &p2,
+            .sender_verify_key = &tg.sign_pk,
+        },
         &pr1.group_context,
         &pr1.tree,
-        &tg.sign_pk,
         &pr1.interim_transcript_hash,
         &pr1.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     defer pr2.tree.deinit();
     defer pr2.deinit(testing.allocator);
@@ -3212,22 +3159,19 @@ test "processCommit with path decryption round-trip" {
     var pr = try processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &path_cr.signature,
-        &path_cr.confirmation_tag,
-        &empty_proposals,
-        if (dec.value.path) |*p| p else null,
+        .{
+            .fc = &fc,
+            .signature = &path_cr.signature,
+            .confirmation_tag = &path_cr.confirmation_tag,
+            .proposals = &empty_proposals,
+            .update_path = if (dec.value.path) |*p| p else null,
+            .sender_verify_key = &alice_kp.pk,
+            .receiver_params = rp,
+        },
         &add_cr.group_context,
         &add_cr.tree,
-        &alice_kp.pk,
         &add_cr.interim_transcript_hash,
         &add_cr.epoch_secrets.init_secret,
-        rp,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     defer pr.tree.deinit();
     defer pr.deinit(testing.allocator);
@@ -3488,22 +3432,18 @@ test "createCommit with external PSK produces non-zero psk_secret" {
     var pr = try processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr_psk.signature,
-        &cr_psk.confirmation_tag,
-        &proposals,
-        null,
+        .{
+            .fc = &fc,
+            .signature = &cr_psk.signature,
+            .confirmation_tag = &cr_psk.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+            .psk_resolver = resolver,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        null,
-        resolver,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     defer pr.tree.deinit();
     defer pr.deinit(testing.allocator);
@@ -3579,22 +3519,18 @@ test "createCommit with resumption PSK from prior epoch" {
     var pr = try processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &proposals,
-        null,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+            .psk_resolver = resolver,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        null,
-        resolver,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     defer pr.tree.deinit();
     defer pr.deinit(testing.allocator);
@@ -3668,22 +3604,19 @@ test "processCommit accepts valid membership tag" {
     var pr = try processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &proposals,
-        null,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+            .membership_key = mkey,
+            .membership_tag = &mtag,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        mkey,
-        &mtag,
-        .mls_public_message,
     );
     defer pr.tree.deinit();
     defer pr.deinit(testing.allocator);
@@ -3754,22 +3687,19 @@ test "processCommit rejects wrong membership tag" {
     const result = processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &proposals,
-        null,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+            .membership_key = mkey,
+            .membership_tag = &mtag,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        mkey,
-        &mtag,
-        .mls_public_message,
     );
     try testing.expectError(
         error.MembershipTagMismatch,
@@ -3910,22 +3840,19 @@ const PathTestCtx = struct {
         return processCommit(
             Default,
             testing.allocator,
-            &fc,
-            &self.path_cr.signature,
-            &self.path_cr.confirmation_tag,
-            &empty,
-            if (self.path_commit.path) |*p| p else null,
+            .{
+                .fc = &fc,
+                .signature = &self.path_cr.signature,
+                .confirmation_tag = &self.path_cr.confirmation_tag,
+                .proposals = &empty,
+                .update_path = if (self.path_commit.path) |*p| p else null,
+                .sender_verify_key = &self.alice_sign.pk,
+                .receiver_params = rp,
+            },
             &self.add_cr.group_context,
             &self.add_cr.tree,
-            &self.alice_sign.pk,
             &self.add_cr.interim_transcript_hash,
             &self.add_cr.epoch_secrets.init_secret,
-            rp,
-            null,
-            null,
-            null,
-            null,
-            .mls_public_message,
         );
     }
 };
@@ -4160,22 +4087,17 @@ test "processCommit rejects GCE commit without path" {
     const result = processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &[_]Proposal{gce_prop},
-        null,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &[_]Proposal{gce_prop},
+            .sender_verify_key = &alice_sig.pk,
+        },
         &add_cr.group_context,
         &add_cr.tree,
-        &alice_sig.pk,
         &add_cr.interim_transcript_hash,
         &add_cr.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     try testing.expectError(error.MissingPath, result);
 }
@@ -4289,22 +4211,19 @@ test "processCommit accepts GCE commit with path" {
     var pr = try processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &[_]Proposal{gce_prop},
-        if (dec.value.path) |*p| p else null,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &[_]Proposal{gce_prop},
+            .update_path = if (dec.value.path) |*p| p else null,
+            .sender_verify_key = &alice_sig.pk,
+            .receiver_params = rp,
+        },
         &add_cr.group_context,
         &add_cr.tree,
-        &alice_sig.pk,
         &add_cr.interim_transcript_hash,
         &add_cr.epoch_secrets.init_secret,
-        rp,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     defer pr.tree.deinit();
     defer pr.deinit(testing.allocator);
@@ -4424,22 +4343,20 @@ test "processCommit with mls_private_message wire format" {
     var pr = try processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &[_]Proposal{},
-        if (dec.value.path) |*p| p else null,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &[_]Proposal{},
+            .update_path = if (dec.value.path) |*p| p else null,
+            .sender_verify_key = &alice_sig.pk,
+            .receiver_params = rp,
+            .wire_format = .mls_private_message,
+        },
         &add_cr.group_context,
         &add_cr.tree,
-        &alice_sig.pk,
         &add_cr.interim_transcript_hash,
         &add_cr.epoch_secrets.init_secret,
-        rp,
-        null,
-        null,
-        null,
-        null,
-        .mls_private_message,
     );
     defer pr.tree.deinit();
     defer pr.deinit(testing.allocator);

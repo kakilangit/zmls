@@ -393,22 +393,17 @@ test "three-party group: create → add B → add C" {
     var pr1 = try mls.processCommit(
         Default,
         testing.allocator,
-        &fc1,
-        &cr1.signature,
-        &cr1.confirmation_tag,
-        &p1,
-        null,
+        .{
+            .fc = &fc1,
+            .signature = &cr1.signature,
+            .confirmation_tag = &cr1.confirmation_tag,
+            .proposals = &p1,
+            .sender_verify_key = &alice_sign.pk,
+        },
         &gs.group_context,
         &gs.tree,
-        &alice_sign.pk,
         &gs.interim_transcript_hash,
         &gs.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     defer pr1.tree.deinit();
     defer pr1.deinit(testing.allocator);
@@ -426,22 +421,17 @@ test "three-party group: create → add B → add C" {
     var pr2 = try mls.processCommit(
         Default,
         testing.allocator,
-        &fc2,
-        &cr2.signature,
-        &cr2.confirmation_tag,
-        &p2,
-        null,
+        .{
+            .fc = &fc2,
+            .signature = &cr2.signature,
+            .confirmation_tag = &cr2.confirmation_tag,
+            .proposals = &p2,
+            .sender_verify_key = &alice_sign.pk,
+        },
         &pr1.group_context,
         &pr1.tree,
-        &alice_sign.pk,
         &pr1.interim_transcript_hash,
         &pr1.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     defer pr2.tree.deinit();
     defer pr2.deinit(testing.allocator);
@@ -636,22 +626,19 @@ test "member removal: create → add 3 → remove" {
     var pr = try mls.processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr2.signature,
-        &cr2.confirmation_tag,
-        &rm_proposals,
-        if (dec.value.path) |*p| p else null,
+        .{
+            .fc = &fc,
+            .signature = &cr2.signature,
+            .confirmation_tag = &cr2.confirmation_tag,
+            .proposals = &rm_proposals,
+            .update_path = if (dec.value.path) |*p| p else null,
+            .sender_verify_key = &alice_sign.pk,
+            .receiver_params = rp,
+        },
         &cr1.group_context,
         &cr1.tree,
-        &alice_sign.pk,
         &cr1.interim_transcript_hash,
         &cr1.epoch_secrets.init_secret,
-        rp,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     defer pr.tree.deinit();
     defer pr.deinit(testing.allocator);
@@ -810,22 +797,19 @@ test "key update: empty commit with path changes secrets" {
     var pr = try mls.processCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr_path.signature,
-        &cr_path.confirmation_tag,
-        &empty,
-        if (dec.value.path) |*p| p else null,
+        .{
+            .fc = &fc,
+            .signature = &cr_path.signature,
+            .confirmation_tag = &cr_path.confirmation_tag,
+            .proposals = &empty,
+            .update_path = if (dec.value.path) |*p| p else null,
+            .sender_verify_key = &alice_sign.pk,
+            .receiver_params = rp,
+        },
         &cr1.group_context,
         &cr1.tree,
-        &alice_sign.pk,
         &cr1.interim_transcript_hash,
         &cr1.epoch_secrets.init_secret,
-        rp,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
     defer pr.tree.deinit();
     defer pr.deinit(testing.allocator);

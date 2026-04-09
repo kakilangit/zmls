@@ -23,7 +23,6 @@ const state_mod = @import("state.zig");
 const commit_mod = @import("commit.zig");
 const schedule = @import("../key_schedule/schedule.zig");
 const ratchet_tree_mod = @import("../tree/ratchet_tree.zig");
-const path_mod = @import("../tree/path.zig");
 const evolution = @import("evolution.zig");
 const proposal_cache_mod = @import("proposal_cache.zig");
 const primitives = @import("../crypto/primitives.zig");
@@ -32,7 +31,6 @@ const secureZero = primitives.secureZero;
 const Epoch = types.Epoch;
 const LeafIndex = types.LeafIndex;
 const RatchetTree = ratchet_tree_mod.RatchetTree;
-const UpdatePath = path_mod.UpdatePath;
 const GroupState = state_mod.GroupState;
 const ProcessResult = commit_mod.ProcessResult;
 const CommitError = commit_mod.CommitError;
@@ -138,42 +136,20 @@ pub fn StagedCommit(comptime P: type) type {
 pub fn stageCommit(
     comptime P: type,
     allocator: std.mem.Allocator,
-    fc: *const FramedContent,
-    signature: *const [P.sig_len]u8,
-    confirmation_tag: *const [P.nh]u8,
-    proposals: []const Proposal,
-    update_path: ?*const UpdatePath,
+    opts: commit_mod.ProcessCommitOpts(P),
     group_context: *const context_mod.GroupContext(P.nh),
     tree: *const RatchetTree,
-    sender_verify_key: *const [P.sign_pk_len]u8,
     interim_transcript_hash: *const [P.nh]u8,
     init_secret: *const [P.nh]u8,
-    receiver_params: ?commit_mod.ReceiverPathParams(P),
-    psk_resolver: ?commit_mod.PskResolver(P),
-    proposal_senders: ?[]const Sender,
-    membership_key: ?*const [P.nh]u8,
-    membership_tag: ?*const [P.nh]u8,
-    wire_format: types.WireFormat,
 ) CommitError!StagedCommit(P) {
     const result = try commit_mod.processCommit(
         P,
         allocator,
-        fc,
-        signature,
-        confirmation_tag,
-        proposals,
-        update_path,
+        opts,
         group_context,
         tree,
-        sender_verify_key,
         interim_transcript_hash,
         init_secret,
-        receiver_params,
-        psk_resolver,
-        proposal_senders,
-        membership_key,
-        membership_tag,
-        wire_format,
     );
     return .{
         .result = result,
@@ -392,25 +368,17 @@ test "stageCommit then apply advances group state" {
     var staged = try stageCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &proposals,
-        @as(
-            ?*const @import("../tree/path.zig").UpdatePath,
-            null,
-        ),
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        @as(?commit_mod.ReceiverPathParams(Default), null),
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
 
     // Inspect before apply.
@@ -480,25 +448,17 @@ test "stageCommit then discard leaves state unchanged" {
     var staged = try stageCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &proposals,
-        @as(
-            ?*const @import("../tree/path.zig").UpdatePath,
-            null,
-        ),
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        @as(?commit_mod.ReceiverPathParams(Default), null),
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
 
     // Discard.
@@ -570,25 +530,17 @@ test "apply retains past-epoch sender_data_secret in ring" {
     var staged = try stageCommit(
         Default,
         testing.allocator,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &proposals,
-        @as(
-            ?*const @import("../tree/path.zig").UpdatePath,
-            null,
-        ),
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+        },
         &tg.gs.group_context,
         &tg.gs.tree,
-        &tg.sign_pk,
         &tg.gs.interim_transcript_hash,
         &tg.gs.epoch_secrets.init_secret,
-        @as(?commit_mod.ReceiverPathParams(Default), null),
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     );
 
     try staged.apply(&tg.gs);

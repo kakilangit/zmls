@@ -197,22 +197,11 @@ pub fn GroupState(comptime P: type) type {
             return commit_mod.processCommit(
                 P,
                 allocator,
-                opts.fc,
-                opts.signature,
-                opts.confirmation_tag,
-                opts.proposals,
-                opts.update_path,
+                opts,
                 &self.group_context,
                 &self.tree,
-                opts.sender_verify_key,
                 &self.interim_transcript_hash,
                 &self.epoch_secrets.init_secret,
-                opts.receiver_params,
-                opts.psk_resolver,
-                opts.proposal_senders,
-                opts.membership_key,
-                opts.membership_tag,
-                opts.wire_format,
             );
         }
 
@@ -457,22 +446,11 @@ pub fn GroupState(comptime P: type) type {
             const cr = try commit_mod.processCommit(
                 P,
                 allocator,
-                opts.fc,
-                opts.signature,
-                opts.confirmation_tag,
-                opts.proposals,
-                opts.update_path,
+                opts,
                 &self.group_context,
                 &self.tree,
-                opts.sender_verify_key,
                 &self.interim_transcript_hash,
                 &self.epoch_secrets.init_secret,
-                opts.receiver_params,
-                opts.psk_resolver,
-                opts.proposal_senders,
-                opts.membership_key,
-                opts.membership_tag,
-                opts.wire_format,
             );
             return .{
                 .group_state = .{

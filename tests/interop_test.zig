@@ -3770,26 +3770,25 @@ fn processEpoch(
     var result = zmls.processCommit(
         P,
         allocator,
-        &cm.fc,
-        &cm.auth.signature,
-        &(cm.auth.confirmation_tag orelse
-            return error.MissingConfirmationTag),
-        resolved,
-        if (commit_r.value.path) |*p_val|
-            @as(?*const zmls.UpdatePath, p_val)
-        else
-            null,
+        .{
+            .fc = &cm.fc,
+            .signature = &cm.auth.signature,
+            .confirmation_tag = &(cm.auth.confirmation_tag orelse
+                return error.MissingConfirmationTag),
+            .proposals = resolved,
+            .update_path = if (commit_r.value.path) |*p_val|
+                @as(?*const zmls.UpdatePath, p_val)
+            else
+                null,
+            .sender_verify_key = &sender_pk,
+            .receiver_params = rp,
+            .psk_resolver = resolver,
+            .proposal_senders = resolved_senders,
+        },
         group_context,
         tree,
-        &sender_pk,
         interim_th,
         init_secret,
-        rp,
-        resolver,
-        resolved_senders,
-        null,
-        null,
-        .mls_public_message,
     ) catch |err| return err;
 
     // 9. Free old tree, adopt new one.
