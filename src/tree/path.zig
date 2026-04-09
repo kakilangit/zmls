@@ -1,16 +1,10 @@
-//! UpdatePath wire format and tree mutation operations (addLeaf,
-//! removeLeaf, applyUpdatePath) per RFC 9420 Sections 7.4-7.5.
-// Tree evolution: UpdatePath, add/remove leaf, and path application.
-//
-// Per RFC 9420 Sections 7.4-7.5: an UpdatePath carries new keying
-// material along a sender's direct path. Each node on the filtered
-// direct path gets a new encryption key and the path secret is
-// HPKE-encrypted to each resolution member of the corresponding
-// copath node.
-//
-// This module defines the wire-format structs (HPKECiphertext,
-// UpdatePathNode, UpdatePath) and tree mutation operations
-// (addLeaf, removeLeaf, applyUpdatePath).
+//! Tree mutation operations (addLeaf, removeLeaf), path generation,
+//! path application, and parent hash computation per RFC 9420
+//! Sections 7.4-7.5.
+//!
+//! Wire format types (HPKECiphertext, UpdatePathNode, UpdatePath)
+//! are in update_path.zig. Path secret derivation and HPKE
+//! encryption helpers are in path_secrets.zig.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -21,239 +15,55 @@ const errors = @import("../common/errors.zig");
 const tree_math = @import("math.zig");
 const node_mod = @import("node.zig");
 const ratchet_tree_mod = @import("ratchet_tree.zig");
+const update_path_mod = @import("update_path.zig");
+const path_secrets_mod = @import("path_secrets.zig");
+
+const primitives = @import("../crypto/primitives.zig");
+const hpke_mod = @import("../crypto/hpke.zig");
+const tree_hashes = @import("hashes.zig");
 
 const NodeIndex = types.NodeIndex;
 const LeafIndex = types.LeafIndex;
 const TreeError = errors.TreeError;
+const CryptoError = errors.CryptoError;
 const EncodeError = codec.EncodeError;
 const DecodeError = errors.DecodeError;
 const Node = node_mod.Node;
 const LeafNode = node_mod.LeafNode;
 const ParentNode = node_mod.ParentNode;
 const RatchetTree = ratchet_tree_mod.RatchetTree;
+const secureZero = primitives.secureZero;
 
-/// Maximum number of HPKE ciphertexts per UpdatePathNode.
-const max_ciphertexts: u32 = 1024;
+// Re-export wire format types so existing importers continue
+// to work via path_mod.HPKECiphertext, etc.
+pub const HPKECiphertext = update_path_mod.HPKECiphertext;
+pub const UpdatePathNode = update_path_mod.UpdatePathNode;
+pub const UpdatePath = update_path_mod.UpdatePath;
+pub const max_path_nodes = update_path_mod.max_path_nodes;
+pub const max_ciphertexts = update_path_mod.max_ciphertexts;
+pub const encodeHpkeCiphertextList =
+    update_path_mod.encodeHpkeCiphertextList;
+pub const decodeHpkeCiphertextList =
+    update_path_mod.decodeHpkeCiphertextList;
+pub const encodeUpdatePathNodeList =
+    update_path_mod.encodeUpdatePathNodeList;
+pub const decodeUpdatePathNodeList =
+    update_path_mod.decodeUpdatePathNodeList;
 
-/// Maximum number of UpdatePathNodes in an UpdatePath.
-pub const max_path_nodes: u32 = 32;
-
-/// Maximum encoded size for HPKE ciphertext components.
-const max_ct_data: u32 = 8192;
-
-// -- HPKECiphertext (Section 7.6) -------------------------------------------
-
-/// An HPKE ciphertext: KEM output + encrypted payload.
-///
-///   struct {
-///       opaque kem_output<V>;
-///       opaque ciphertext<V>;
-///   } HPKECiphertext;
-pub const HPKECiphertext = struct {
-    kem_output: []const u8,
-    ciphertext: []const u8,
-
-    pub fn encode(
-        self: *const HPKECiphertext,
-        buf: []u8,
-        pos: u32,
-    ) EncodeError!u32 {
-        var p = try codec.encodeVarVector(
-            buf,
-            pos,
-            self.kem_output,
-        );
-        p = try codec.encodeVarVector(
-            buf,
-            p,
-            self.ciphertext,
-        );
-        return p;
-    }
-
-    pub fn decode(
-        allocator: std.mem.Allocator,
-        data: []const u8,
-        pos: u32,
-    ) (DecodeError || error{OutOfMemory})!struct {
-        value: HPKECiphertext,
-        pos: u32,
-    } {
-        const kem_r = try codec.decodeVarVectorLimited(
-            allocator,
-            data,
-            pos,
-            types.max_public_key_length,
-        );
-        const ct_r = try codec.decodeVarVector(
-            allocator,
-            data,
-            kem_r.pos,
-        );
-        return .{
-            .value = .{
-                .kem_output = kem_r.value,
-                .ciphertext = ct_r.value,
-            },
-            .pos = ct_r.pos,
-        };
-    }
-
-    pub fn deinit(
-        self: *HPKECiphertext,
-        allocator: std.mem.Allocator,
-    ) void {
-        if (self.kem_output.len > 0) {
-            allocator.free(self.kem_output);
-        }
-        if (self.ciphertext.len > 0) {
-            allocator.free(self.ciphertext);
-        }
-        self.* = undefined;
-    }
-};
-
-// -- UpdatePathNode (Section 7.6) -------------------------------------------
-
-/// A node in an UpdatePath: new encryption key + encrypted path
-/// secrets for the copath resolution.
-///
-///   struct {
-///       HPKEPublicKey encryption_key;
-///       HPKECiphertext encrypted_path_secret<V>;
-///   } UpdatePathNode;
-pub const UpdatePathNode = struct {
-    encryption_key: []const u8,
-    encrypted_path_secret: []const HPKECiphertext,
-
-    pub fn encode(
-        self: *const UpdatePathNode,
-        buf: []u8,
-        pos: u32,
-    ) EncodeError!u32 {
-        var p = try codec.encodeVarVector(
-            buf,
-            pos,
-            self.encryption_key,
-        );
-        // encrypted_path_secret<V>: varint-prefixed list.
-        p = try encodeHpkeCiphertextList(
-            buf,
-            p,
-            self.encrypted_path_secret,
-        );
-        return p;
-    }
-
-    pub fn decode(
-        allocator: std.mem.Allocator,
-        data: []const u8,
-        pos: u32,
-    ) (DecodeError || error{OutOfMemory})!struct {
-        value: UpdatePathNode,
-        pos: u32,
-    } {
-        const ek_r = try codec.decodeVarVectorLimited(
-            allocator,
-            data,
-            pos,
-            types.max_public_key_length,
-        );
-        const ct_r = try decodeHpkeCiphertextList(
-            allocator,
-            data,
-            ek_r.pos,
-        );
-        return .{
-            .value = .{
-                .encryption_key = ek_r.value,
-                .encrypted_path_secret = ct_r.value,
-            },
-            .pos = ct_r.pos,
-        };
-    }
-
-    pub fn deinit(
-        self: *UpdatePathNode,
-        allocator: std.mem.Allocator,
-    ) void {
-        if (self.encryption_key.len > 0) {
-            allocator.free(self.encryption_key);
-        }
-        for (self.encrypted_path_secret) |*ct| {
-            @constCast(ct).deinit(allocator);
-        }
-        if (self.encrypted_path_secret.len > 0) {
-            allocator.free(self.encrypted_path_secret);
-        }
-        self.* = undefined;
-    }
-};
-
-// -- UpdatePath (Section 7.5) -----------------------------------------------
-
-/// An update path: new leaf + path nodes along the filtered direct
-/// path.
-///
-///   struct {
-///       LeafNode leaf_node;
-///       UpdatePathNode nodes<V>;
-///   } UpdatePath;
-pub const UpdatePath = struct {
-    leaf_node: LeafNode,
-    nodes: []const UpdatePathNode,
-
-    pub fn encode(
-        self: *const UpdatePath,
-        buf: []u8,
-        pos: u32,
-    ) EncodeError!u32 {
-        var p = try self.leaf_node.encode(buf, pos);
-        p = try encodeUpdatePathNodeList(buf, p, self.nodes);
-        return p;
-    }
-
-    pub fn decode(
-        allocator: std.mem.Allocator,
-        data: []const u8,
-        pos: u32,
-    ) (DecodeError || error{OutOfMemory})!struct {
-        value: UpdatePath,
-        pos: u32,
-    } {
-        const leaf_r = try LeafNode.decode(
-            allocator,
-            data,
-            pos,
-        );
-        const nodes_r = try decodeUpdatePathNodeList(
-            allocator,
-            data,
-            leaf_r.pos,
-        );
-        return .{
-            .value = .{
-                .leaf_node = leaf_r.value,
-                .nodes = nodes_r.value,
-            },
-            .pos = nodes_r.pos,
-        };
-    }
-
-    pub fn deinit(
-        self: *UpdatePath,
-        allocator: std.mem.Allocator,
-    ) void {
-        self.leaf_node.deinit(allocator);
-        for (self.nodes) |*n| {
-            @constCast(n).deinit(allocator);
-        }
-        if (self.nodes.len > 0) {
-            allocator.free(self.nodes);
-        }
-        self.* = undefined;
-    }
-};
+// Re-export path secret functions.
+pub const GeneratePathResult = path_secrets_mod.GeneratePathResult;
+pub const derivePathSecrets = path_secrets_mod.derivePathSecrets;
+pub const deriveCommitSecret = path_secrets_mod.deriveCommitSecret;
+pub const NodeKeypair = path_secrets_mod.NodeKeypair;
+pub const deriveNodeKeypair = path_secrets_mod.deriveNodeKeypair;
+pub const encryptPathSecretTo =
+    path_secrets_mod.encryptPathSecretTo;
+pub const decryptPathSecretFrom =
+    path_secrets_mod.decryptPathSecretFrom;
+pub const encryptToResolution =
+    path_secrets_mod.encryptToResolution;
+pub const nodePublicKey = path_secrets_mod.nodePublicKey;
+pub const freeCtSlice = path_secrets_mod.freeCtSlice;
 
 // -- Tree Mutation Operations -----------------------------------------------
 
@@ -535,407 +345,6 @@ fn truncateTree(tree: *RatchetTree) void {
         tree.nodes = new_nodes;
     }
     tree.leaf_count = new_leaf_count;
-}
-
-// -- Codec helpers for list types -------------------------------------------
-
-/// Encode a slice of HPKECiphertext into a varint-length-prefixed
-/// /// byte vector.
-fn encodeHpkeCiphertextList(
-    buf: []u8,
-    pos: u32,
-    items: []const HPKECiphertext,
-) EncodeError!u32 {
-    // Gap-then-shift encoding for varint prefix.
-    const gap: u32 = 4;
-    const start = pos + gap;
-    var p = start;
-
-    for (items) |*ct| {
-        p = try ct.encode(buf, p);
-    }
-
-    const inner_len: u32 = p - start;
-    var len_buf: [4]u8 = undefined;
-    const len_end = try varint.encode(
-        &len_buf,
-        0,
-        inner_len,
-    );
-
-    const dest_start = pos + len_end;
-    if (dest_start != start) {
-        std.mem.copyForwards(
-            u8,
-            buf[dest_start..][0..inner_len],
-            buf[start..][0..inner_len],
-        );
-    }
-    @memcpy(buf[pos..][0..len_end], len_buf[0..len_end]);
-
-    return dest_start + inner_len;
-}
-
-fn decodeHpkeCiphertextList(
-    allocator: std.mem.Allocator,
-    data: []const u8,
-    pos: u32,
-) (DecodeError || error{OutOfMemory})!struct {
-    value: []const HPKECiphertext,
-    pos: u32,
-} {
-    const vr = try varint.decode(data, pos);
-    const total_len = vr.value;
-    var p = vr.pos;
-
-    if (total_len > types.max_vec_length) {
-        return error.VectorTooLarge;
-    }
-    if (p + total_len > data.len) return error.Truncated;
-
-    const end = p + total_len;
-    var temp: [max_ciphertexts]HPKECiphertext = undefined;
-    var count: u32 = 0;
-    errdefer for (temp[0..count]) |*ct| ct.deinit(allocator);
-
-    while (p < end) {
-        if (count >= max_ciphertexts) {
-            return error.VectorTooLarge;
-        }
-        const ct_r = try HPKECiphertext.decode(
-            allocator,
-            data,
-            p,
-        );
-        temp[count] = ct_r.value;
-        count += 1;
-        p = ct_r.pos;
-    }
-
-    if (p != end) return error.Truncated;
-
-    const items = allocator.alloc(
-        HPKECiphertext,
-        count,
-    ) catch return error.OutOfMemory;
-    @memcpy(items, temp[0..count]);
-
-    return .{ .value = items, .pos = p };
-}
-
-/// Encode a slice of UpdatePathNode into a varint-length-prefixed
-/// /// byte vector.
-fn encodeUpdatePathNodeList(
-    buf: []u8,
-    pos: u32,
-    items: []const UpdatePathNode,
-) EncodeError!u32 {
-    const gap: u32 = 4;
-    const start = pos + gap;
-    var p = start;
-
-    for (items) |*n| {
-        p = try n.encode(buf, p);
-    }
-
-    const inner_len: u32 = p - start;
-    var len_buf: [4]u8 = undefined;
-    const len_end = try varint.encode(
-        &len_buf,
-        0,
-        inner_len,
-    );
-
-    const dest_start = pos + len_end;
-    if (dest_start != start) {
-        std.mem.copyForwards(
-            u8,
-            buf[dest_start..][0..inner_len],
-            buf[start..][0..inner_len],
-        );
-    }
-    @memcpy(buf[pos..][0..len_end], len_buf[0..len_end]);
-
-    return dest_start + inner_len;
-}
-
-fn decodeUpdatePathNodeList(
-    allocator: std.mem.Allocator,
-    data: []const u8,
-    pos: u32,
-) (DecodeError || error{OutOfMemory})!struct {
-    value: []const UpdatePathNode,
-    pos: u32,
-} {
-    const vr = try varint.decode(data, pos);
-    const total_len = vr.value;
-    var p = vr.pos;
-
-    if (total_len > types.max_vec_length) {
-        return error.VectorTooLarge;
-    }
-    if (p + total_len > data.len) return error.Truncated;
-
-    const end = p + total_len;
-    var temp: [max_path_nodes]UpdatePathNode = undefined;
-    var count: u32 = 0;
-    errdefer for (temp[0..count]) |*n| n.deinit(allocator);
-
-    while (p < end) {
-        if (count >= max_path_nodes) {
-            return error.VectorTooLarge;
-        }
-        const n_r = try UpdatePathNode.decode(
-            allocator,
-            data,
-            p,
-        );
-        temp[count] = n_r.value;
-        count += 1;
-        p = n_r.pos;
-    }
-
-    if (p != end) return error.Truncated;
-
-    const items = allocator.alloc(
-        UpdatePathNode,
-        count,
-    ) catch return error.OutOfMemory;
-    @memcpy(items, temp[0..count]);
-
-    return .{ .value = items, .pos = p };
-}
-
-// -- Path Secret Derivation (RFC 9420 Section 7.5) --------------------------
-
-const primitives = @import("../crypto/primitives.zig");
-const hpke_mod = @import("../crypto/hpke.zig");
-const tree_hashes = @import("hashes.zig");
-const secureZero = primitives.secureZero;
-const CryptoError = errors.CryptoError;
-
-/// Result of generateUpdatePath: the UpdatePath wire struct plus the
-/// commit_secret derived from the last path secret.
-pub fn GeneratePathResult(comptime P: type) type {
-    return struct {
-        update_path: UpdatePath,
-        commit_secret: [P.nh]u8,
-    };
-}
-
-/// Derive a chain of path secrets from a leaf secret.
-///
-/// Per RFC 9420 Section 7.5:
-///   path_secret[0] = leaf_secret
-///   path_secret[n+1] = DeriveSecret(path_secret[n], "path")
-///
-/// Returns the number of secrets written (== count).
-pub fn derivePathSecrets(
-    comptime P: type,
-    leaf_secret: *const [P.nh]u8,
-    count: u32,
-    out: *[max_path_nodes][P.nh]u8,
-) void {
-    std.debug.assert(count > 0);
-    std.debug.assert(count <= max_path_nodes);
-    out[0] = leaf_secret.*;
-    var i: u32 = 1;
-    while (i < count) : (i += 1) {
-        out[i] = primitives.deriveSecret(
-            P,
-            &out[i - 1],
-            "path",
-        );
-    }
-}
-
-/// Derive commit_secret from the last path_secret.
-///
-///   commit_secret = DeriveSecret(path_secret[last], "path")
-pub fn deriveCommitSecret(
-    comptime P: type,
-    last_path_secret: *const [P.nh]u8,
-) [P.nh]u8 {
-    return primitives.deriveSecret(P, last_path_secret, "path");
-}
-
-/// Node keypair result: private and public keys.
-pub fn NodeKeypair(comptime P: type) type {
-    return struct { sk: [P.nsk]u8, pk: [P.npk]u8 };
-}
-
-/// Derive a node keypair from a path secret.
-///
-/// Per RFC 9420 Section 7.5:
-///   node_secret = DeriveSecret(path_secret, "node")
-///   (node_priv, node_pub) = KEM.DeriveKeyPair(node_secret)
-///
-/// KEM.DeriveKeyPair is the HPKE DeriveKeyPair function
-/// (RFC 9180 Section 7.1.3), NOT a raw seed derivation.
-pub fn deriveNodeKeypair(
-    comptime P: type,
-    path_secret: *const [P.nh]u8,
-) CryptoError!NodeKeypair(P) {
-    var node_secret = primitives.deriveSecret(
-        P,
-        path_secret,
-        "node",
-    );
-    defer secureZero(&node_secret);
-    const H = hpke_mod.Hpke(P);
-    const raw = try H.deriveKeyPair(&node_secret);
-    return .{ .sk = raw.sk, .pk = raw.pk };
-}
-
-/// Encrypt a path secret to a single recipient's public key.
-///
-/// Uses EncryptWithLabel(pk, "UpdatePathNode", group_context, secret).
-/// Returns an HPKECiphertext (kem_output || ciphertext || tag).
-///
-/// The returned slices are heap-allocated; caller must free via deinit.
-pub fn encryptPathSecretTo(
-    comptime P: type,
-    allocator: std.mem.Allocator,
-    path_secret: *const [P.nh]u8,
-    recipient_pk: *const [P.npk]u8,
-    group_context: []const u8,
-    eph_seed: *const [P.seed_len]u8,
-) (CryptoError || error{OutOfMemory})!HPKECiphertext {
-    var ct_buf: [P.nh]u8 = undefined;
-    var tag: [P.nt]u8 = undefined;
-    const kem_output = try primitives.encryptWithLabel(
-        P,
-        recipient_pk,
-        "UpdatePathNode",
-        group_context,
-        path_secret,
-        eph_seed,
-        &ct_buf,
-        &tag,
-    );
-
-    // Heap-allocate kem_output and ciphertext||tag.
-    const ko = allocator.alloc(
-        u8,
-        P.npk,
-    ) catch return error.OutOfMemory;
-    errdefer allocator.free(ko);
-    @memcpy(ko, &kem_output);
-
-    const ct_len = P.nh + P.nt;
-    const ct = allocator.alloc(
-        u8,
-        ct_len,
-    ) catch return error.OutOfMemory;
-    @memcpy(ct[0..P.nh], &ct_buf);
-    @memcpy(ct[P.nh..ct_len], &tag);
-
-    return .{ .kem_output = ko, .ciphertext = ct };
-}
-
-/// Decrypt a path secret from an HPKECiphertext.
-///
-/// Uses DecryptWithLabel(sk, pk, "UpdatePathNode", group_context, ...).
-pub fn decryptPathSecretFrom(
-    comptime P: type,
-    ct: *const HPKECiphertext,
-    recipient_sk: *const [P.nsk]u8,
-    recipient_pk: *const [P.npk]u8,
-    group_context: []const u8,
-) CryptoError![P.nh]u8 {
-    if (ct.kem_output.len != P.npk) return error.HpkeOpenFailed;
-    const ct_len = P.nh + P.nt;
-    if (ct.ciphertext.len != ct_len) return error.HpkeOpenFailed;
-
-    const kem_out: *const [P.npk]u8 = ct.kem_output[0..P.npk];
-    const ciphertext = ct.ciphertext[0..P.nh];
-    const tag: *const [P.nt]u8 = ct.ciphertext[P.nh..ct_len];
-
-    var pt_out: [P.nh]u8 = undefined;
-    errdefer primitives.secureZero(&pt_out);
-    try primitives.decryptWithLabel(
-        P,
-        recipient_sk,
-        recipient_pk,
-        "UpdatePathNode",
-        group_context,
-        kem_out,
-        ciphertext,
-        tag,
-        &pt_out,
-    );
-    return pt_out;
-}
-
-/// Encrypt a path secret to all members in a resolution.
-///
-/// For each node in the resolution, extracts its public key from the
-/// tree and encrypts the path secret to it. Returns allocated slice
-/// of HPKECiphertext. eph_seeds[i] provides the deterministic seed
-/// for the i-th encryption (for testability).
-pub fn encryptToResolution(
-    comptime P: type,
-    allocator: std.mem.Allocator,
-    tree: *const RatchetTree,
-    path_secret: *const [P.nh]u8,
-    resolution: []const NodeIndex,
-    group_context: []const u8,
-    eph_seeds: []const [P.seed_len]u8,
-) (CryptoError || TreeError || error{OutOfMemory})![]HPKECiphertext {
-    std.debug.assert(resolution.len == eph_seeds.len);
-
-    const cts = allocator.alloc(
-        HPKECiphertext,
-        resolution.len,
-    ) catch return error.OutOfMemory;
-    var init_count: u32 = 0;
-    errdefer freeCtSlice(allocator, cts, init_count);
-
-    for (resolution, 0..) |node_idx, i| {
-        const pk = try nodePublicKey(P, tree, node_idx);
-        cts[i] = try encryptPathSecretTo(
-            P,
-            allocator,
-            path_secret,
-            &pk,
-            group_context,
-            &eph_seeds[i],
-        );
-        init_count += 1;
-    }
-    return cts;
-}
-
-/// Extract the HPKE public key from a tree node.
-fn nodePublicKey(
-    comptime P: type,
-    tree: *const RatchetTree,
-    index: NodeIndex,
-) (TreeError || CryptoError)![P.npk]u8 {
-    const node = try tree.getNode(index);
-    if (node == null) return error.BlankNode;
-    const n = node.?;
-    const ek = switch (n.node_type) {
-        .leaf => n.payload.leaf.encryption_key,
-        .parent => n.payload.parent.encryption_key,
-    };
-    if (ek.len != P.npk) return error.InvalidPublicKey;
-    var pk: [P.npk]u8 = undefined;
-    @memcpy(&pk, ek[0..P.npk]);
-    return pk;
-}
-
-/// Free a partially-initialized slice of HPKECiphertext.
-fn freeCtSlice(
-    allocator: std.mem.Allocator,
-    cts: []HPKECiphertext,
-    count: u32,
-) void {
-    var i: u32 = 0;
-    while (i < count) : (i += 1) {
-        cts[i].deinit(allocator);
-    }
-    allocator.free(cts);
 }
 
 /// Result of derivePathKeys: path secrets, public keys, and
