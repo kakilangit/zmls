@@ -2184,3 +2184,275 @@ test "Client: credential validator rejects Add" {
         ),
     );
 }
+
+// -- P6.4: Client-level test gap coverage --------------------------------
+
+test "Client: multiple groups simultaneously" {
+    const io = testIo();
+    const gpa = testing.allocator;
+
+    var gs = MemGS(8).init();
+    defer gs.deinit();
+    var ks = MemKS(TestP, 8).init();
+    defer ks.deinit();
+
+    var alice = try makeTestClient(&gs, &ks);
+    defer alice.deinit();
+
+    // Create two independent groups.
+    const g1 = try alice.createGroup(io);
+    defer gpa.free(g1);
+    const g2 = try alice.createGroup(io);
+    defer gpa.free(g2);
+
+    // Both groups should exist with epoch 0.
+    const e1 = try alice.groupEpoch(io, g1);
+    const e2 = try alice.groupEpoch(io, g2);
+    try testing.expectEqual(@as(u64, 0), e1);
+    try testing.expectEqual(@as(u64, 0), e2);
+
+    // Self-update group 1 — should advance only g1.
+    const commit1 = try alice.selfUpdate(gpa, io, g1);
+    defer gpa.free(commit1);
+
+    const e1a = try alice.groupEpoch(io, g1);
+    const e2a = try alice.groupEpoch(io, g2);
+    try testing.expectEqual(@as(u64, 1), e1a);
+    try testing.expectEqual(@as(u64, 0), e2a);
+
+    // Self-update group 2 — should advance only g2.
+    const commit2 = try alice.selfUpdate(gpa, io, g2);
+    defer gpa.free(commit2);
+
+    const e1b = try alice.groupEpoch(io, g1);
+    const e2b = try alice.groupEpoch(io, g2);
+    try testing.expectEqual(@as(u64, 1), e1b);
+    try testing.expectEqual(@as(u64, 1), e2b);
+
+    // Leave one group, verify the other is unaffected.
+    try alice.leaveGroup(io, g1);
+    try testing.expectError(
+        error.GroupNotFound,
+        alice.groupEpoch(io, g1),
+    );
+    const e2c = try alice.groupEpoch(io, g2);
+    try testing.expectEqual(@as(u64, 1), e2c);
+}
+
+test "Client: processIncoming rejects unknown group" {
+    const io = testIo();
+    const gpa = testing.allocator;
+
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(TestP, 8).init();
+    defer alice_ks.deinit();
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(TestP, 8).init();
+    defer bob_ks.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_gs,
+        &alice_ks,
+        &bob_gs,
+        &bob_ks,
+        &alice,
+        &bob,
+    );
+    defer gpa.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    // Alice sends a message to the real group.
+    const ct = try alice.sendMessage(
+        gpa,
+        io,
+        group_id,
+        "hello",
+    );
+    defer gpa.free(ct);
+
+    // Bob tries to process it as a different group.
+    try testing.expectError(
+        error.GroupNotFound,
+        bob.processIncoming(gpa, io, "wrong-group", ct),
+    );
+}
+
+test "Client: joinGroup with wrong Welcome rejected" {
+    const io = testIo();
+    const gpa = testing.allocator;
+
+    // Alice creates group, invites Bob.
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(TestP, 8).init();
+    defer alice_ks.deinit();
+    var alice = try makeTestClient(&alice_gs, &alice_ks);
+    defer alice.deinit();
+
+    const group_id = try alice.createGroup(io);
+    defer gpa.free(group_id);
+
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(TestP, 8).init();
+    defer bob_ks.deinit();
+    var bob = try makeTestClientBob(&bob_gs, &bob_ks);
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(gpa, io);
+    defer gpa.free(bob_kp.data);
+
+    var invite = try alice.inviteMember(
+        gpa,
+        io,
+        group_id,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    // Carol tries to join with Bob's Welcome — should fail
+    // because Carol has no matching pending key package.
+    var carol_gs = MemGS(8).init();
+    defer carol_gs.deinit();
+    var carol_ks = MemKS(TestP, 8).init();
+    defer carol_ks.deinit();
+    var carol = try makeTestClientCarol(
+        &carol_gs,
+        &carol_ks,
+    );
+    defer carol.deinit();
+
+    // Generate a KP for Carol (different keys).
+    const carol_kp = try carol.freshKeyPackage(gpa, io);
+    defer gpa.free(carol_kp.data);
+
+    var alice_bundle = try alice.loadBundle(io, group_id);
+    defer alice_bundle.deinit(gpa);
+    var tree_copy = try alice_bundle.group_state.tree.clone();
+    defer tree_copy.deinit();
+
+    // Carol's pending KP ref won't match the Welcome's
+    // encrypted-to ref, so joinGroup should fail.
+    try testing.expectError(
+        error.NoPendingKeyPackage,
+        carol.joinGroup(gpa, io, invite.welcome, .{
+            .ratchet_tree = tree_copy,
+            .signer_verify_key = &alice
+                .signing_public_key,
+        }),
+    );
+}
+
+test "Client: credential validator rejects joinGroup" {
+    const io = testIo();
+    const gpa = testing.allocator;
+
+    const CV = zmls.credential_validator;
+
+    // Validator that rejects identities starting with
+    // "evil".
+    const RejectEvil = struct {
+        const instance: @This() = .{};
+
+        fn rejectEvil(
+            _: *const anyopaque,
+            cred: *const Credential,
+        ) zmls.errors.ValidationError!void {
+            const identity = switch (cred.tag) {
+                .basic => cred.payload.basic,
+                else => return,
+            };
+            if (identity.len >= 4 and
+                std.mem.eql(
+                    u8,
+                    identity[0..4],
+                    "evil",
+                )) return error.InvalidCredential;
+        }
+
+        pub fn validator() CV.CredentialValidator {
+            return .{
+                .context = @ptrCast(&instance),
+                .validate_fn = &rejectEvil,
+            };
+        }
+    };
+
+    // "evil-alice" creates a group (using AcceptAll).
+    var evil_gs = MemGS(8).init();
+    defer evil_gs.deinit();
+    var evil_ks = MemKS(TestP, 8).init();
+    defer evil_ks.deinit();
+
+    var evil_alice = try Client(TestP).init(
+        gpa,
+        "evil-alice",
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &[_]u8{0xEE} ** 32,
+        .{
+            .group_store = evil_gs.groupStore(),
+            .key_store = evil_ks.keyStore(),
+            .credential_validator = CV
+                .AcceptAllValidator.validator(),
+        },
+    );
+    defer evil_alice.deinit();
+
+    const group_id = try evil_alice.createGroup(io);
+    defer gpa.free(group_id);
+
+    // Bob has a RejectEvil validator.
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(TestP, 8).init();
+    defer bob_ks.deinit();
+
+    var bob = try Client(TestP).init(
+        gpa,
+        "bob",
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &[_]u8{0x99} ** 32,
+        .{
+            .group_store = bob_gs.groupStore(),
+            .key_store = bob_ks.keyStore(),
+            .credential_validator = RejectEvil.validator(),
+        },
+    );
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(gpa, io);
+    defer gpa.free(bob_kp.data);
+
+    // evil-alice invites Bob (her validator accepts all).
+    var invite = try evil_alice.inviteMember(
+        gpa,
+        io,
+        group_id,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    var ea_bundle = try evil_alice.loadBundle(
+        io,
+        group_id,
+    );
+    defer ea_bundle.deinit(gpa);
+    var tree = try ea_bundle.group_state.tree.clone();
+    defer tree.deinit();
+
+    // Bob tries to join but his validator rejects
+    // evil-alice's credential.
+    try testing.expectError(
+        error.CredentialValidationFailed,
+        bob.joinGroup(gpa, io, invite.welcome, .{
+            .ratchet_tree = tree,
+            .signer_verify_key = &evil_alice
+                .signing_public_key,
+        }),
+    );
+}
