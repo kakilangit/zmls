@@ -75,15 +75,17 @@ const max_welcome_psks: u32 = 64;
 /// the combined psk_secret.
 ///
 /// Returns all-zero if the PSK list is empty.
-/// Returns null if any PSK cannot be resolved.
+/// Returns error.PskNotFound if any PSK cannot be resolved.
 fn resolveWelcomePskSecret(
     comptime P: type,
     psks: []const psk_mod.PreSharedKeyId,
     resolver: ?commit_mod.PskResolver(P),
-) ?[P.nh]u8 {
+) (GroupError || ValidationError)![P.nh]u8 {
     if (psks.len == 0) return .{0} ** P.nh;
 
-    if (psks.len > max_welcome_psks) return null;
+    if (psks.len > max_welcome_psks) {
+        return error.InvalidProposalList;
+    }
     const n: u32 = @intCast(psks.len);
     var entries: [max_welcome_psks]psk_mod.PskEntry = undefined;
     var ei: u32 = 0;
@@ -108,15 +110,14 @@ fn resolveWelcomePskSecret(
             }
             break :blk null;
         };
-        if (secret == null) return null;
+        if (secret == null) return error.PskNotFound;
         entries[ei] = .{
             .id = id.*,
             .secret = secret.?,
         };
     }
 
-    return psk_mod.derivePskSecret(P, entries[0..n]) catch
-        return null;
+    return psk_mod.derivePskSecret(P, entries[0..n]);
 }
 
 // -- processWelcome ---------------------------------------------------------
@@ -329,7 +330,7 @@ fn decryptWelcomeSecrets(
         P,
         gs.psks,
         psk_resolver,
-    ) orelse {
+    ) catch {
         gs.deinit(allocator);
         return error.PskNotFound;
     };
