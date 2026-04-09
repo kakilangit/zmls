@@ -29,6 +29,8 @@ pub const DecodeError = error{
     CorruptState,
     /// A membership tag has the wrong length for the cipher suite.
     InvalidMembershipTagLength,
+    /// The protocol version is not supported (must be mls10).
+    UnsupportedProtocolVersion,
 };
 
 /// Errors from cryptographic operations.
