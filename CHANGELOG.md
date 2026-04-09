@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **CipherSuite IANA compliance** -- aligned enum values 0x0004–0x0007
+  with the IANA MLS Cipher Suites registry. P-384/AES-256 moved from
+  0x0006 to 0x0007 (correct IANA value). P-256/ChaCha20 moved to
+  private-use value 0xF001. Suites 0x0004–0x0006 now correctly
+  represent X448/Ed448 and P-521 (not implemented).
+- **DER ECDSA signature support** -- `verifyWithLabel` now accepts
+  both IEEE P1363 (raw r||s) and DER-encoded ECDSA signatures,
+  enabling interoperability with other MLS implementations that use
+  DER encoding for P-256/P-384 signatures.
+
+### Added
+
+- **Crypto fuzz targets** -- 6 new fuzz targets in `tests/fuzz_crypto.zig`
+  for HPKE seal/open, sign/verify, DeriveKeyPair, and tree hash.
+- **Add proposal fuzzing** -- `tests/fuzz_proposals.zig` now includes
+  Add proposals with KeyPackage in both codec and validation fuzzing.
+- **Integration tests** -- 4 new end-to-end tests: PSK through commit
+  pipeline, mixed Add+Remove in same commit, concurrent commit
+  rejection, and GroupContextExtensions proposal.
+- **Multi-suite interop tests** -- PSK, Welcome, and tree-validation
+  test vectors now verified for suites 2 (P-256) and 7 (P-384) in
+  addition to suites 1 and 3.
+
 ## [0.1.1] - 2026-04-08
 
 ### Added
@@ -33,7 +60,8 @@ Security).
   epoch advancement.
 - **Five cipher suites** -- 0x0001 (X25519/AES-128-GCM/SHA-256/Ed25519),
   0x0002 (P-256/AES-128-GCM), 0x0003 (X25519/ChaCha20-Poly1305),
-  0x0004 (P-256/ChaCha20-Poly1305), 0x0006 (P-384/AES-256-GCM).
+  0xF001 (P-256/ChaCha20-Poly1305, non-standard), 0x0007
+  (P-384/AES-256-GCM).
 - **Hexagonal architecture** -- core library has zero I/O dependency.
   CryptoProvider (comptime), CredentialValidator (runtime), and
   PskLookup (runtime) ports.
