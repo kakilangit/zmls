@@ -406,16 +406,15 @@ fn verifyTreeAndDecodeContext(
     gi: *const GroupInfo,
 ) WelcomeError!context_mod.GroupContext(P.nh) {
     // RFC 9420 S7.9.2: verify parent hash chain.
-    tree_hashes.verifyParentHashes(P, allocator, tree) catch
-        return error.ParentHashMismatch;
-
-    const root = tree_math.root(tree.leaf_count);
-    const tree_hash = tree_hashes.treeHash(
+    // Returns root tree hash as byproduct.
+    const tree_hash = tree_hashes.verifyParentHashes(
         P,
         allocator,
         tree,
-        root,
-    ) catch return error.IndexOutOfRange;
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.ParentHashMismatch,
+    };
 
     var gc_dec = context_mod.GroupContext(P.nh).decode(
         allocator,

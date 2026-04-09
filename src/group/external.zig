@@ -1005,7 +1005,7 @@ fn decryptAndVerifyPath(
         new_tree,
         joiner_leaf,
     );
-    try tree_hashes.verifyParentHashes(P, allocator, new_tree);
+    _ = try tree_hashes.verifyParentHashes(P, allocator, new_tree);
     return path_result.commit_secret;
 }
 

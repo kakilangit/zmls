@@ -1592,7 +1592,7 @@ test "verifyParentHashes rejects tampered tree in welcome context" {
     try tree.setLeaf(LeafIndex.fromU32(0), leaf_a);
 
     // Should pass.
-    try tree_hashes.verifyParentHashes(Default, testing.allocator, &tree);
+    _ = try tree_hashes.verifyParentHashes(Default, testing.allocator, &tree);
 
     // Tamper: flip a byte in the leaf's parent_hash.
     const slot = &tree.nodes[0];

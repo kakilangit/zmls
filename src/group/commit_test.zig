@@ -2326,7 +2326,7 @@ test "verifyParentHashes rejects tampered parent hash" {
     try tree.setLeaf(LeafIndex.fromU32(0), alice_leaf);
 
     // Valid tree should pass.
-    try tree_hashes.verifyParentHashes(Default, testing.allocator, &tree);
+    _ = try tree_hashes.verifyParentHashes(Default, testing.allocator, &tree);
 
     // Tamper the parent_hash on Alice's leaf in the tree.
     const leaf_slot = &tree.nodes[0];

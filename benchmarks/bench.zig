@@ -618,7 +618,7 @@ fn benchTreeHash256() void {
 fn benchVerifyParentHashes16() void {
     var tree = buildTree(16) orelse return;
     defer tree.deinit();
-    mls.tree_hashes.verifyParentHashes(
+    _ = mls.tree_hashes.verifyParentHashes(
         Default,
         alloc,
         &tree,

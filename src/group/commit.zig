@@ -1051,15 +1051,13 @@ fn deriveProcessEpochState(
     assert(derived_key_count <= path_mod.max_path_nodes);
     assert(fc.content_type == .commit);
     // RFC 9420 S7.9.2: verify parent hash chain before accepting.
-    try tree_hashes.verifyParentHashes(P, allocator, new_tree);
-
-    const root = tree_math.root(new_tree.leaf_count);
-    const new_tree_hash = try tree_hashes.treeHash(
+    // Returns root tree hash as byproduct (avoids redundant pass).
+    const new_tree_hash = try tree_hashes.verifyParentHashes(
         P,
         allocator,
         new_tree,
-        root,
     );
+
     const confirmed_th = try buildConfirmedHash(
         P,
         fc,

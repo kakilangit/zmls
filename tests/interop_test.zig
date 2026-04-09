@@ -2226,7 +2226,7 @@ fn verifyTreeValidation(
     }
 
     // 4. Verify parent hashes (whole-tree, bottom-up per 7.9.2).
-    try tree_hashes_mod.verifyParentHashes(Prov, allocator, &tree);
+    _ = try tree_hashes_mod.verifyParentHashes(Prov, allocator, &tree);
 
     // 5. Verify leaf signatures.
     const group_id = try hexDecodeAlloc(

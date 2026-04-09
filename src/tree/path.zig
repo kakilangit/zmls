@@ -1072,6 +1072,7 @@ pub fn computeLeafParentHash(
         tree,
         fdp.copath[0],
         ul,
+        null,
     );
     return try tree_hashes.parentHash(P, tree, fdp.path[0], &osth);
 }
@@ -1125,6 +1126,7 @@ pub fn setPathParentHashes(
             tree,
             fdp.copath[i],
             ul,
+            null,
         );
     }
 
