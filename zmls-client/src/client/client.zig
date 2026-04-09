@@ -2183,6 +2183,23 @@ pub fn Client(comptime P: type) type {
                 &receiver_public_key,
             );
 
+            return self.finalizeCommitResult(
+                allocator,
+                io,
+                group_id,
+                &result,
+            );
+        }
+
+        /// Post-commit finalization: validate credentials, init
+        /// secret tree, persist, build result, clear proposals.
+        fn finalizeCommitResult(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            result: *CommitProc.CommitResult,
+        ) ProcessIncomingError!ProcessingResult {
             // Validate credentials of all leaves in the
             // resulting tree (catches newly added members).
             validateTreeCredentials(
@@ -2214,7 +2231,7 @@ pub fn Client(comptime P: type) type {
 
             const commit_applied = buildCommitApplied(
                 allocator,
-                &result,
+                result,
             ) catch {
                 result.deinit();
                 return error.OutOfMemory;
