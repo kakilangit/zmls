@@ -11,6 +11,18 @@ const CryptoError = @import("../common/errors.zig").CryptoError;
 const Default = @import(
     "default.zig",
 ).DhKemX25519Sha256Aes128GcmEd25519;
+const ChaCha = @import(
+    "chacha20.zig",
+).DhKemX25519Sha256ChaCha20Poly1305Ed25519;
+const P256 = @import(
+    "p256.zig",
+).DhKemP256Sha256Aes128GcmP256;
+const P256ChaCha = @import(
+    "p256_chacha20.zig",
+).DhKemP256Sha256ChaCha20Poly1305P256;
+const P384 = @import(
+    "p384.zig",
+).DhKemP384Sha384Aes256GcmP384;
 
 pub const CipherSuite = types.CipherSuite;
 
@@ -55,51 +67,51 @@ pub fn params(suite: CipherSuite) ?SuiteParams {
         // 0x0003: MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519
         // Same key/hash sizes as 0x0001, different AEAD.
         .mls_128_dhkemx25519_chacha20poly1305_sha256_ed25519 => .{
-            .nh = 32, // SHA-256
-            .nk = 32, // ChaCha20-Poly1305
-            .nn = 12, // ChaCha20-Poly1305
-            .nt = 16, // Poly1305
-            .npk = 32, // X25519
-            .nsk = 32, // X25519
-            .sign_pk_len = 32, // Ed25519
-            .sign_sk_len = 64, // Ed25519
-            .sig_len = 64, // Ed25519
+            .nh = ChaCha.nh,
+            .nk = ChaCha.nk,
+            .nn = ChaCha.nn,
+            .nt = ChaCha.nt,
+            .npk = ChaCha.npk,
+            .nsk = ChaCha.nsk,
+            .sign_pk_len = ChaCha.sign_pk_len,
+            .sign_sk_len = ChaCha.sign_sk_len,
+            .sig_len = ChaCha.sig_len,
         },
         // 0x0002: MLS_128_DHKEMP256_AES128GCM_SHA256_P256
         .mls_128_dhkemp256_aes128gcm_sha256_p256 => .{
-            .nh = 32, // SHA-256
-            .nk = 16, // AES-128-GCM
-            .nn = 12, // AES-128-GCM
-            .nt = 16, // AES-128-GCM
-            .npk = 65, // P-256 uncompressed
-            .nsk = 32, // P-256 scalar
-            .sign_pk_len = 65, // P-256 uncompressed
-            .sign_sk_len = 32, // P-256 scalar
-            .sig_len = 64, // ECDSA P-256
+            .nh = P256.nh,
+            .nk = P256.nk,
+            .nn = P256.nn,
+            .nt = P256.nt,
+            .npk = P256.npk,
+            .nsk = P256.nsk,
+            .sign_pk_len = P256.sign_pk_len,
+            .sign_sk_len = P256.sign_sk_len,
+            .sig_len = P256.sig_len,
         },
         // 0x0004: MLS_128_DHKEMP256_CHACHA20POLY1305_SHA256_P256
         .mls_128_dhkemp256_chacha20poly1305_sha256_p256 => .{
-            .nh = 32, // SHA-256
-            .nk = 32, // ChaCha20-Poly1305
-            .nn = 12, // ChaCha20-Poly1305
-            .nt = 16, // Poly1305
-            .npk = 65, // P-256 uncompressed
-            .nsk = 32, // P-256 scalar
-            .sign_pk_len = 65, // P-256 uncompressed
-            .sign_sk_len = 32, // P-256 scalar
-            .sig_len = 64, // ECDSA P-256
+            .nh = P256ChaCha.nh,
+            .nk = P256ChaCha.nk,
+            .nn = P256ChaCha.nn,
+            .nt = P256ChaCha.nt,
+            .npk = P256ChaCha.npk,
+            .nsk = P256ChaCha.nsk,
+            .sign_pk_len = P256ChaCha.sign_pk_len,
+            .sign_sk_len = P256ChaCha.sign_sk_len,
+            .sig_len = P256ChaCha.sig_len,
         },
         // 0x0006: MLS_256_DHKEMP384_AES256GCM_SHA384_P384
         .mls_256_dhkemp384_aes256gcm_sha384_p384 => .{
-            .nh = 48, // SHA-384
-            .nk = 32, // AES-256-GCM
-            .nn = 12, // AES-256-GCM
-            .nt = 16, // AES-256-GCM
-            .npk = 97, // P-384 uncompressed
-            .nsk = 48, // P-384 scalar
-            .sign_pk_len = 97, // P-384 uncompressed
-            .sign_sk_len = 48, // P-384 scalar
-            .sig_len = 96, // ECDSA P-384
+            .nh = P384.nh,
+            .nk = P384.nk,
+            .nn = P384.nn,
+            .nt = P384.nt,
+            .npk = P384.npk,
+            .nsk = P384.nsk,
+            .sign_pk_len = P384.sign_pk_len,
+            .sign_sk_len = P384.sign_sk_len,
+            .sig_len = P384.sig_len,
         },
         else => null,
     };
