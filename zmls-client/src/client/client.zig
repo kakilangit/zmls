@@ -748,7 +748,6 @@ pub fn Client(comptime P: type) type {
         pub const JoinGroupOpts = struct {
             ratchet_tree: zmls.RatchetTree,
             signer_verify_key: *const [P.sign_pk_len]u8,
-            my_leaf_index: zmls.LeafIndex,
         };
 
         /// Join a group via a Welcome message.
@@ -808,6 +807,33 @@ pub fn Client(comptime P: type) type {
             return null;
         }
 
+        /// Search a ratchet tree for a leaf whose signature_key
+        /// matches the given public key. Returns the leaf index
+        /// or null if no matching leaf is found.
+        fn findMyLeaf(
+            tree: *const zmls.RatchetTree,
+            signing_public_key: *const [P.sign_pk_len]u8,
+        ) ?zmls.LeafIndex {
+            var i: u32 = 0;
+            while (i < tree.leaf_count) : (i += 1) {
+                const li = zmls.LeafIndex.fromU32(i);
+                const leaf = tree.getLeaf(li) catch continue;
+                if (leaf) |ln| {
+                    if (ln.signature_key.len ==
+                        P.sign_pk_len and
+                        std.mem.eql(
+                            u8,
+                            ln.signature_key,
+                            signing_public_key,
+                        ))
+                    {
+                        return li;
+                    }
+                }
+            }
+            return null;
+        }
+
         fn processAndPersistWelcome(
             self: *Self,
             allocator: Allocator,
@@ -816,6 +842,15 @@ pub fn Client(comptime P: type) type {
             match: PendingMatch,
             opts: JoinGroupOpts,
         ) JoinError!JoinGroupResult {
+            // Derive my_leaf_index by searching the tree for
+            // a leaf whose signature_key matches ours. This
+            // makes the API foolproof — the caller cannot
+            // supply a wrong leaf index.
+            const my_leaf_index = findMyLeaf(
+                &opts.ratchet_tree,
+                &self.signing_public_key,
+            ) orelse return error.WelcomeProcessingFailed;
+
             var group_state = GS.joinViaWelcome(
                 allocator,
                 .{
@@ -828,7 +863,7 @@ pub fn Client(comptime P: type) type {
                     .tree_data = .{
                         .prebuilt = opts.ratchet_tree,
                     },
-                    .my_leaf_index = opts.my_leaf_index,
+                    .my_leaf_index = my_leaf_index,
                 },
             ) catch return error.WelcomeProcessingFailed;
 
@@ -867,7 +902,7 @@ pub fn Client(comptime P: type) type {
             try self.key_store.storeEncryptionKey(
                 io,
                 group_id,
-                @intFromEnum(opts.my_leaf_index),
+                @intFromEnum(my_leaf_index),
                 &match.keys.enc_sk,
             );
 
@@ -3499,7 +3534,6 @@ test "Client: joinGroup via Welcome succeeds" {
             .ratchet_tree = tree_copy,
             .signer_verify_key = &alice
                 .signing_public_key,
-            .my_leaf_index = zmls.LeafIndex.fromU32(1),
         },
     );
     defer join.deinit();
@@ -3572,7 +3606,6 @@ test "Client: joinGroup persists group state" {
             .ratchet_tree = tree_copy,
             .signer_verify_key = &alice
                 .signing_public_key,
-            .my_leaf_index = zmls.LeafIndex.fromU32(1),
         },
     );
     defer join.deinit();
@@ -3660,7 +3693,6 @@ test "Client: joinGroup fails without pending KP" {
             .ratchet_tree = tree_copy,
             .signer_verify_key = &alice
                 .signing_public_key,
-            .my_leaf_index = zmls.LeafIndex.fromU32(1),
         },
     );
     try testing.expectError(
@@ -3816,7 +3848,6 @@ test "Client: leaveGroup deletes state from store" {
             .ratchet_tree = tree_copy,
             .signer_verify_key = &alice
                 .signing_public_key,
-            .my_leaf_index = zmls.LeafIndex.fromU32(1),
         },
     );
     defer join.deinit();
@@ -3885,7 +3916,6 @@ fn setupTwoMemberGroup(
             .ratchet_tree = tree_copy,
             .signer_verify_key = &alice
                 .signing_public_key,
-            .my_leaf_index = zmls.LeafIndex.fromU32(1),
         },
     );
     defer join.deinit();

@@ -142,8 +142,6 @@ fn setupAliceBobGroup(
             .ratchet_tree = tree_copy,
             .signer_verify_key = &alice
                 .signing_public_key,
-            .my_leaf_index = zmls.LeafIndex
-                .fromU32(1),
         },
     );
     defer join.deinit();
@@ -593,7 +591,6 @@ test "error: joinGroup without pending KP" {
         .{
             .ratchet_tree = undefined,
             .signer_verify_key = undefined,
-            .my_leaf_index = zmls.LeafIndex.fromU32(0),
         },
     );
     try testing.expectError(
@@ -813,8 +810,6 @@ test "three-party: Alice invites Bob, then Carol" {
             .ratchet_tree = tree_copy2,
             .signer_verify_key = &alice
                 .signing_public_key,
-            .my_leaf_index = zmls.LeafIndex
-                .fromU32(2),
         },
     );
     defer join_carol.deinit();
