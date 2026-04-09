@@ -83,18 +83,19 @@ pub fn treeHash(
 
     // Process nodes bottom-up by level. Level 0 = leaves, then
     // level 1, 2, etc. This guarantees children are hashed before
-    // parents.
+    // parents. We enumerate nodes at each level using stride-based
+    // iteration: level k nodes start at (1<<k)-1, stride 1<<(k+1).
     const max_level = tree_math.level(
         tree_math.root(tree.leaf_count),
     );
 
-    // Level 0: hash all leaves in the subtree.
     var lv: u32 = 0;
     while (lv <= max_level) : (lv += 1) {
-        var idx: u32 = 0;
-        while (idx < width) : (idx += 1) {
+        const first: u32 = (@as(u32, 1) << @intCast(lv)) - 1;
+        const stride: u32 = @as(u32, 1) << @intCast(lv + 1);
+        var idx: u32 = first;
+        while (idx < width) : (idx += stride) {
             const ni = NodeIndex.fromU32(idx);
-            if (tree_math.level(ni) != lv) continue;
 
             // Check if this node is in the subtree of root_idx.
             if (!isInSubtree(ni, root_idx)) continue;
