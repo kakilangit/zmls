@@ -1003,12 +1003,30 @@ pub fn Client(comptime P: type) type {
         }
 
         /// Leave the group (delete local state).
+        /// Deletes the encryption key (best-effort) and
+        /// the group state from the store.
         pub fn leaveGroup(
             self: *Self,
             io: Io,
             group_id: []const u8,
         ) GroupStore.Error!void {
             if (self.closed) return;
+
+            // Best-effort: delete our encryption key so
+            // secret material is cleaned up promptly.
+            if (self.loadBundle(io, group_id)) |bundle| {
+                const leaf = @intFromEnum(
+                    bundle.group_state.my_leaf_index,
+                );
+                var b = bundle;
+                b.deinit(self.allocator);
+                self.key_store.deleteEncryptionKey(
+                    io,
+                    group_id,
+                    leaf,
+                ) catch {};
+            } else |_| {}
+
             try self.group_store.delete(io, group_id);
         }
 

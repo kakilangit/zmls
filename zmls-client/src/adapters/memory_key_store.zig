@@ -187,11 +187,25 @@ pub fn MemoryKeyStore(comptime P: type, comptime capacity: u32) type {
             return true;
         }
 
+        fn deleteEncFn(
+            ctx: *anyopaque,
+            _: Io,
+            group_id: []const u8,
+            leaf_index: u32,
+        ) KS.Error!void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            const kh = hashGroupLeaf(group_id, leaf_index);
+            const slot = self.findEnc(kh) orelse return;
+            secureZeroSlice(&slot.secret);
+            slot.* = .{};
+        }
+
         const vtable: KS.VTable = .{
             .store_signature_key = &storeSigFn,
             .load_signature_key = &loadSigFn,
             .store_encryption_key = &storeEncFn,
             .load_encryption_key = &loadEncFn,
+            .delete_encryption_key = &deleteEncFn,
         };
     };
 }
@@ -280,4 +294,39 @@ test "MemoryKeyStore: overwrite existing key" {
     const found = try ks.loadSignatureKey(io, "alice", &out);
     try testing.expect(found);
     try testing.expectEqualSlices(u8, &k2, &out);
+}
+
+test "MemoryKeyStore: delete encryption key" {
+    var store = MemoryKeyStore(StubP, 4).init();
+    defer store.deinit();
+    const ks = store.keyStore();
+    const io = testIo();
+
+    const key: [StubP.nsk]u8 = .{0xEE} ** StubP.nsk;
+    try ks.storeEncryptionKey(io, "group-1", 5, &key);
+
+    // Key is retrievable before delete.
+    var out: [StubP.nsk]u8 = undefined;
+    try testing.expect(
+        try ks.loadEncryptionKey(io, "group-1", 5, &out),
+    );
+    try testing.expectEqualSlices(u8, &key, &out);
+
+    // Delete the key.
+    try ks.deleteEncryptionKey(io, "group-1", 5);
+
+    // Key is gone after delete.
+    try testing.expect(
+        !try ks.loadEncryptionKey(io, "group-1", 5, &out),
+    );
+}
+
+test "MemoryKeyStore: delete is idempotent" {
+    var store = MemoryKeyStore(StubP, 4).init();
+    defer store.deinit();
+    const ks = store.keyStore();
+    const io = testIo();
+
+    // Delete non-existent key — no error.
+    try ks.deleteEncryptionKey(io, "group-1", 99);
 }
