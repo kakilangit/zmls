@@ -133,4 +133,7 @@ pub const DeliveryService =
 test {
     // Pull in tests from all submodules.
     @import("std").testing.refAllDecls(@This());
+
+    // Separated test modules (not reachable via refAllDecls).
+    _ = @import("client/client_test.zig");
 }
