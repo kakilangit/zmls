@@ -159,10 +159,16 @@ pub const DhKemP384Sha384Aes256GcmP384 = struct {
         sk: *const [sign_sk_len]u8,
         msg: []const u8,
     ) CryptoError![sig_len]u8 {
-        const secret_key = Ecdsa.SecretKey{ .bytes = sk.* };
-        const kp = Ecdsa.KeyPair.fromSecretKey(
+        var secret_key = Ecdsa.SecretKey{ .bytes = sk.* };
+        defer primitives.secureZero(
+            std.mem.asBytes(&secret_key),
+        );
+        var kp = Ecdsa.KeyPair.fromSecretKey(
             secret_key,
         ) catch return error.InvalidPrivateKey;
+        defer primitives.secureZero(
+            std.mem.asBytes(&kp),
+        );
         const sig = kp.sign(msg, null) catch {
             return error.SignatureVerifyFailed;
         };

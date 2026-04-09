@@ -15,6 +15,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const crypto = std.crypto;
 const provider = @import("provider.zig");
+const primitives = @import("primitives.zig");
 const CryptoError = @import("../common/errors.zig").CryptoError;
 
 const Sha256 = crypto.hash.sha2.Sha256;
@@ -147,12 +148,18 @@ pub const DhKemX25519Sha256Aes128GcmEd25519 = struct {
         sk: *const [sign_sk_len]u8,
         msg: []const u8,
     ) CryptoError![sig_len]u8 {
-        const secret_key = Ed25519.SecretKey.fromBytes(
+        var secret_key = Ed25519.SecretKey.fromBytes(
             sk.*,
         ) catch return error.InvalidPrivateKey;
-        const kp = Ed25519.KeyPair.fromSecretKey(
+        defer primitives.secureZero(
+            std.mem.asBytes(&secret_key),
+        );
+        var kp = Ed25519.KeyPair.fromSecretKey(
             secret_key,
         ) catch return error.InvalidPrivateKey;
+        defer primitives.secureZero(
+            std.mem.asBytes(&kp),
+        );
         const sig = kp.sign(msg, null) catch {
             return error.SignatureVerifyFailed;
         };
