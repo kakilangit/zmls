@@ -525,8 +525,9 @@ fn truncateTree(tree: *RatchetTree) void {
             ?Node,
             new_width,
         ) catch {
-            // If allocation fails, just keep the old buffer.
-            tree.leaf_count = new_leaf_count;
+            // If allocation fails, keep the old buffer AND
+            // the old leaf_count to preserve the invariant
+            // nodes.len == nodeWidth(leaf_count).
             return;
         };
         @memcpy(new_nodes, tree.nodes[0..new_width]);
