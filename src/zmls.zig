@@ -598,8 +598,13 @@ test {
     _ = @import("group/commit_test.zig");
     _ = @import("group/evolution_test.zig");
     _ = @import("group/external_senders_test.zig");
+    _ = @import("group/external_test.zig");
     _ = @import("group/welcome_test.zig");
     _ = @import("framing/private_msg_test.zig");
     _ = @import("key_schedule/secret_tree_test.zig");
+    _ = @import("messages/proposal_test.zig");
     _ = @import("messages/welcome_test.zig");
+    _ = @import("tree/hashes_test.zig");
+    _ = @import("tree/node_test.zig");
+    _ = @import("tree/path_test.zig");
 }
