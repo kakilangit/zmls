@@ -56,6 +56,9 @@ pub const DhKemP384Sha384Aes256GcmP384 = struct {
     /// Signature length (ECDSA r||s = 96 bytes).
     pub const sig_len: u32 = 96;
 
+    /// Keypair seed length (P-384 scalar = 48 bytes).
+    pub const seed_len: u32 = 48;
+
     // -- HPKE algorithm IDs per RFC 9180 ---------------------------------
 
     /// DHKEM(P-384, HKDF-SHA384) = 0x0011.
@@ -134,24 +137,16 @@ pub const DhKemP384Sha384Aes256GcmP384 = struct {
     // -- Signatures (ECDSA-P384-SHA384) -----------------------------------
 
     pub fn signKeypairFromSeed(
-        seed: *const [32]u8,
+        seed: *const [seed_len]u8,
     ) CryptoError!struct {
         sk: [sign_sk_len]u8,
         pk: [sign_pk_len]u8,
     } {
-        // P-384 scalar is 48 bytes. Extract a PRK from the
-        // 32-byte seed, then expand to 48 bytes.
-        // NOTE: The HKDF salt "zmls p384 sign" is a zmls-specific
-        // label, not defined in any RFC. This only affects local
-        // key generation; HPKE DeriveKeyPair uses its own labeled
-        // mechanism per RFC 9180.
-        var prk = Hkdf.extract("zmls p384 sign", seed);
-        defer primitives.secureZero(&prk);
-        var extended: [48]u8 = undefined;
-        defer primitives.secureZero(&extended);
-        Hkdf.expand(&extended, "seed", prk);
+        // P-384 scalar is 48 bytes = seed_len, so we use the
+        // seed directly as the scalar for deterministic key
+        // generation.
         const kp = Ecdsa.KeyPair.generateDeterministic(
-            extended,
+            seed.*,
         ) catch return error.InvalidPrivateKey;
         return .{
             .sk = kp.secret_key.bytes,
@@ -207,26 +202,16 @@ pub const DhKemP384Sha384Aes256GcmP384 = struct {
         };
     }
 
-    /// Generate a P-384 DH key pair from a 32-byte seed.
+    /// Generate a P-384 DH key pair from a 48-byte seed.
     ///
-    /// P-384 scalars are 48 bytes. We extract a PRK from the
-    /// 32-byte seed, then expand to 48 bytes for scalar
-    /// derivation.
-    ///
-    /// NOTE: The HKDF salt "zmls p384 dh" is a zmls-specific
-    /// label, not defined in any RFC. This only affects local
-    /// key generation; HPKE DeriveKeyPair uses RFC 9180's
-    /// labeled mechanism.
+    /// The seed is used directly as the 48-byte scalar for
+    /// deterministic key generation, matching the curve's
+    /// native scalar size.
     pub fn dhKeypairFromSeed(
-        seed: *const [32]u8,
+        seed: *const [seed_len]u8,
     ) CryptoError!struct { sk: [nsk]u8, pk: [npk]u8 } {
-        var prk = Hkdf.extract("zmls p384 dh", seed);
-        defer primitives.secureZero(&prk);
-        var extended: [48]u8 = undefined;
-        defer primitives.secureZero(&extended);
-        Hkdf.expand(&extended, "seed", prk);
         const kp = Ecdsa.KeyPair.generateDeterministic(
-            extended,
+            seed.*,
         ) catch return error.InvalidPrivateKey;
         const point = P384.fromSec1(
             &kp.public_key.toUncompressedSec1(),
@@ -326,7 +311,7 @@ test "suite 0x0006 aead rejects tampered ciphertext" {
 }
 
 test "suite 0x0006 sign/verify round-trip" {
-    const seed = [_]u8{0x01} ** 32;
+    const seed = [_]u8{0x01} ** 48;
     const kp = try P.signKeypairFromSeed(&seed);
     const msg = "message to sign";
     const sig = try P.sign(&kp.sk, msg);
@@ -334,7 +319,7 @@ test "suite 0x0006 sign/verify round-trip" {
 }
 
 test "suite 0x0006 sign/verify rejects wrong message" {
-    const seed = [_]u8{0x02} ** 32;
+    const seed = [_]u8{0x02} ** 48;
     const kp = try P.signKeypairFromSeed(&seed);
     const sig = try P.sign(&kp.sk, "correct");
     const result = P.verify(&kp.pk, "wrong", &sig);
@@ -345,8 +330,8 @@ test "suite 0x0006 sign/verify rejects wrong message" {
 }
 
 test "suite 0x0006 dh key exchange" {
-    const seed_a = [_]u8{0x0A} ** 32;
-    const seed_b = [_]u8{0x0B} ** 32;
+    const seed_a = [_]u8{0x0A} ** 48;
+    const seed_b = [_]u8{0x0B} ** 48;
 
     const kp_a = try P.dhKeypairFromSeed(&seed_a);
     const kp_b = try P.dhKeypairFromSeed(&seed_b);
@@ -442,13 +427,13 @@ const TestKP0x0006 = struct {
         sign_tag: u8,
     ) !void {
         const enc_kp = try P.dhKeypairFromSeed(
-            &([_]u8{enc_tag} ** 32),
+            &([_]u8{enc_tag} ** 48),
         );
         const init_kp = try P.dhKeypairFromSeed(
-            &([_]u8{init_tag} ** 32),
+            &([_]u8{init_tag} ** 48),
         );
         const sign_kp = try P.signKeypairFromSeed(
-            &([_]u8{sign_tag} ** 32),
+            &([_]u8{sign_tag} ** 48),
         );
 
         self.enc_sk = enc_kp.sk;
@@ -492,10 +477,10 @@ test "suite 0x0006 full group lifecycle" {
     const alloc = testing.allocator;
 
     const alice_enc = try P.dhKeypairFromSeed(
-        &([_]u8{0xA1} ** 32),
+        &([_]u8{0xA1} ** 48),
     );
     const alice_sign = try P.signKeypairFromSeed(
-        &([_]u8{0xA2} ** 32),
+        &([_]u8{0xA2} ** 48),
     );
 
     var gs = try state_mod.createGroup(
@@ -552,9 +537,9 @@ test "suite 0x0006 full group lifecycle" {
         kp_buf[0..kp_end],
     );
 
-    const eph_seed = [_]u8{0xCC} ** 32;
+    const eph_seed = [_]u8{0xCC} ** 48;
     const new_members =
-        [_]welcome_mod.NewMemberEntry{
+        [_]welcome_mod.NewMemberEntry(P){
             .{
                 .kp_ref = &kp_ref,
                 .init_pk = &bob.init_pk,

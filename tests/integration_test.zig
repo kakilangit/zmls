@@ -224,7 +224,7 @@ test "full lifecycle: create → add → welcome → join" {
     );
 
     const eph_seed = [_]u8{0xCC} ** 32;
-    const new_members = [_]mls.group_welcome.NewMemberEntry{
+    const new_members = [_]mls.group_welcome.NewMemberEntry(Default){
         .{
             .kp_ref = &kp_ref,
             .init_pk = &bob_tkp.init_pk,
@@ -1155,7 +1155,7 @@ test "method API: createCommit + joinViaWelcome" {
         kp_buf[0..kp_end],
     );
     const eph_seed = [_]u8{0xCC} ** 32;
-    const new_members = [_]mls.group_welcome.NewMemberEntry{
+    const new_members = [_]mls.group_welcome.NewMemberEntry(Default){
         .{
             .kp_ref = &kp_ref,
             .init_pk = &bob_tkp.init_pk,
@@ -1268,7 +1268,7 @@ test "unified API: commit + applyCommit + joinViaWelcome" {
         kp_buf[0..kp_end],
     );
     const eph_seed = [_]u8{0xEE} ** 32;
-    const new_members = [_]mls.group_welcome.NewMemberEntry{
+    const new_members = [_]mls.group_welcome.NewMemberEntry(Default){
         .{
             .kp_ref = &kp_ref,
             .init_pk = &bob_tkp.init_pk,

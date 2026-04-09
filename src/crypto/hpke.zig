@@ -206,7 +206,7 @@ pub fn Hpke(comptime P: type) type {
                     &sk,
                 );
                 defer secureZero(&sk);
-                const seed: *const [32]u8 = sk[0..32];
+                const seed: *const [P.seed_len]u8 = sk[0..P.seed_len];
                 const kp = try P.dhKeypairFromSeed(seed);
                 return .{ .sk = kp.sk, .pk = kp.pk };
             } else if (kem_id == 0x0010 or
@@ -293,7 +293,7 @@ pub fn Hpke(comptime P: type) type {
         /// randomness each time.
         pub fn encapDeterministic(
             pk_r: *const [P.npk]u8,
-            eph_seed: *const [32]u8,
+            eph_seed: *const [P.seed_len]u8,
         ) CryptoError!struct {
             shared_secret: [n_secret]u8,
             enc: [n_enc]u8,
@@ -425,7 +425,7 @@ pub fn Hpke(comptime P: type) type {
             info: []const u8,
             aad: []const u8,
             plaintext: []const u8,
-            eph_seed: *const [32]u8,
+            eph_seed: *const [P.seed_len]u8,
             ct_out: []u8,
             tag_out: *[P.nt]u8,
         ) CryptoError![n_enc]u8 {

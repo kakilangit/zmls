@@ -58,6 +58,9 @@ pub const DhKemX25519Sha256ChaCha20Poly1305Ed25519 = struct {
     /// Signature length (Ed25519 = 64 bytes).
     pub const sig_len: u32 = Ed25519.Signature.encoded_length;
 
+    /// Keypair seed length (Ed25519/X25519 = 32 bytes).
+    pub const seed_len: u32 = 32;
+
     // -- HPKE algorithm IDs per RFC 9180 ---------------------------------
 
     /// DHKEM(X25519, HKDF-SHA256) = 0x0020.
@@ -136,7 +139,7 @@ pub const DhKemX25519Sha256ChaCha20Poly1305Ed25519 = struct {
     // -- Signatures (Ed25519) ---------------------------------------------
 
     pub fn signKeypairFromSeed(
-        seed: *const [32]u8,
+        seed: *const [seed_len]u8,
     ) CryptoError!struct {
         sk: [sign_sk_len]u8,
         pk: [sign_pk_len]u8,
@@ -204,7 +207,7 @@ pub const DhKemX25519Sha256ChaCha20Poly1305Ed25519 = struct {
     }
 
     pub fn dhKeypairFromSeed(
-        seed: *const [32]u8,
+        seed: *const [seed_len]u8,
     ) CryptoError!struct { sk: [nsk]u8, pk: [npk]u8 } {
         const kp = X25519.KeyPair.generateDeterministic(
             seed.*,
@@ -522,7 +525,7 @@ test "suite 0x0003 full group lifecycle" {
 
     const eph_seed = [_]u8{0xCC} ** 32;
     const new_members =
-        [_]welcome_mod.NewMemberEntry{
+        [_]welcome_mod.NewMemberEntry(P){
             .{
                 .kp_ref = &kp_ref,
                 .init_pk = &bob.init_pk,

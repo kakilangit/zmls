@@ -241,7 +241,7 @@ pub fn PathParams(comptime P: type) type {
         leaf_secret: *const [P.nh]u8,
         /// Ephemeral seeds for HPKE encryptions. One per
         /// resolution member across all copath nodes.
-        eph_seeds: []const [32]u8,
+        eph_seeds: []const [P.seed_len]u8,
     };
 }
 

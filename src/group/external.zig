@@ -102,9 +102,11 @@ pub fn deriveExternalKeyPair(
     comptime P: type,
     external_secret: *const [P.nh]u8,
 ) CryptoError!ExternalKeyPair(P) {
-    // DhKeypairFromSeed always takes a 32-byte seed; providers
-    // with larger scalars expand internally via HKDF.
-    const seed: *const [32]u8 = external_secret[0..32];
+    // Use the first seed_len bytes of the external_secret
+    // as the DH keypair seed. For P-384 (nh=48, seed_len=48)
+    // this uses the full secret; for X25519/P-256 (nh=32,
+    // seed_len=32) it also uses the full secret.
+    const seed: *const [P.seed_len]u8 = external_secret[0..P.seed_len];
     const kp = try P.dhKeypairFromSeed(seed);
     std.debug.assert(kp.pk.len == P.npk);
     return .{ .sk = kp.sk, .pk = kp.pk };
@@ -193,7 +195,7 @@ pub fn ExternalInitResult(comptime P: type) type {
 pub fn createExternalInit(
     comptime P: type,
     external_pub: *const [P.npk]u8,
-    eph_seed: *const [32]u8,
+    eph_seed: *const [P.seed_len]u8,
     kem_output_buf: *[P.npk]u8,
 ) ExternalCommitError!ExternalInitResult(P) {
     const H = hpke_mod.Hpke(P);
@@ -276,9 +278,9 @@ pub fn ExternalCommitParams(comptime P: type) type {
         /// Ephemeral seeds for HPKE encryptions along the
         /// UpdatePath. One per resolution member across
         /// all copath nodes.
-        eph_seeds: []const [32]u8,
+        eph_seeds: []const [P.seed_len]u8,
         /// Ephemeral seed for ExternalInit HPKE Encap.
-        ext_init_seed: *const [32]u8,
+        ext_init_seed: *const [P.seed_len]u8,
         /// Additional Remove proposals (optional, for
         /// removing stale members).
         remove_proposals: []const Proposal,

@@ -161,7 +161,7 @@ pub fn BuildWelcomeOpts(comptime P: type) type {
         /// Cipher suite of the group.
         cipher_suite: CipherSuite,
         /// New members to include in the Welcome.
-        new_members: []const NewMemberEntry,
+        new_members: []const NewMemberEntry(P),
         /// PSK IDs to include (empty if no PSKs).
         psk_ids: []const psk_mod.PreSharedKeyId = &.{},
     };
@@ -685,14 +685,16 @@ fn buildTree(
 // -- NewMemberEntry ---------------------------------------------------------
 
 /// Info about a new member to include in the Welcome.
-pub const NewMemberEntry = struct {
-    /// The new member's KeyPackageRef (hash of KeyPackage).
-    kp_ref: []const u8,
-    /// The new member's HPKE init public key.
-    init_pk: []const u8,
-    /// Ephemeral seed for HPKE encryption of GroupSecrets.
-    eph_seed: *const [32]u8,
-};
+pub fn NewMemberEntry(comptime P: type) type {
+    return struct {
+        /// The new member's KeyPackageRef (hash of KeyPackage).
+        kp_ref: []const u8,
+        /// The new member's HPKE init public key.
+        init_pk: []const u8,
+        /// Ephemeral seed for HPKE encryption of GroupSecrets.
+        eph_seed: *const [P.seed_len]u8,
+    };
+}
 
 // -- WelcomeResult ----------------------------------------------------------
 
@@ -758,7 +760,7 @@ pub fn buildWelcome(
     sign_key: *const [P.sign_sk_len]u8,
     signer: u32,
     cipher_suite: CipherSuite,
-    new_members: []const NewMemberEntry,
+    new_members: []const NewMemberEntry(P),
     psk_ids: []const psk_mod.PreSharedKeyId,
 ) WelcomeError!WelcomeResult {
     // 1. Sign and encode GroupInfo.
@@ -864,7 +866,7 @@ fn encryptMemberSecrets(
     allocator: std.mem.Allocator,
     joiner_secret: *const [P.nh]u8,
     psk_ids: []const psk_mod.PreSharedKeyId,
-    new_members: []const NewMemberEntry,
+    new_members: []const NewMemberEntry(P),
     egi_data: []const u8,
 ) WelcomeError![]EncryptedGroupSecrets {
     const gs = GroupSecrets{
@@ -899,7 +901,7 @@ fn encryptOneMemberSecret(
     comptime P: type,
     allocator: std.mem.Allocator,
     gs: *const GroupSecrets,
-    nm: *const NewMemberEntry,
+    nm: *const NewMemberEntry(P),
     egi_data: []const u8,
 ) WelcomeError!EncryptedGroupSecrets {
     if (nm.init_pk.len != P.npk)
@@ -1110,7 +1112,7 @@ fn buildTestWelcome(
     signer: u32,
     kp_ref: []const u8,
     init_pk: *const [P.npk]u8,
-    eph_seed: *const [32]u8,
+    eph_seed: *const [P.seed_len]u8,
     gc_bytes: []const u8,
 ) !TestWelcomeResult {
     // Steps 1-3: Sign, encode, encrypt GroupInfo.
@@ -2061,7 +2063,7 @@ test "buildWelcome round-trip with processWelcome" {
 
     // Build Welcome using the public buildWelcome API.
     const eph_seed = [_]u8{0xDD} ** 32;
-    const nm = [_]NewMemberEntry{.{
+    const nm = [_]NewMemberEntry(Default){.{
         .kp_ref = &kp_ref,
         .init_pk = &bob_tkp.init_pk,
         .eph_seed = &eph_seed,
@@ -2219,7 +2221,7 @@ test "Welcome with external PSK decrypts correctly" {
 
     // Build Welcome with the PSK ID in GroupSecrets.
     const eph_seed = [_]u8{0xEE} ** 32;
-    const nm = [_]NewMemberEntry{.{
+    const nm = [_]NewMemberEntry(Default){.{
         .kp_ref = &kp_ref,
         .init_pk = &bob_tkp.init_pk,
         .eph_seed = &eph_seed,

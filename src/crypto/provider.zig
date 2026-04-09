@@ -28,6 +28,7 @@ pub fn assertValid(comptime T: type) void {
     assertHasConst(T, "sign_pk_len", u32); // Sig public key len.
     assertHasConst(T, "sign_sk_len", u32); // Sig secret key len.
     assertHasConst(T, "sig_len", u32); // Signature length.
+    assertHasConst(T, "seed_len", u32); // Keypair seed length.
 
     // -- Required HPKE algorithm IDs (RFC 9180) ---------------------------
     assertHasConst(T, "kem_id", u16);
@@ -184,6 +185,7 @@ const StubProvider = struct {
     pub const sign_pk_len: u32 = 32;
     pub const sign_sk_len: u32 = 64;
     pub const sig_len: u32 = 64;
+    pub const seed_len: u32 = 32;
     pub const kem_id: u16 = 0x0020;
     pub const kdf_id: u16 = 0x0001;
     pub const aead_id: u16 = 0x0001;
@@ -243,7 +245,7 @@ const StubProvider = struct {
     }
 
     pub fn signKeypairFromSeed(
-        seed: *const [32]u8,
+        seed: *const [seed_len]u8,
     ) CryptoError!struct { sk: [sign_sk_len]u8, pk: [sign_pk_len]u8 } {
         _ = seed;
         return .{
@@ -272,7 +274,7 @@ const StubProvider = struct {
     }
 
     pub fn dhKeypairFromSeed(
-        seed: *const [32]u8,
+        seed: *const [seed_len]u8,
     ) CryptoError!struct { sk: [nsk]u8, pk: [npk]u8 } {
         _ = seed;
         return .{

@@ -799,7 +799,7 @@ pub fn encryptPathSecretTo(
     path_secret: *const [P.nh]u8,
     recipient_pk: *const [P.npk]u8,
     group_context: []const u8,
-    eph_seed: *const [32]u8,
+    eph_seed: *const [P.seed_len]u8,
 ) (CryptoError || error{OutOfMemory})!HPKECiphertext {
     var ct_buf: [P.nh]u8 = undefined;
     var tag: [P.nt]u8 = undefined;
@@ -880,7 +880,7 @@ pub fn encryptToResolution(
     path_secret: *const [P.nh]u8,
     resolution: []const NodeIndex,
     group_context: []const u8,
-    eph_seeds: []const [32]u8,
+    eph_seeds: []const [P.seed_len]u8,
 ) (CryptoError || TreeError || error{OutOfMemory})![]HPKECiphertext {
     std.debug.assert(resolution.len == eph_seeds.len);
 
@@ -1021,7 +1021,7 @@ pub fn encryptPathNodes(
     public_keys: *const [max_path_nodes][P.npk]u8,
     n_path: u32,
     group_context: []const u8,
-    eph_seeds: []const [32]u8,
+    eph_seeds: []const [P.seed_len]u8,
     excluded_leaves: []const LeafIndex,
 ) ![]UpdatePathNode {
     var p_buf: [max_path_nodes]NodeIndex = undefined;
@@ -1086,7 +1086,7 @@ fn encryptSinglePathNode(
     public_key: *const [P.npk]u8,
     copath_node: NodeIndex,
     group_context: []const u8,
-    eph_seeds: []const [32]u8,
+    eph_seeds: []const [P.seed_len]u8,
     excluded_leaves: []const LeafIndex,
     seed_idx: u32,
     res_buf: *[RatchetTree.max_resolution_size]NodeIndex,
@@ -1141,7 +1141,7 @@ fn encryptCommitPathNode(
     secret: *const [P.nh]u8,
     copath_node: NodeIndex,
     group_context: []const u8,
-    eph_seeds: []const [32]u8,
+    eph_seeds: []const [P.seed_len]u8,
 ) !UpdatePathNode {
     var kp = try deriveNodeKeypair(P, secret);
     defer secureZero(&kp.sk);
@@ -1188,7 +1188,7 @@ fn encryptCommitPathNode(
 ///    resolution.
 /// 3. Return the UpdatePath struct and the commit_secret.
 ///
-/// `eph_seeds` is a flat array of [32]u8 seeds, one per HPKE
+/// `eph_seeds` is a flat array of [P.seed_len]u8 seeds, one per HPKE
 /// encryption in order (across all path nodes). The caller must
 /// provide exactly enough seeds.
 pub fn generateUpdatePath(
@@ -1199,7 +1199,7 @@ pub fn generateUpdatePath(
     new_leaf: LeafNode,
     group_context: []const u8,
     leaf_secret: *const [P.nh]u8,
-    eph_seeds: []const [32]u8,
+    eph_seeds: []const [P.seed_len]u8,
 ) !GeneratePathResult(P) {
     // 1. Get filtered direct path.
     var p_buf: [max_path_nodes]NodeIndex = undefined;
@@ -1255,7 +1255,7 @@ fn buildUpdatePathNodes(
     secrets: *const [max_path_nodes][P.nh]u8,
     n_path: u32,
     group_context: []const u8,
-    eph_seeds: []const [32]u8,
+    eph_seeds: []const [P.seed_len]u8,
 ) ![]UpdatePathNode {
     var nodes = allocator.alloc(
         UpdatePathNode,

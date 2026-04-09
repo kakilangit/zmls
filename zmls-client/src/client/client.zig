@@ -251,7 +251,7 @@ pub fn Client(comptime P: type) type {
             allocator: Allocator,
             identity: []const u8,
             cipher_suite: zmls.CipherSuite,
-            signature_seed: *const [32]u8,
+            signature_seed: *const [P.seed_len]u8,
             options: Options,
         ) InitError!Self {
             const key_pair = P.signKeypairFromSeed(
@@ -650,13 +650,13 @@ pub fn Client(comptime P: type) type {
                 P,
             ) catch return error.EncodingFailed;
 
-            var ephemeral_seed: [32]u8 = undefined;
+            var ephemeral_seed: [P.seed_len]u8 = undefined;
             io.randomSecure(&ephemeral_seed) catch
                 return error.KeyGenerationFailed;
             defer secureZeroSlice(&ephemeral_seed);
 
             const members = [_]zmls.group_welcome
-                .NewMemberEntry{.{
+                .NewMemberEntry(P){.{
                 .kp_ref = &key_package_ref,
                 .init_pk = key_package.init_key,
                 .eph_seed = &ephemeral_seed,
@@ -1184,7 +1184,7 @@ pub fn Client(comptime P: type) type {
                 return error.KeyGenerationFailed;
             defer secureZeroSlice(&leaf_secret);
 
-            var ext_init_seed: [32]u8 = undefined;
+            var ext_init_seed: [P.seed_len]u8 = undefined;
             io.randomSecure(&ext_init_seed) catch
                 return error.KeyGenerationFailed;
             defer secureZeroSlice(&ext_init_seed);
@@ -2690,7 +2690,7 @@ pub fn Client(comptime P: type) type {
         fn generateDhKeypair(
             io: Io,
         ) error{KeyGenerationFailed}!DhKeypair {
-            var seed: [32]u8 = undefined;
+            var seed: [P.seed_len]u8 = undefined;
             io.randomSecure(&seed) catch
                 return error.KeyGenerationFailed;
             defer secureZeroSlice(&seed);

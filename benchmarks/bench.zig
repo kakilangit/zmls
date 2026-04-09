@@ -1506,7 +1506,7 @@ fn benchProcessWelcome() void {
     );
 
     var eph_seed: [32]u8 = [_]u8{0xE1} ** 32;
-    const nm = [_]mls.group_welcome.NewMemberEntry{.{
+    const nm = [_]mls.group_welcome.NewMemberEntry(Default){.{
         .kp_ref = &kp_ref,
         .init_pk = bob_kp.kp.init_key,
         .eph_seed = &eph_seed,

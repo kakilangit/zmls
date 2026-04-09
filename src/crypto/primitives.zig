@@ -190,7 +190,7 @@ pub fn encryptWithLabel(
     label: []const u8,
     context: []const u8,
     plaintext: []const u8,
-    eph_seed: *const [32]u8,
+    eph_seed: *const [P.seed_len]u8,
     ct_out: []u8,
     tag_out: *[P.nt]u8,
 ) CryptoError![P.npk]u8 {

@@ -353,7 +353,7 @@ pub fn encryptGroupSecrets(
     kp_ref: []const u8,
     init_key: *const [P.npk]u8,
     encrypted_group_info: []const u8,
-    eph_seed: *const [32]u8,
+    eph_seed: *const [P.seed_len]u8,
 ) CryptoError!EncryptedGroupSecrets {
     // Encode GroupSecrets.
     var gs_buf: [max_gs_encode]u8 = undefined;
