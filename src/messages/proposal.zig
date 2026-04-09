@@ -540,6 +540,14 @@ pub const Proposal = struct {
                 // unknown variants, so we cannot determine the
                 // body boundary. GREASE proposals have empty
                 // bodies by convention.
+                //
+                // LIMITATION: A non-GREASE unknown proposal
+                // with a non-empty body would cause all
+                // subsequent proposals in the same Commit to
+                // be mis-parsed, because the body bytes are
+                // consumed as the next proposal's tag. This
+                // is inherent to the TLS presentation language
+                // for extensible enums without framing.
                 return .{
                     .value = .{
                         .tag = tag,

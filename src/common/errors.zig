@@ -135,4 +135,6 @@ pub const GroupError = error{
     PskNotFound,
     /// Forward ratchet distance exceeds max_forward_ratchet.
     GenerationTooFar,
+    /// The epoch counter reached u64 maximum and would overflow.
+    EpochOverflow,
 };

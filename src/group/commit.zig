@@ -89,6 +89,13 @@ pub fn isPathRequired(
     }
 
     // Update, Remove, ExternalInit, or GCE → path required.
+    // NOTE: RFC 9420 Section 12.2 only requires a path for
+    // Update, Remove, ExternalInit, and empty commits. GCE is
+    // not listed. We require a path for GCE as an intentional
+    // over-restriction: GCE modifies the group context, and a
+    // path ensures the committer proves liveness. This may
+    // cause interop failures if a peer sends a GCE-only commit
+    // without a path.
     if (validated.updates_len > 0) return true;
     if (validated.removes_len > 0) return true;
     if (validated.external_init != null) return true;

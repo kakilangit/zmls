@@ -223,7 +223,7 @@ pub fn GroupContext(comptime nh: u32) type {
             new_tree_hash: [nh]u8,
             new_confirmed_th: [nh]u8,
             new_extensions: []const Extension,
-        ) error{OutOfMemory}!Self {
+        ) (error{OutOfMemory} || errors.GroupError)!Self {
             const gid = try allocator.dupe(u8, self.group_id);
             errdefer allocator.free(gid);
             const exts = try node_mod.cloneExtensions(
@@ -235,7 +235,7 @@ pub fn GroupContext(comptime nh: u32) type {
                 .cipher_suite = self.cipher_suite,
                 .group_id = gid,
                 .epoch = std.math.add(u64, self.epoch, 1) catch
-                    @panic("epoch overflow"),
+                    return error.EpochOverflow,
                 .tree_hash = new_tree_hash,
                 .confirmed_transcript_hash = new_confirmed_th,
                 .extensions = exts,
