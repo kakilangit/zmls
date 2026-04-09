@@ -22,67 +22,49 @@ pub fn assertValid(comptime T: type) void {
     assertHasConst(T, "nh", u32); // Hash output length.
     assertHasConst(T, "nk", u32); // AEAD key length.
     assertHasConst(T, "nn", u32); // AEAD nonce length.
+    assertHasConst(T, "nt", u32); // AEAD tag length.
+    assertHasConst(T, "npk", u32); // DH public key length.
+    assertHasConst(T, "nsk", u32); // DH secret key length.
+    assertHasConst(T, "sign_pk_len", u32); // Sig public key len.
+    assertHasConst(T, "sign_sk_len", u32); // Sig secret key len.
+    assertHasConst(T, "sig_len", u32); // Signature length.
 
     // -- Required HPKE algorithm IDs (RFC 9180) ---------------------------
     assertHasConst(T, "kem_id", u16);
     assertHasConst(T, "kdf_id", u16);
     assertHasConst(T, "aead_id", u16);
 
-    // -- Required functions -----------------------------------------------
+    // -- Required functions (with parameter/return validation) ------------
 
-    // hash(data) -> [nh]u8
-    if (!@hasDecl(T, "hash")) {
-        @compileError("CryptoProvider missing 'hash'");
-    }
+    // hash(data: []const u8) -> [nh]u8
+    assertFnSig(T, "hash", 1, [T.nh]u8);
 
     // kdfExtract(salt, ikm) -> [nh]u8
-    if (!@hasDecl(T, "kdfExtract")) {
-        @compileError("CryptoProvider missing 'kdfExtract'");
-    }
+    assertFnSig(T, "kdfExtract", 2, [T.nh]u8);
 
     // kdfExpand(prk, info, out) -> void
-    if (!@hasDecl(T, "kdfExpand")) {
-        @compileError("CryptoProvider missing 'kdfExpand'");
-    }
+    assertFnSig(T, "kdfExpand", 3, void);
 
-    // aeadSeal(key, nonce, aad, plaintext, out, tag_out) -> void
-    if (!@hasDecl(T, "aeadSeal")) {
-        @compileError("CryptoProvider missing 'aeadSeal'");
-    }
+    // aeadSeal(key, nonce, aad, pt, ct, tag) -> void
+    assertFnSig(T, "aeadSeal", 6, void);
 
-    // aeadOpen(key, nonce, aad, ciphertext, tag, out) -> !void
-    if (!@hasDecl(T, "aeadOpen")) {
-        @compileError("CryptoProvider missing 'aeadOpen'");
-    }
+    // aeadOpen(key, nonce, aad, ct, tag, out) -> !void
+    assertFnErrSig(T, "aeadOpen", 6, void);
 
-    // signKeypairFromSeed(seed) -> !SignKeyPair
-    if (!@hasDecl(T, "signKeypairFromSeed")) {
-        @compileError(
-            "CryptoProvider missing 'signKeypairFromSeed'",
-        );
-    }
+    // signKeypairFromSeed(seed) -> !KeyPair
+    assertFnParams(T, "signKeypairFromSeed", 1);
 
-    // sign(secret_key, msg) -> !Signature
-    if (!@hasDecl(T, "sign")) {
-        @compileError("CryptoProvider missing 'sign'");
-    }
+    // sign(sk, msg) -> ![sig_len]u8
+    assertFnErrSig(T, "sign", 2, [T.sig_len]u8);
 
-    // verify(public_key, msg, signature) -> !void
-    if (!@hasDecl(T, "verify")) {
-        @compileError("CryptoProvider missing 'verify'");
-    }
+    // verify(pk, msg, sig) -> !void
+    assertFnErrSig(T, "verify", 3, void);
 
-    // dhKeypairFromSeed(seed) -> !DhKeyPair
-    if (!@hasDecl(T, "dhKeypairFromSeed")) {
-        @compileError(
-            "CryptoProvider missing 'dhKeypairFromSeed'",
-        );
-    }
+    // dhKeypairFromSeed(seed) -> !KeyPair
+    assertFnParams(T, "dhKeypairFromSeed", 1);
 
-    // dh(secret_key, public_key) -> ![shared_len]u8
-    if (!@hasDecl(T, "dh")) {
-        @compileError("CryptoProvider missing 'dh'");
-    }
+    // dh(sk, pk) -> ![shared_len]u8
+    assertFnParams(T, "dh", 2);
 }
 
 fn assertHasConst(
@@ -103,6 +85,90 @@ fn assertHasConst(
     }
 }
 
+/// Assert that `T` has a function `name` with exactly `n_params`
+/// parameters and a non-error return type matching `Ret`.
+fn assertFnSig(
+    comptime T: type,
+    comptime name: []const u8,
+    comptime n_params: u32,
+    comptime Ret: type,
+) void {
+    assertFnParams(T, name, n_params);
+    const info = fnInfo(T, name);
+    const ret = info.return_type orelse @compileError(
+        "CryptoProvider '" ++ name ++ "' has generic return type",
+    );
+    if (ret != Ret) {
+        @compileError(
+            "CryptoProvider '" ++ name ++ "' return type must be " ++ @typeName(Ret) ++
+                ", found " ++ @typeName(ret),
+        );
+    }
+}
+
+/// Assert that `T` has a function `name` with exactly `n_params`
+/// parameters and an error union return type whose payload is `Ret`.
+fn assertFnErrSig(
+    comptime T: type,
+    comptime name: []const u8,
+    comptime n_params: u32,
+    comptime Ret: type,
+) void {
+    assertFnParams(T, name, n_params);
+    const info = fnInfo(T, name);
+    const ret = info.return_type orelse @compileError(
+        "CryptoProvider '" ++ name ++ "' has generic return type",
+    );
+    const ret_info = @typeInfo(ret);
+    if (ret_info != .error_union) {
+        @compileError(
+            "CryptoProvider '" ++ name ++ "' must return an error union",
+        );
+    }
+    if (ret_info.error_union.payload != Ret) {
+        @compileError(
+            "CryptoProvider '" ++ name ++ "' error union payload must be " ++ @typeName(Ret),
+        );
+    }
+}
+
+/// Assert that `T` has a function `name` with exactly `n_params`
+/// parameters.
+fn assertFnParams(
+    comptime T: type,
+    comptime name: []const u8,
+    comptime n_params: u32,
+) void {
+    if (!@hasDecl(T, name)) {
+        @compileError(
+            "CryptoProvider missing function '" ++ name ++ "'",
+        );
+    }
+    const info = fnInfo(T, name);
+    if (info.params.len != n_params) {
+        @compileError(
+            "CryptoProvider '" ++ name ++ "' must have " ++
+                std.fmt.comptimePrint("{}", .{n_params}) ++
+                " parameters",
+        );
+    }
+}
+
+/// Extract the function type info for `T.name`.
+fn fnInfo(
+    comptime T: type,
+    comptime name: []const u8,
+) std.builtin.Type.Fn {
+    const FnType = @TypeOf(@field(T, name));
+    const info = @typeInfo(FnType);
+    if (info != .@"fn") {
+        @compileError(
+            "CryptoProvider '" ++ name ++ "' must be a function",
+        );
+    }
+    return info.@"fn";
+}
+
 // -- Tests ---------------------------------------------------------------
 
 const testing = std.testing;
@@ -112,6 +178,12 @@ const StubProvider = struct {
     pub const nh: u32 = 32;
     pub const nk: u32 = 16;
     pub const nn: u32 = 12;
+    pub const nt: u32 = 16;
+    pub const npk: u32 = 32;
+    pub const nsk: u32 = 32;
+    pub const sign_pk_len: u32 = 32;
+    pub const sign_sk_len: u32 = 64;
+    pub const sig_len: u32 = 64;
     pub const kem_id: u16 = 0x0020;
     pub const kdf_id: u16 = 0x0001;
     pub const aead_id: u16 = 0x0001;
@@ -146,7 +218,7 @@ const StubProvider = struct {
         aad: []const u8,
         plaintext: []const u8,
         ciphertext: []u8,
-        tag: *[16]u8,
+        tag: *[nt]u8,
     ) void {
         _ = key;
         _ = nonce;
@@ -160,7 +232,7 @@ const StubProvider = struct {
         nonce: *const [nn]u8,
         aad: []const u8,
         ciphertext: []const u8,
-        tag: *const [16]u8,
+        tag: *const [nt]u8,
         out: []u8,
     ) CryptoError!void {
         _ = key;
@@ -172,27 +244,27 @@ const StubProvider = struct {
 
     pub fn signKeypairFromSeed(
         seed: *const [32]u8,
-    ) CryptoError!struct { sk: [64]u8, pk: [32]u8 } {
+    ) CryptoError!struct { sk: [sign_sk_len]u8, pk: [sign_pk_len]u8 } {
         _ = seed;
         return .{
-            .sk = [_]u8{0} ** 64,
-            .pk = [_]u8{0} ** 32,
+            .sk = [_]u8{0} ** sign_sk_len,
+            .pk = [_]u8{0} ** sign_pk_len,
         };
     }
 
     pub fn sign(
-        sk: *const [64]u8,
+        sk: *const [sign_sk_len]u8,
         msg: []const u8,
-    ) CryptoError![64]u8 {
+    ) CryptoError![sig_len]u8 {
         _ = sk;
         _ = msg;
-        return [_]u8{0} ** 64;
+        return [_]u8{0} ** sig_len;
     }
 
     pub fn verify(
-        pk: *const [32]u8,
+        pk: *const [sign_pk_len]u8,
         msg: []const u8,
-        sig: *const [64]u8,
+        sig: *const [sig_len]u8,
     ) CryptoError!void {
         _ = pk;
         _ = msg;
@@ -201,21 +273,21 @@ const StubProvider = struct {
 
     pub fn dhKeypairFromSeed(
         seed: *const [32]u8,
-    ) CryptoError!struct { sk: [32]u8, pk: [32]u8 } {
+    ) CryptoError!struct { sk: [nsk]u8, pk: [npk]u8 } {
         _ = seed;
         return .{
-            .sk = [_]u8{0} ** 32,
-            .pk = [_]u8{0} ** 32,
+            .sk = [_]u8{0} ** nsk,
+            .pk = [_]u8{0} ** npk,
         };
     }
 
     pub fn dh(
-        sk: *const [32]u8,
-        pk: *const [32]u8,
-    ) CryptoError![32]u8 {
+        sk: *const [nsk]u8,
+        pk: *const [npk]u8,
+    ) CryptoError![npk]u8 {
         _ = sk;
         _ = pk;
-        return [_]u8{0} ** 32;
+        return [_]u8{0} ** npk;
     }
 };
 
