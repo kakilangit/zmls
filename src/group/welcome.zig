@@ -240,6 +240,13 @@ pub fn processWelcome(
     );
     errdefer gc.deinit(allocator);
 
+    // OWNERSHIP: gc.group_id and gc.extensions are heap-allocated
+    // by `allocator` during GroupContext.decode. On the success
+    // path below, these slices are moved (by copy) into the
+    // returned GroupState.group_context. Therefore gc must NOT be
+    // deinited on success — only via errdefer on error paths.
+    // Do NOT add `defer gc.deinit(allocator)` here.
+
     // RFC 9420 S12.4.3.1: cipher suite must match.
     if (welcome.cipher_suite != gc.cipher_suite)
         return error.CipherSuiteMismatch;
@@ -612,6 +619,12 @@ fn deriveWelcomeEpochState(
 }
 
 /// Step 11: Assemble the final GroupState from components.
+///
+/// OWNERSHIP: The returned GroupState takes ownership of
+/// `gc.group_id` and `gc.extensions` slices by shallow copy.
+/// The caller must NOT deinit `gc` after this call succeeds;
+/// the returned GroupState is responsible for freeing these
+/// allocations via its own deinit.
 fn buildWelcomeGroupState(
     comptime P: type,
     allocator: std.mem.Allocator,
