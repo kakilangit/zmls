@@ -109,6 +109,47 @@ pub fn encodeOptional(
     }
 }
 
+/// Encode a slice of items as a varint-length-prefixed list.
+///
+/// Each item must have a method `encode(*const T, []u8, u32) E!u32`
+/// where E is a subset of EncodeError. This function handles the
+/// gap-then-shift pattern: reserve 4 bytes for the varint prefix,
+/// encode all items, then shift left if the varint was shorter.
+pub fn encodeVarPrefixedList(
+    comptime T: type,
+    buf: []u8,
+    pos: u32,
+    items: []const T,
+) EncodeError!u32 {
+    const gap: u32 = 4;
+    const start = pos + gap;
+    var p = start;
+
+    for (items) |*item| {
+        p = try item.encode(buf, p);
+    }
+
+    const inner_len: u32 = p - start;
+    var len_buf: [4]u8 = undefined;
+    const len_end = try varint.encode(
+        &len_buf,
+        0,
+        inner_len,
+    );
+
+    const dest_start = pos + len_end;
+    if (dest_start != start) {
+        std.mem.copyForwards(
+            u8,
+            buf[dest_start..][0..inner_len],
+            buf[start..][0..inner_len],
+        );
+    }
+    @memcpy(buf[pos..][0..len_end], len_buf[0..len_end]);
+
+    return dest_start + inner_len;
+}
+
 // -- Decoding ----------------------------------------------------------------
 
 /// Read a single byte from `data` at `pos`. Returns value and new position.

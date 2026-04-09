@@ -342,39 +342,12 @@ fn encodeCertChain(
     pos: u32,
     certs: []const Certificate,
 ) EncodeError!u32 {
-    // First encode certs into a temp area to get the total
-    // byte length, then write the length prefix + data.
-    // We encode into buf starting after a gap for the varint.
-    // Max varint is 4 bytes, so leave space.
-    const gap: u32 = 4;
-    const start = pos + gap;
-    var p = start;
-
-    for (certs) |*cert| {
-        p = try cert.encode(buf, p);
-    }
-
-    const inner_len: u32 = p - start;
-
-    // Now write the varint length at pos, then shift data
-    // if varint was smaller than 4 bytes.
-    var len_buf: [4]u8 = undefined;
-    const len_end = try varint.encode(&len_buf, 0, inner_len);
-
-    // Move encoded certs to be adjacent to the length prefix.
-    const dest_start = pos + len_end;
-    if (dest_start != start) {
-        std.mem.copyForwards(
-            u8,
-            buf[dest_start..][0..inner_len],
-            buf[start..][0..inner_len],
-        );
-    }
-
-    // Write the length bytes.
-    @memcpy(buf[pos..][0..len_end], len_buf[0..len_end]);
-
-    return dest_start + inner_len;
+    return codec.encodeVarPrefixedList(
+        Certificate,
+        buf,
+        pos,
+        certs,
+    );
 }
 
 /// Decode a chain of certificates from a varint-prefixed blob.

@@ -341,33 +341,12 @@ fn encodeExtensionList(
     pos: u32,
     items: []const Extension,
 ) EncodeError!u32 {
-    const gap: u32 = 4;
-    const start = pos + gap;
-    var p = start;
-
-    for (items) |*ext| {
-        p = try ext.encode(buf, p);
-    }
-
-    const inner_len: u32 = p - start;
-    var len_buf: [4]u8 = undefined;
-    const len_end = try varint.encode(
-        &len_buf,
-        0,
-        inner_len,
+    return codec.encodeVarPrefixedList(
+        Extension,
+        buf,
+        pos,
+        items,
     );
-
-    const dest_start = pos + len_end;
-    if (dest_start != start) {
-        std.mem.copyForwards(
-            u8,
-            buf[dest_start..][0..inner_len],
-            buf[start..][0..inner_len],
-        );
-    }
-    @memcpy(buf[pos..][0..len_end], len_buf[0..len_end]);
-
-    return dest_start + inner_len;
 }
 
 /// Free extension data slices allocated during decode.
