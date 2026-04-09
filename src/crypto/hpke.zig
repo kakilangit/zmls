@@ -68,7 +68,12 @@ pub fn Hpke(comptime P: type) type {
         const kdf_id: u16 = P.kdf_id;
         const aead_id: u16 = P.aead_id;
 
-        /// KEM shared secret length (Nsecret = Nh for X25519).
+        /// KEM shared secret length. For DHKEM suites (X25519, P-256,
+        /// P-384), Nsecret equals Nh (hash output length). This is a
+        /// coincidence of the suites we support — RFC 9180 Table 2
+        /// defines them independently. If a future suite has
+        /// Nsecret != Nh, this must become a separate provider
+        /// constant.
         const n_secret: u32 = P.nh;
         /// Encapsulated key length (Nenc = Npk for DHKEM).
         const n_enc: u32 = P.npk;
@@ -279,6 +284,13 @@ pub fn Hpke(comptime P: type) type {
 
         /// Encap(pkR) — deterministic variant that takes
         /// an ephemeral seed (for testability).
+        ///
+        /// WARNING: The `eph_seed` MUST be unique per call.
+        /// Reusing the same seed with different recipients
+        /// breaks IND-CCA2 security (reveals relationships
+        /// between ciphertexts). Only use a fixed seed in
+        /// tests; production callers must supply fresh
+        /// randomness each time.
         pub fn encapDeterministic(
             pk_r: *const [P.npk]u8,
             eph_seed: *const [32]u8,
@@ -429,6 +441,7 @@ pub fn Hpke(comptime P: type) type {
             );
             defer secureZero(&context.key);
             defer secureZero(&context.base_nonce);
+            defer secureZero(&context.exporter_secret);
 
             // Seal with seq = 0 → nonce = base_nonce.
             P.aeadSeal(
@@ -463,6 +476,7 @@ pub fn Hpke(comptime P: type) type {
             );
             defer secureZero(&context.key);
             defer secureZero(&context.base_nonce);
+            defer secureZero(&context.exporter_secret);
 
             try P.aeadOpen(
                 &context.key,
