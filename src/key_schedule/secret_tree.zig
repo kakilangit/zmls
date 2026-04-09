@@ -273,54 +273,7 @@ pub fn SecretTree(comptime P: type) type {
                 return error.InvalidGroupState;
             }
 
-            // Encode generation as big-endian u32.
-            var gen_buf: [4]u8 = undefined;
-            _ = codec.encodeUint32(
-                &gen_buf,
-                0,
-                state.generation,
-            ) catch unreachable;
-
-            var result: KeyNonce(P) = undefined;
-            result.generation = state.generation;
-
-            // key = ExpandWithLabel(secret, "key", gen, Nk)
-            primitives.expandWithLabel(
-                P,
-                &state.secret,
-                "key",
-                &gen_buf,
-                &result.key,
-            );
-
-            // nonce = ExpandWithLabel(secret, "nonce", gen, Nn)
-            primitives.expandWithLabel(
-                P,
-                &state.secret,
-                "nonce",
-                &gen_buf,
-                &result.nonce,
-            );
-
-            // next = ExpandWithLabel(secret, "secret", gen, Nh)
-            var next_secret: [P.nh]u8 = undefined;
-            primitives.expandWithLabel(
-                P,
-                &state.secret,
-                "secret",
-                &gen_buf,
-                &next_secret,
-            );
-
-            // Zero old secret and advance.
-            primitives.secureZero(&state.secret);
-            state.secret = next_secret;
-            state.generation += 1;
-
-            // Zero the temporary.
-            primitives.secureZero(&next_secret);
-
-            return result;
+            return self.deriveKeyNonce(state);
         }
 
         /// Derive key, nonce from current state and advance
