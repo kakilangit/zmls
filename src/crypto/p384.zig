@@ -141,6 +141,10 @@ pub const DhKemP384Sha384Aes256GcmP384 = struct {
     } {
         // P-384 scalar is 48 bytes. Extract a PRK from the
         // 32-byte seed, then expand to 48 bytes.
+        // NOTE: The HKDF salt "zmls p384 sign" is a zmls-specific
+        // label, not defined in any RFC. This only affects local
+        // key generation; HPKE DeriveKeyPair uses its own labeled
+        // mechanism per RFC 9180.
         var prk = Hkdf.extract("zmls p384 sign", seed);
         defer primitives.secureZero(&prk);
         var extended: [48]u8 = undefined;
@@ -208,6 +212,11 @@ pub const DhKemP384Sha384Aes256GcmP384 = struct {
     /// P-384 scalars are 48 bytes. We extract a PRK from the
     /// 32-byte seed, then expand to 48 bytes for scalar
     /// derivation.
+    ///
+    /// NOTE: The HKDF salt "zmls p384 dh" is a zmls-specific
+    /// label, not defined in any RFC. This only affects local
+    /// key generation; HPKE DeriveKeyPair uses RFC 9180's
+    /// labeled mechanism.
     pub fn dhKeypairFromSeed(
         seed: *const [32]u8,
     ) CryptoError!struct { sk: [nsk]u8, pk: [npk]u8 } {

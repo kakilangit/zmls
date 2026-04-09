@@ -447,6 +447,11 @@ pub fn SecretTree(comptime P: type) type {
             }
 
             // Ratchet forward, retaining skipped keys if enabled.
+            // NOTE: When remaining == 1, the generation
+            // immediately before the target is advanced (not
+            // retained), making it permanently inaccessible.
+            // This is intentional: the target generation's key
+            // is consumed directly by consumeKey below.
             var remaining = steps;
             while (remaining > 0) : (remaining -= 1) {
                 if (remaining > 1 and self.retain_capacity > 0) {
