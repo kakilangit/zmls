@@ -2075,7 +2075,6 @@ pub fn Client(comptime P: type) type {
                 ),
                 .proposal => self.processPublicProposal(
                     allocator,
-                    io,
                     group_id,
                     wire_bytes,
                 ),
@@ -2179,7 +2178,6 @@ pub fn Client(comptime P: type) type {
         fn processPublicProposal(
             self: *Self,
             allocator: Allocator,
-            io: Io,
             group_id: []const u8,
             wire_bytes: []const u8,
         ) ProcessIncomingError!ProcessingResult {
@@ -2213,8 +2211,6 @@ pub fn Client(comptime P: type) type {
                 decoded.proposal,
                 sender,
             ) catch return error.WireDecodeFailed;
-
-            _ = io;
 
             return .{ .proposal_cached = .{
                 .proposal_type = @intFromEnum(
