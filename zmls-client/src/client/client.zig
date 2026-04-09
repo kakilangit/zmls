@@ -4433,6 +4433,75 @@ test "Client: processIncoming caches received proposal" {
     );
 }
 
+test "Client: commitPending preserves proposals on failure" {
+    const io = testIo();
+
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_group_store,
+        &alice_key_store,
+        &bob_group_store,
+        &bob_key_store,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    // Alice proposes removing Bob.
+    const proposal_bytes = try alice.proposeRemove(
+        testing.allocator,
+        io,
+        group_id,
+        1,
+    );
+    defer testing.allocator.free(proposal_bytes);
+
+    // Bob caches the proposal.
+    _ = try bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        proposal_bytes,
+    );
+    try testing.expectEqual(
+        @as(u32, 1),
+        bob.proposal_store.count,
+    );
+
+    // Delete Bob's group state so commitPending will fail
+    // during loadBundle.
+    try bob_group_store.groupStore().delete(io, group_id);
+
+    // commitPending should fail (GroupNotFound).
+    const result = bob.commitPending(
+        testing.allocator,
+        io,
+        group_id,
+    );
+    try testing.expectError(
+        error.GroupNotFound,
+        result,
+    );
+
+    // Proposals must still be cached after the failure.
+    try testing.expectEqual(
+        @as(u32, 1),
+        bob.proposal_store.count,
+    );
+}
+
 test "Client: groupEpoch returns current epoch" {
     const io = testIo();
 
