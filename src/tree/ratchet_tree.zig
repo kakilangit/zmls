@@ -227,8 +227,11 @@ pub const RatchetTree = struct {
         return buf[0..count];
     }
 
-    /// Collect non-blank nodes into buf, descending into children of
-    /// /// blank intermediates per RFC 9420 Section 7.7.
+    /// Collect non-blank nodes into buf, descending into
+    /// children of blank intermediates per RFC 9420 §7.7.
+    ///
+    /// Uses an explicit stack (bounded by tree depth) instead
+    /// of recursion. Stack cost: 128 bytes.
     fn resolutionInner(
         self: *const RatchetTree,
         index: NodeIndex,
@@ -237,48 +240,54 @@ pub const RatchetTree = struct {
     ) TreeError!void {
         assert(count.* <= max_resolution_size);
         assert(self.nodes.len > 0);
-        const i = index.toUsize();
-        if (i >= self.nodes.len) return error.IndexOutOfRange;
 
-        if (self.nodes[i]) |n| {
-            // Non-blank: resolution includes this node.
-            if (count.* >= max_resolution_size) {
+        var stack: [max_depth]NodeIndex = undefined;
+        var top: u32 = 0;
+        stack[0] = index;
+        top = 1;
+
+        while (top > 0) {
+            top -= 1;
+            const cur = stack[top];
+            const ci = cur.toUsize();
+            if (ci >= self.nodes.len) {
                 return error.IndexOutOfRange;
             }
-            buf[count.*] = index;
-            count.* += 1;
 
-            // Per Section 7.7: for non-blank parent nodes,
-            // also include all unmerged leaves.
-            if (n.node_type == .parent) {
-                for (n.payload.parent.unmerged_leaves) |li| {
-                    if (count.* >= max_resolution_size) {
-                        return error.IndexOutOfRange;
-                    }
-                    buf[count.*] = li.toNodeIndex();
-                    count.* += 1;
+            if (self.nodes[ci]) |n| {
+                // Non-blank: include this node.
+                if (count.* >= max_resolution_size) {
+                    return error.IndexOutOfRange;
                 }
+                buf[count.*] = cur;
+                count.* += 1;
+
+                // For non-blank parents, also include
+                // all unmerged leaves (§7.7).
+                if (n.node_type == .parent) {
+                    for (n.payload.parent.unmerged_leaves) |li| {
+                        if (count.* >= max_resolution_size) {
+                            return error.IndexOutOfRange;
+                        }
+                        buf[count.*] = li.toNodeIndex();
+                        count.* += 1;
+                    }
+                }
+            } else {
+                // Blank node.
+                if (tree_math.isLeaf(cur)) continue;
+
+                // Blank intermediate: push right then left
+                // so left is processed first (DFS order).
+                if (top + 2 > max_depth) {
+                    return error.IndexOutOfRange;
+                }
+                stack[top] = tree_math.right(cur);
+                top += 1;
+                stack[top] = tree_math.left(cur);
+                top += 1;
             }
-            return;
         }
-
-        // Blank node.
-        if (tree_math.isLeaf(index)) {
-            // Blank leaf: empty resolution.
-            return;
-        }
-
-        // Blank intermediate: union of left and right resolutions.
-        try self.resolutionInner(
-            tree_math.left(index),
-            buf,
-            count,
-        );
-        try self.resolutionInner(
-            tree_math.right(index),
-            buf,
-            count,
-        );
     }
 
     /// Maximum resolution buffer size. Worst case: all leaves.
