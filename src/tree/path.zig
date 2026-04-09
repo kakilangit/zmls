@@ -358,10 +358,10 @@ fn extendAndAdd(
     const old_width = tree.nodeCount();
 
     // Grow the backing array.
-    const new_nodes = tree.allocator.realloc(
+    const new_nodes = try tree.allocator.realloc(
         tree.nodes,
         new_width,
-    ) catch return error.IndexOutOfRange;
+    );
 
     // Zero-init new entries.
     @memset(new_nodes[old_width..new_width], null);

@@ -160,12 +160,12 @@ pub fn allTreeHashes(
     comptime Crypto: type,
     tree: *const RatchetTree,
     allocator: std.mem.Allocator,
-) TreeError![][Crypto.nh]u8 {
+) (TreeError || error{OutOfMemory})![][Crypto.nh]u8 {
     const width = tree.nodeCount();
-    const scratch = allocator.alloc(
+    const scratch = try allocator.alloc(
         [Crypto.nh]u8,
         width,
-    ) catch return error.IndexOutOfRange;
+    );
     defer allocator.free(scratch);
 
     const root_idx = tree_math.root(tree.leaf_count);
@@ -210,10 +210,10 @@ pub fn allTreeHashes(
     }
 
     // Copy to heap-allocated result.
-    const result = allocator.alloc(
+    const result = try allocator.alloc(
         [Crypto.nh]u8,
         width,
-    ) catch return error.IndexOutOfRange;
+    );
     @memcpy(result, scratch);
     return result;
 }
