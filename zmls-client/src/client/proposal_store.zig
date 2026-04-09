@@ -25,10 +25,25 @@ pub fn PendingProposalStore(comptime P: type) type {
 
         const Entry = struct {
             occupied: bool = false,
-            group_id_hash: u64 = 0,
+            group_id_buf: [max_group_id_len]u8 =
+                .{0} ** max_group_id_len,
+            group_id_len: u32 = 0,
             ref: [P.nh]u8 = .{0} ** P.nh,
             proposal: zmls.Proposal = undefined,
             sender: zmls.Sender = undefined,
+
+            fn matchesGroup(
+                self: *const Entry,
+                group_id: []const u8,
+            ) bool {
+                return self.occupied and
+                    self.group_id_len == group_id.len and
+                    std.mem.eql(
+                        u8,
+                        self.group_id_buf[0..self.group_id_len],
+                        group_id,
+                    );
+            }
         };
 
         entries: [max_stored]Entry =
@@ -47,16 +62,24 @@ pub fn PendingProposalStore(comptime P: type) type {
             proposal: zmls.Proposal,
             sender: zmls.Sender,
         ) error{CapacityExhausted}!void {
-            const gid_hash = hashGroupId(group_id);
+            if (group_id.len > max_group_id_len) {
+                return error.CapacityExhausted;
+            }
             for (&self.entries) |*e| {
                 if (!e.occupied) {
                     e.* = .{
                         .occupied = true,
-                        .group_id_hash = gid_hash,
+                        .group_id_len = @intCast(
+                            group_id.len,
+                        ),
                         .ref = ref,
                         .proposal = proposal,
                         .sender = sender,
                     };
+                    @memcpy(
+                        e.group_id_buf[0..group_id.len],
+                        group_id,
+                    );
                     self.count += 1;
                     return;
                 }
@@ -71,11 +94,8 @@ pub fn PendingProposalStore(comptime P: type) type {
             group_id: []const u8,
             cache: *zmls.ProposalCache(P),
         ) void {
-            const gid_hash = hashGroupId(group_id);
             for (&self.entries) |*e| {
-                if (e.occupied and
-                    e.group_id_hash == gid_hash)
-                {
+                if (e.matchesGroup(group_id)) {
                     _ = cache.cacheProposalWithRef(
                         e.proposal,
                         e.sender,
@@ -91,11 +111,8 @@ pub fn PendingProposalStore(comptime P: type) type {
             self: *Self,
             group_id: []const u8,
         ) void {
-            const gid_hash = hashGroupId(group_id);
             for (&self.entries) |*e| {
-                if (e.occupied and
-                    e.group_id_hash == gid_hash)
-                {
+                if (e.matchesGroup(group_id)) {
                     e.* = .{};
                     self.count -= 1;
                 }
@@ -110,22 +127,15 @@ pub fn PendingProposalStore(comptime P: type) type {
             group_id: []const u8,
             out: []zmls.Proposal,
         ) []zmls.Proposal {
-            const gid_hash = hashGroupId(group_id);
             var n: u32 = 0;
             for (&self.entries) |*e| {
                 if (n >= out.len) break;
-                if (e.occupied and
-                    e.group_id_hash == gid_hash)
-                {
+                if (e.matchesGroup(group_id)) {
                     out[n] = e.proposal;
                     n += 1;
                 }
             }
             return out[0..n];
-        }
-
-        fn hashGroupId(group_id: []const u8) u64 {
-            return std.hash.Wyhash.hash(0, group_id);
         }
     };
 }
