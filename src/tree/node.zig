@@ -626,17 +626,72 @@ pub const LeafNode = struct {
 
     // -- Decode --
 
-    pub fn decode(
+    const SourceFields = struct {
+        lifetime: ?Lifetime,
+        parent_hash: ?[]const u8,
+        pos: u32,
+    };
+
+    /// Decode leaf_node_source and its per-variant fields.
+    fn decodeSourceFields(
         allocator: std.mem.Allocator,
         data: []const u8,
         pos: u32,
-    ) (DecodeError || error{OutOfMemory})!struct {
-        value: LeafNode,
+    ) (DecodeError || error{OutOfMemory})!SourceFields {
+        const src_r = try codec.decodeUint8(data, pos);
+        const source: LeafNodeSource = @enumFromInt(
+            src_r.value,
+        );
+        const p = src_r.pos;
+
+        switch (source) {
+            .key_package => {
+                const lt_r = try Lifetime.decode(data, p);
+                return .{
+                    .lifetime = lt_r.value,
+                    .parent_hash = null,
+                    .pos = lt_r.pos,
+                };
+            },
+            .update => return .{
+                .lifetime = null,
+                .parent_hash = null,
+                .pos = p,
+            },
+            .commit => {
+                const ph_r = try codec.decodeVarVectorLimited(
+                    allocator,
+                    data,
+                    p,
+                    types.max_hash_length,
+                );
+                return .{
+                    .lifetime = null,
+                    .parent_hash = ph_r.value,
+                    .pos = ph_r.pos,
+                };
+            },
+            else => return error.InvalidEnumValue,
+        }
+    }
+
+    const IdentityFields = struct {
+        encryption_key: []const u8,
+        signature_key: []const u8,
+        credential: Credential,
+        capabilities: Capabilities,
         pos: u32,
-    } {
+    };
+
+    /// Decode the identity fields of a LeafNode:
+    /// encryption_key, signature_key, credential, capabilities.
+    fn decodeIdentityFields(
+        allocator: std.mem.Allocator,
+        data: []const u8,
+        pos: u32,
+    ) (DecodeError || error{OutOfMemory})!IdentityFields {
         var p = pos;
 
-        // encryption_key<V>.
         const ek_r = try codec.decodeVarVectorLimited(
             allocator,
             data,
@@ -646,7 +701,6 @@ pub const LeafNode = struct {
         errdefer allocator.free(ek_r.value);
         p = ek_r.pos;
 
-        // signature_key<V>.
         const sk_r = try codec.decodeVarVectorLimited(
             allocator,
             data,
@@ -656,59 +710,63 @@ pub const LeafNode = struct {
         errdefer allocator.free(sk_r.value);
         p = sk_r.pos;
 
-        // credential.
-        const cred_r = try Credential.decode(allocator, data, p);
-        errdefer {
-            var cred = cred_r.value;
-            cred.deinit(allocator);
-        }
-        p = cred_r.pos;
-
-        // capabilities.
-        const caps_r = try Capabilities.decode(
+        const cred_r = try Credential.decode(
             allocator,
             data,
             p,
         );
         errdefer {
-            var caps = caps_r.value;
-            caps.deinit(allocator);
+            var c = cred_r.value;
+            c.deinit(allocator);
         }
+        p = cred_r.pos;
+
+        const caps_r = try Capabilities.decode(
+            allocator,
+            data,
+            p,
+        );
         p = caps_r.pos;
 
-        // leaf_node_source (u8).
-        const src_r = try codec.decodeUint8(data, p);
-        const source: LeafNodeSource = @enumFromInt(
-            src_r.value,
+        return .{
+            .encryption_key = ek_r.value,
+            .signature_key = sk_r.value,
+            .credential = cred_r.value,
+            .capabilities = caps_r.value,
+            .pos = p,
+        };
+    }
+
+    pub fn decode(
+        allocator: std.mem.Allocator,
+        data: []const u8,
+        pos: u32,
+    ) (DecodeError || error{OutOfMemory})!struct {
+        value: LeafNode,
+        pos: u32,
+    } {
+        const id = try decodeIdentityFields(
+            allocator,
+            data,
+            pos,
         );
-        p = src_r.pos;
-
-        // source-specific fields.
-        var lifetime: ?Lifetime = null;
-        var parent_hash: ?[]const u8 = null;
-        switch (source) {
-            .key_package => {
-                const lt_r = try Lifetime.decode(data, p);
-                lifetime = lt_r.value;
-                p = lt_r.pos;
-            },
-            .update => {},
-            .commit => {
-                // parent_hash<V> per RFC 9420 Section 7.2.
-                const ph_r = try codec.decodeVarVectorLimited(
-                    allocator,
-                    data,
-                    p,
-                    types.max_hash_length,
-                );
-                errdefer allocator.free(ph_r.value);
-                parent_hash = ph_r.value;
-                p = ph_r.pos;
-            },
-            else => return error.InvalidEnumValue,
+        errdefer {
+            allocator.free(id.encryption_key);
+            allocator.free(id.signature_key);
+            var cred = id.credential;
+            cred.deinit(allocator);
+            var caps = id.capabilities;
+            caps.deinit(allocator);
         }
-
-        // extensions<V>.
+        var p = id.pos;
+        const src_r = try decodeSourceFields(
+            allocator,
+            data,
+            p,
+        );
+        errdefer if (src_r.parent_hash) |ph|
+            allocator.free(ph);
+        p = src_r.pos;
         const ext_r = try decodeExtensionList(
             allocator,
             data,
@@ -722,33 +780,30 @@ pub const LeafNode = struct {
             allocator.free(ext_r.value);
         }
         p = ext_r.pos;
-
-        // signature<V>.
         const sig_r = try codec.decodeVarVectorLimited(
             allocator,
             data,
             p,
             types.max_signature_length,
         );
-        p = sig_r.pos;
 
-        return .{
-            .value = .{
-                .encryption_key = ek_r.value,
-                .signature_key = sk_r.value,
-                .credential = cred_r.value,
-                .capabilities = caps_r.value,
-                .source = source,
-                .lifetime = lifetime,
-                .parent_hash = parent_hash,
-                .extensions = @as(
-                    []const Extension,
-                    ext_r.value,
-                ),
-                .signature = sig_r.value,
-            },
-            .pos = p,
-        };
+        const source: LeafNodeSource =
+            if (src_r.lifetime != null) .key_package else if (src_r.parent_hash != null) .commit else .update;
+
+        return .{ .value = .{
+            .encryption_key = id.encryption_key,
+            .signature_key = id.signature_key,
+            .credential = id.credential,
+            .capabilities = id.capabilities,
+            .source = source,
+            .lifetime = src_r.lifetime,
+            .parent_hash = src_r.parent_hash,
+            .extensions = @as(
+                []const Extension,
+                ext_r.value,
+            ),
+            .signature = sig_r.value,
+        }, .pos = sig_r.pos };
     }
 
     pub fn deinit(
