@@ -593,4 +593,7 @@ test {
     // Pull in all module tests so `zig build test` covers
     // everything reachable from this root.
     @import("std").testing.refAllDecls(@This());
+
+    // Separated test modules (not reachable via refAllDecls).
+    _ = @import("group/commit_test.zig");
 }
