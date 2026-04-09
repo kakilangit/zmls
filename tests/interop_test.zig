@@ -4,8 +4,10 @@
 //   https://github.com/mlswg/mls-implementations/tree/main/test-vectors
 //
 // All tests load JSON at runtime via @embedFile + std.json.
-// Only cipher suite 1 (MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519)
-// is tested, matching our default CryptoProvider.
+// Cipher suites tested: 1 (X25519/AES-128/Ed25519),
+// 2 (P-256/AES-128/P-256), 3 (X25519/ChaCha20/Ed25519),
+// and 7 (P-384/AES-256/P-384). Suites 4-6 (X448/Ed448, P-521)
+// are not implemented.
 
 const std = @import("std");
 const testing = std.testing;
@@ -1707,6 +1709,28 @@ test "psk secret: cipher suite 3 (all counts)" {
     try testing.expect(count > 0);
 }
 
+test "psk secret: cipher suite 7 (all counts)" {
+    const parsed = try std.json.parseFromSlice(
+        []const PskSecretEntry,
+        testing.allocator,
+        psk_secret_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 7) {
+            try verifyPskSecret(
+                zmls.P384CryptoProvider,
+                entry,
+            );
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
 // =====================================================================
 // 9. Welcome — loaded from welcome.json
 // =====================================================================
@@ -1859,6 +1883,72 @@ test "welcome: cipher suite 1 — decrypt and verify" {
     for (parsed.value) |entry| {
         if (entry.cipher_suite == 1) {
             try verifyWelcome(P, entry);
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "welcome: cipher suite 2 — decrypt and verify" {
+    const parsed = try std.json.parseFromSlice(
+        []const WelcomeEntry,
+        testing.allocator,
+        welcome_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 2) {
+            try verifyWelcome(
+                zmls.P256CryptoProvider,
+                entry,
+            );
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "welcome: cipher suite 3 — decrypt and verify" {
+    const parsed = try std.json.parseFromSlice(
+        []const WelcomeEntry,
+        testing.allocator,
+        welcome_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 3) {
+            try verifyWelcome(
+                zmls.ChaCha20CryptoProvider,
+                entry,
+            );
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "welcome: cipher suite 7 — decrypt and verify" {
+    const parsed = try std.json.parseFromSlice(
+        []const WelcomeEntry,
+        testing.allocator,
+        welcome_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 7) {
+            try verifyWelcome(
+                zmls.P384CryptoProvider,
+                entry,
+            );
             count += 1;
         }
     }
@@ -2262,6 +2352,72 @@ test "tree-validation: cipher suite 1 — resolution, hashes, parent hash, signa
     for (parsed.value) |entry| {
         if (entry.cipher_suite == 1) {
             try verifyTreeValidation(P, entry);
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "tree-validation: cipher suite 2" {
+    const parsed = try std.json.parseFromSlice(
+        []const TreeValidationEntry,
+        testing.allocator,
+        tree_validation_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 2) {
+            try verifyTreeValidation(
+                zmls.P256CryptoProvider,
+                entry,
+            );
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "tree-validation: cipher suite 3" {
+    const parsed = try std.json.parseFromSlice(
+        []const TreeValidationEntry,
+        testing.allocator,
+        tree_validation_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 3) {
+            try verifyTreeValidation(
+                zmls.ChaCha20CryptoProvider,
+                entry,
+            );
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "tree-validation: cipher suite 7" {
+    const parsed = try std.json.parseFromSlice(
+        []const TreeValidationEntry,
+        testing.allocator,
+        tree_validation_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 7) {
+            try verifyTreeValidation(
+                zmls.P384CryptoProvider,
+                entry,
+            );
             count += 1;
         }
     }

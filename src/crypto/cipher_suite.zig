@@ -89,7 +89,8 @@ pub fn params(suite: CipherSuite) ?SuiteParams {
             .sign_sk_len = P256.sign_sk_len,
             .sig_len = P256.sig_len,
         },
-        // 0x0004: MLS_128_DHKEMP256_CHACHA20POLY1305_SHA256_P256
+        // 0xF001: Non-standard P256/ChaCha20Poly1305/SHA256/P256
+        // (private-use range per RFC 9420 Section 17.1)
         .mls_128_dhkemp256_chacha20poly1305_sha256_p256 => .{
             .nh = P256ChaCha.nh,
             .nk = P256ChaCha.nk,
@@ -101,7 +102,16 @@ pub fn params(suite: CipherSuite) ?SuiteParams {
             .sign_sk_len = P256ChaCha.sign_sk_len,
             .sig_len = P256ChaCha.sig_len,
         },
-        // 0x0006: MLS_256_DHKEMP384_AES256GCM_SHA384_P384
+        // 0x0004: MLS_256_DHKEMX448_AES256GCM_SHA512_Ed448
+        // Not implemented — X448/Ed448 backends not available.
+        .mls_256_dhkemx448_aes256gcm_sha512_ed448 => null,
+        // 0x0005: MLS_256_DHKEMP521_AES256GCM_SHA512_P521
+        // Not implemented — P-521 backend not available.
+        .mls_256_dhkemp521_aes256gcm_sha512_p521 => null,
+        // 0x0006: MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448
+        // Not implemented — X448/Ed448 backends not available.
+        .mls_256_dhkemx448_chacha20poly1305_sha512_ed448 => null,
+        // 0x0007: MLS_256_DHKEMP384_AES256GCM_SHA384_P384
         .mls_256_dhkemp384_aes256gcm_sha384_p384 => .{
             .nh = P384.nh,
             .nk = P384.nk,
@@ -152,7 +162,7 @@ test "suite 0x0002 params" {
     try testing.expectEqual(@as(u32, 64), p.sig_len);
 }
 
-test "suite 0x0004 params" {
+test "suite 0xF001 params (non-standard P256/ChaCha20)" {
     const suite = CipherSuite
         .mls_128_dhkemp256_chacha20poly1305_sha256_p256;
     const p = params(suite).?;
@@ -162,7 +172,7 @@ test "suite 0x0004 params" {
     try testing.expectEqual(@as(u32, 64), p.sig_len);
 }
 
-test "suite 0x0006 params" {
+test "suite 0x0007 params" {
     const suite = CipherSuite
         .mls_256_dhkemp384_aes256gcm_sha384_p384;
     const p = params(suite).?;
@@ -176,6 +186,21 @@ test "suite 0x0006 params" {
 test "reserved suite returns null" {
     const p = params(CipherSuite.reserved);
     try testing.expectEqual(@as(?SuiteParams, null), p);
+}
+
+test "unimplemented X448/P521 suites return null" {
+    try testing.expectEqual(
+        @as(?SuiteParams, null),
+        params(.mls_256_dhkemx448_aes256gcm_sha512_ed448),
+    );
+    try testing.expectEqual(
+        @as(?SuiteParams, null),
+        params(.mls_256_dhkemp521_aes256gcm_sha512_p521),
+    );
+    try testing.expectEqual(
+        @as(?SuiteParams, null),
+        params(.mls_256_dhkemx448_chacha20poly1305_sha512_ed448),
+    );
 }
 
 test "unknown suite returns null" {

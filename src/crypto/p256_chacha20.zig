@@ -1,6 +1,6 @@
-//! CryptoProvider for MLS cipher suite 0x0004
+//! CryptoProvider for MLS cipher suite 0xF001
 //! (P-256 ECDH + ChaCha20Poly1305 + SHA-256 + ECDSA-P256).
-// CryptoProvider backend for MLS cipher suite 0x0004:
+// CryptoProvider backend for MLS cipher suite 0xF001:
 // MLS_128_DHKEMP256_CHACHA20POLY1305_SHA256_P256.
 //
 // Hash:      SHA-256          (std.crypto.hash.sha2.Sha256)
@@ -27,7 +27,7 @@ const ChaCha20Poly1305 = crypto.aead.chacha_poly.ChaCha20Poly1305;
 const P256 = crypto.ecc.P256;
 const Ecdsa = crypto.sign.ecdsa.EcdsaP256Sha256;
 
-/// Cipher suite 0x0004 backend.
+/// Cipher suite 0xF001 backend.
 pub const DhKemP256Sha256ChaCha20Poly1305P256 = struct {
     // -- Constants per RFC 9420 Table 2 -----------------------------------
 
@@ -242,7 +242,7 @@ pub const DhKemP256Sha256ChaCha20Poly1305P256 = struct {
 const testing = std.testing;
 const P = DhKemP256Sha256ChaCha20Poly1305P256;
 
-test "suite 0x0004 constants match RFC 9420" {
+test "suite 0xF001 constants match RFC 9420" {
     try testing.expectEqual(@as(u32, 32), P.nh);
     try testing.expectEqual(@as(u32, 32), P.nk);
     try testing.expectEqual(@as(u32, 12), P.nn);
@@ -254,7 +254,7 @@ test "suite 0x0004 constants match RFC 9420" {
     try testing.expectEqual(@as(u32, 64), P.sig_len);
 }
 
-test "suite 0x0004 aead seal/open round-trip" {
+test "suite 0xF001 aead seal/open round-trip" {
     const key = [_]u8{0x42} ** P.nk;
     const nonce = [_]u8{0x24} ** P.nn;
     const aad = "additional data";
@@ -283,7 +283,7 @@ test "suite 0x0004 aead seal/open round-trip" {
     try testing.expectEqualSlices(u8, plaintext, &decrypted);
 }
 
-test "suite 0x0004 aead rejects tampered ciphertext" {
+test "suite 0xF001 aead rejects tampered ciphertext" {
     const key = [_]u8{0x42} ** P.nk;
     const nonce = [_]u8{0x24} ** P.nn;
     const plaintext = "secret";
@@ -305,7 +305,7 @@ test "suite 0x0004 aead rejects tampered ciphertext" {
     try testing.expectError(error.AeadError, result);
 }
 
-test "suite 0x0004 sign/verify round-trip" {
+test "suite 0xF001 sign/verify round-trip" {
     const seed = [_]u8{0x01} ** 32;
     const kp = try P.signKeypairFromSeed(&seed);
     const msg = "message to sign";
@@ -313,7 +313,7 @@ test "suite 0x0004 sign/verify round-trip" {
     try P.verify(&kp.pk, msg, &sig);
 }
 
-test "suite 0x0004 dh key exchange" {
+test "suite 0xF001 dh key exchange" {
     const seed_a = [_]u8{0x0A} ** 32;
     const seed_b = [_]u8{0x0B} ** 32;
 
@@ -325,7 +325,7 @@ test "suite 0x0004 dh key exchange" {
     try testing.expectEqualSlices(u8, &shared_ab, &shared_ba);
 }
 
-// -- Full group lifecycle test with suite 0x0004 --
+// -- Full group lifecycle test with suite 0xF001 --
 
 const types = @import("../common/types.zig");
 const ProtocolVersion = types.ProtocolVersion;
@@ -346,17 +346,17 @@ const welcome_mod = @import("../group/welcome.zig");
 const prim_mod = @import("primitives.zig");
 const LeafIndex = types.LeafIndex;
 
-const suite_0x0004: CipherSuite =
+const suite_0xF001: CipherSuite =
     .mls_128_dhkemp256_chacha20poly1305_sha256_p256;
 
-/// Create a test LeafNode for cipher suite 0x0004
-/// /// (P-256/ChaCha20Poly1305/ECDSA-P256).
-fn makeLeaf0x0004(
+/// Create a test LeafNode for cipher suite 0xF001
+/// /// (P-256/ChaCha20Poly1305/ECDSA-P256, non-standard).
+fn makeLeaf0xF001(
     enc_pk: []const u8,
     sig_pk: []const u8,
 ) LeafNode {
     const versions = comptime [_]ProtocolVersion{.mls10};
-    const suites = comptime [_]CipherSuite{suite_0x0004};
+    const suites = comptime [_]CipherSuite{suite_0xF001};
     const ext_types = comptime [_]types.ExtensionType{};
     const prop_types = comptime [_]types.ProposalType{};
     const cred_types = comptime [_]types.CredentialType{
@@ -385,7 +385,7 @@ fn makeLeaf0x0004(
     };
 }
 
-const TestKP0x0004 = struct {
+const TestKP0xF001 = struct {
     kp: KeyPackage,
     sig_buf: [P.sig_len]u8,
     leaf_sig_buf: [P.sig_len]u8,
@@ -396,10 +396,10 @@ const TestKP0x0004 = struct {
     sign_sk: [P.sign_sk_len]u8,
     sign_pk: [P.sign_pk_len]u8,
 
-    /// Initialize a test KeyPackage for suite 0x0004 from
+    /// Initialize a test KeyPackage for suite 0xF001 from
     /// deterministic seed tags.
     fn init(
-        self: *TestKP0x0004,
+        self: *TestKP0xF001,
         enc_tag: u8,
         init_tag: u8,
         sign_tag: u8,
@@ -423,9 +423,9 @@ const TestKP0x0004 = struct {
 
         self.kp = .{
             .version = .mls10,
-            .cipher_suite = suite_0x0004,
+            .cipher_suite = suite_0xF001,
             .init_key = &self.init_pk,
-            .leaf_node = makeLeaf0x0004(
+            .leaf_node = makeLeaf0xF001(
                 &self.enc_pk,
                 &self.sign_pk,
             ),
@@ -451,7 +451,7 @@ const TestKP0x0004 = struct {
     }
 };
 
-test "suite 0x0004 full group lifecycle" {
+test "suite 0xF001 full group lifecycle" {
     const alloc = testing.allocator;
 
     const alice_enc = try P.dhKeypairFromSeed(
@@ -465,8 +465,8 @@ test "suite 0x0004 full group lifecycle" {
         P,
         alloc,
         "p256cc-lifecycle",
-        makeLeaf0x0004(&alice_enc.pk, &alice_sign.pk),
-        suite_0x0004,
+        makeLeaf0xF001(&alice_enc.pk, &alice_sign.pk),
+        suite_0xF001,
         &.{},
     );
     defer gs.deinit();
@@ -474,7 +474,7 @@ test "suite 0x0004 full group lifecycle" {
     try testing.expectEqual(@as(u64, 0), gs.epoch());
     try testing.expectEqual(@as(u32, 1), gs.leafCount());
 
-    var bob: TestKP0x0004 = undefined;
+    var bob: TestKP0xF001 = undefined;
     try bob.init(0xB1, 0xB3, 0xB2);
 
     const add_bob = Proposal{
@@ -534,7 +534,7 @@ test "suite 0x0004 full group lifecycle" {
         &cr.epoch_secrets.joiner_secret,
         &alice_sign.sk,
         0,
-        suite_0x0004,
+        suite_0xF001,
         &new_members,
         &.{},
     );

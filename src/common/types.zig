@@ -68,15 +68,23 @@ pub const ProtocolVersion = enum(u16) {
 };
 
 /// Wire-level cipher suite identifier. Per RFC 9420 Section 5.1.
+///
+/// Values 0x0001–0x0007 follow the IANA MLS Cipher Suites registry.
+/// Suites 0x0004–0x0006 (X448/Ed448, P-521) are not implemented.
+/// The P256/ChaCha20 combination is non-standard and uses a
+/// private-use value (0xF001).
 pub const CipherSuite = enum(u16) {
     reserved = 0x0000,
     mls_128_dhkemx25519_aes128gcm_sha256_ed25519 = 0x0001,
     mls_128_dhkemp256_aes128gcm_sha256_p256 = 0x0002,
     mls_128_dhkemx25519_chacha20poly1305_sha256_ed25519 = 0x0003,
-    mls_128_dhkemp256_chacha20poly1305_sha256_p256 = 0x0004,
-    mls_256_dhkemx448_aes256gcm_sha512_ed448 = 0x0005,
-    mls_256_dhkemp384_aes256gcm_sha384_p384 = 0x0006,
-    mls_256_dhkemx448_chacha20poly1305_sha512_ed448 = 0x0007,
+    mls_256_dhkemx448_aes256gcm_sha512_ed448 = 0x0004,
+    mls_256_dhkemp521_aes256gcm_sha512_p521 = 0x0005,
+    mls_256_dhkemx448_chacha20poly1305_sha512_ed448 = 0x0006,
+    mls_256_dhkemp384_aes256gcm_sha384_p384 = 0x0007,
+    /// Non-standard: P-256/ChaCha20Poly1305/SHA-256/P-256.
+    /// Uses a private-use value per RFC 9420 Section 17.1.
+    mls_128_dhkemp256_chacha20poly1305_sha256_p256 = 0xF001,
     _,
 };
 

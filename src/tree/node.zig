@@ -480,12 +480,9 @@ pub const LeafNode = struct {
         const pk: *const [P.sign_pk_len]u8 = @ptrCast(
             self.signature_key[0..P.sign_pk_len],
         );
-        if (self.signature.len != P.sig_len) {
+        if (self.signature.len == 0) {
             return error.SignatureVerifyFailed;
         }
-        const sig: *const [P.sig_len]u8 = @ptrCast(
-            self.signature[0..P.sig_len],
-        );
         var tbs_buf: [max_leaf_encode]u8 = undefined;
         const tbs_end = try self.encodeSignContent(
             &tbs_buf,
@@ -498,7 +495,7 @@ pub const LeafNode = struct {
             pk,
             "LeafNodeTBS",
             tbs_buf[0..tbs_end],
-            sig,
+            self.signature,
         );
     }
 

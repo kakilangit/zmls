@@ -220,7 +220,7 @@ pub fn verifyFramedContent(
         verify_key,
         "FramedContentTBS",
         tbs_buf[0..tbs_len],
-        &auth.signature,
+        auth.signature[0..],
     );
 }
 

@@ -200,17 +200,16 @@ pub fn verifyGroupInfo(
         gi.signer,
     ) catch return error.KdfOutputTooLong;
 
-    if (gi.signature.len != P.sig_len) {
+    if (gi.signature.len == 0) {
         return error.SignatureVerifyFailed;
     }
-    const sig: *const [P.sig_len]u8 = gi.signature[0..P.sig_len];
 
     return primitives.verifyWithLabel(
         P,
         verify_key,
         "GroupInfoTBS",
         tbs_buf[0..tbs_end],
-        sig,
+        gi.signature,
     );
 }
 

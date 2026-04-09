@@ -207,19 +207,16 @@ pub const KeyPackage = struct {
             0,
         ) catch return error.KdfOutputTooLong;
 
-        if (self.signature.len != P.sig_len) {
+        if (self.signature.len == 0) {
             return error.SignatureVerifyFailed;
         }
-        const sig: *const [P.sig_len]u8 = @ptrCast(
-            self.signature[0..P.sig_len],
-        );
 
         try prim.verifyWithLabel(
             P,
             pk,
             "KeyPackageTBS",
             tbs_buf[0..tbs_end],
-            sig,
+            self.signature,
         );
     }
 
