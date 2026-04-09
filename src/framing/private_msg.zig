@@ -537,7 +537,7 @@ pub fn encryptContent(
     aad: []const u8,
     out: []u8,
 ) CryptoError!u32 {
-    // Serialize PrivateMessageContent.
+    // Serialize PrivateMessageContent without padding.
     var pt_buf: [max_content_buf]u8 = undefined;
     defer primitives.secureZero(&pt_buf);
     const raw_len = encodePrivateMessageContent(
@@ -550,20 +550,16 @@ pub fn encryptContent(
         0,
     ) catch return error.KdfOutputTooLong;
 
-    // Compute padding.
+    // Compute and append zero padding in-place.
     const padded_len = paddedLength(raw_len, padding_block);
     const pad_bytes = padded_len - raw_len;
-
-    // Add zero padding.
-    const total_pt = encodePrivateMessageContent(
-        P,
-        &pt_buf,
-        0,
-        content,
-        content_type,
-        auth,
-        pad_bytes,
-    ) catch return error.KdfOutputTooLong;
+    if (raw_len + pad_bytes > pt_buf.len) {
+        return error.KdfOutputTooLong;
+    }
+    if (pad_bytes > 0) {
+        @memset(pt_buf[raw_len..][0..pad_bytes], 0);
+    }
+    const total_pt = raw_len + pad_bytes;
 
     // Output must hold ciphertext + tag.
     const required: u32 = total_pt + P.nt;
