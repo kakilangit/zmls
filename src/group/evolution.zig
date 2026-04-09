@@ -91,6 +91,10 @@ pub const UpdateEntry = struct {
 ///
 /// All arrays are owned inline (fixed-size) so the struct can
 /// be safely returned by value without dangling pointers.
+///
+/// Stack usage: ~100 KiB due to inline arrays of up to 256
+/// entries for updates, removes, and adds. Callers should
+/// ensure sufficient stack space.
 pub const ValidatedProposals = struct {
     /// GroupContextExtensions proposal (at most one).
     gce: ?GroupContextExtensions,
@@ -367,6 +371,9 @@ fn isKnownSenderAllowed(
 // -- ProposalApplyResult -----------------------------------------------------
 
 /// Result of applying proposals to a tree.
+///
+/// Stack usage: ~50 KiB due to inline arrays of up to 256
+/// added/removed leaves and 64 PSK IDs.
 pub const ProposalApplyResult = struct {
     /// New group extensions (if GCE was applied).
     new_extensions: ?[]const Extension,

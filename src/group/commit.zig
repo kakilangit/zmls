@@ -119,6 +119,11 @@ pub const max_content_buf: u32 = 65536;
 ///
 /// GroupContext stores tree_hash and confirmed_transcript_hash
 /// as inline [P.nh]u8 arrays. No pointer fixup needed.
+///
+/// Stack usage: ~130 KiB due to inline `commit_bytes` (64 KiB)
+/// and `apply_result` (~50 KiB). Callers should ensure
+/// sufficient stack space. Zig uses RVO for the return value,
+/// so no copy occurs in practice.
 pub fn CommitResult(comptime P: type) type {
     return struct {
         /// The serialized Commit struct (for the content payload).

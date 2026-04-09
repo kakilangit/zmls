@@ -293,6 +293,10 @@ pub fn ExternalCommitParams(comptime P: type) type {
 }
 
 /// Result of createExternalCommit.
+///
+/// Stack usage: ~70 KiB due to inline `commit_bytes` (64 KiB).
+/// Callers should ensure sufficient stack space. Zig uses RVO
+/// for the return value, so no copy occurs in practice.
 pub fn ExternalCommitResult(comptime P: type) type {
     return struct {
         /// Serialized Commit bytes.
