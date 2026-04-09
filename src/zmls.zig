@@ -596,4 +596,6 @@ test {
 
     // Separated test modules (not reachable via refAllDecls).
     _ = @import("group/commit_test.zig");
+    _ = @import("group/evolution_test.zig");
+    _ = @import("group/welcome_test.zig");
 }
