@@ -1152,13 +1152,15 @@ fn encodeCommit(
 ///
 /// confirmed_transcript_hash =
 ///   Hash(interim_transcript_hash || ConfirmedTranscriptHashInput)
-fn buildConfirmedHash(
+///
+/// Shared by createCommit and createExternalCommit.
+pub fn buildConfirmedHash(
     comptime P: type,
     fc: *const FramedContent,
     signature: *const [P.sig_len]u8,
     interim_prev: *const [P.nh]u8,
     wire_format: WireFormat,
-) CommitError![P.nh]u8 {
+) error{IndexOutOfRange}![P.nh]u8 {
     var input_buf: [max_content_buf]u8 = undefined;
     var pos: u32 = 0;
 

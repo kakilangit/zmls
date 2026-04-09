@@ -33,6 +33,7 @@ const hpke_mod = @import("../crypto/hpke.zig");
 const proposal_mod = @import("../messages/proposal.zig");
 const commit_msg = @import("../messages/commit.zig");
 const context_mod = @import("context.zig");
+const commit_mod = @import("commit.zig");
 const schedule = @import("../key_schedule/schedule.zig");
 const transcript = @import("../key_schedule/transcript.zig");
 const evolution = @import("evolution.zig");
@@ -773,43 +774,9 @@ fn encodeExternalCommit(
     return end;
 }
 
-/// Build confirmed transcript hash (shared with commit.zig).
-fn buildConfirmedHash(
-    comptime P: type,
-    fc: *const FramedContent,
-    signature: *const [P.sig_len]u8,
-    interim_prev: *const [P.nh]u8,
-    wire_format: WireFormat,
-) ExternalCommitError![P.nh]u8 {
-    var input_buf: [max_content_buf]u8 = undefined;
-    var pos: u32 = 0;
-
-    // WireFormat (u16).
-    pos = codec.encodeUint16(
-        &input_buf,
-        pos,
-        @intFromEnum(wire_format),
-    ) catch return error.IndexOutOfRange;
-
-    // FramedContent.
-    pos = fc.encode(
-        &input_buf,
-        pos,
-    ) catch return error.IndexOutOfRange;
-
-    // opaque signature<V>.
-    pos = codec.encodeVarVector(
-        &input_buf,
-        pos,
-        signature,
-    ) catch return error.IndexOutOfRange;
-
-    return transcript.updateConfirmedTranscriptHash(
-        P,
-        interim_prev,
-        input_buf[0..pos],
-    ) catch return error.IndexOutOfRange;
-}
+/// Build confirmed transcript hash (delegates to shared
+/// implementation in commit.zig).
+const buildConfirmedHash = commit_mod.buildConfirmedHash;
 
 /// Apply parent keys, compute parent hashes, then set the
 /// joiner leaf's parent_hash, source, sign, and install in tree.
