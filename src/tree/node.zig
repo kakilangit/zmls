@@ -526,6 +526,16 @@ pub const LeafNode = struct {
             return error.InvalidLeafNode;
         }
 
+        // 1b. capabilities.versions MUST include mls10
+        //     (RFC 9420 §7.2).
+        if (!capsContains(
+            ProtocolVersion,
+            self.capabilities.versions,
+            .mls10,
+        )) {
+            return error.InvalidLeafNode;
+        }
+
         // 2. Cipher suite must be in capabilities.
         if (!capsContains(
             CipherSuite,

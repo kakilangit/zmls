@@ -26,6 +26,9 @@ All notable changes to this project will be documented in this file.
   is a valid HPKE public key via `P.validateDhPublicKey`. Called from
   `KeyPackage.validate`, Update leaf validation, and Welcome tree
   validation per RFC 9420 §7.3.
+- **LeafNode capabilities.versions must include mls10** --
+  `LeafNode.validate()` now checks that `capabilities.versions`
+  contains `mls10` per RFC 9420 §7.2.
 
 ## [0.1.2] - 2026-04-10
 

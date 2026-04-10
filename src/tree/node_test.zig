@@ -633,7 +633,7 @@ test "validate accepts leaf whose caps satisfy required_capabilities" {
             .payload = .{ .basic = &.{} },
         },
         .capabilities = .{
-            .versions = &.{},
+            .versions = &.{.mls10},
             .cipher_suites = &.{
                 .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
             },
