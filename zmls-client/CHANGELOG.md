@@ -19,6 +19,12 @@ All notable changes to this project will be documented in this file.
   commits that require an UpdatePath (Remove, Update, GCE, empty)
   succeed instead of failing with `CommitFailed`. The new encryption
   key is persisted via `KeyStore` when `confirm()` is called.
+- **PendingProposalStore frees decoded proposal data on clearGroup** --
+  `clearGroup` now accepts an allocator and calls `Proposal.deinit` on
+  entries that own heap-allocated data (decoded from wire). Previously
+  zeroing entries leaked Add proposal KeyPackage data (init_key,
+  signature, extensions). An `owns_data` flag distinguishes decoded
+  proposals from caller-constructed ones.
 - **Welcome path_secret in inviteMember** -- `buildInviteResult` now
   passes path secrets, filtered direct path nodes, and the new member's
   leaf index through to `buildWelcome` per RFC 9420 §12.4.3.1.

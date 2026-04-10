@@ -1744,7 +1744,10 @@ pub fn Client(comptime P: type) type {
             ) catch |err| return err;
 
             // Clear proposals only after successful commit.
-            self.proposal_store.clearGroup(group_id);
+            self.proposal_store.clearGroup(
+                allocator,
+                group_id,
+            );
 
             return wire_bytes;
         }
@@ -2087,6 +2090,7 @@ pub fn Client(comptime P: type) type {
                 ref,
                 proposal.*,
                 sender,
+                false,
             ) catch return error.ProposalCacheFailed;
 
             return encoded.wire_bytes;
@@ -2574,7 +2578,10 @@ pub fn Client(comptime P: type) type {
             result.deinit();
 
             // Clear stored proposals — epoch advanced.
-            self.proposal_store.clearGroup(group_id);
+            self.proposal_store.clearGroup(
+                allocator,
+                group_id,
+            );
 
             return .{ .commit_applied = commit_applied };
         }
@@ -2670,6 +2677,7 @@ pub fn Client(comptime P: type) type {
                 ref,
                 decoded.proposal,
                 cached_sender,
+                true,
             ) catch return error.WireDecodeFailed;
 
             return .{ .proposal_cached = .{
@@ -2844,7 +2852,10 @@ pub fn Client(comptime P: type) type {
             self: *Self,
             group_id: []const u8,
         ) void {
-            self.proposal_store.clearGroup(group_id);
+            self.proposal_store.clearGroup(
+                self.allocator,
+                group_id,
+            );
         }
 
         /// Evict a group's cached bundle blob, forcing the
