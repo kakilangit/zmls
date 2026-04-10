@@ -2693,3 +2693,39 @@ test "Client: PSK proposal flow through Client API" {
         try bob.groupEpoch(io, group_id),
     );
 }
+
+test "BlobCache: LRU eviction preserves insertion order" {
+    const C = Client(TestP);
+    var cache = C.BlobCache.init(testing.allocator);
+    defer cache.deinit();
+
+    // Fill cache to capacity.
+    var ids: [C.BlobCache.max_entries + 2][4]u8 = undefined;
+    for (0..C.BlobCache.max_entries + 2) |i| {
+        const v: u32 = @intCast(i);
+        ids[i] = @bitCast(v);
+    }
+
+    // Insert max_entries items (0..max_entries-1).
+    for (0..C.BlobCache.max_entries) |i| {
+        cache.put(&ids[i], &ids[i]);
+    }
+
+    // Inserting one more should evict item 0 (oldest).
+    const overflow_idx = C.BlobCache.max_entries;
+    cache.put(&ids[overflow_idx], &ids[overflow_idx]);
+    try testing.expect(cache.get(&ids[0]) == null);
+    try testing.expect(cache.get(&ids[1]) != null);
+    try testing.expect(
+        cache.get(&ids[overflow_idx]) != null,
+    );
+
+    // Inserting another should evict item 1 (now oldest).
+    const overflow_idx2 = C.BlobCache.max_entries + 1;
+    cache.put(&ids[overflow_idx2], &ids[overflow_idx2]);
+    try testing.expect(cache.get(&ids[1]) == null);
+    try testing.expect(cache.get(&ids[2]) != null);
+    try testing.expect(
+        cache.get(&ids[overflow_idx2]) != null,
+    );
+}

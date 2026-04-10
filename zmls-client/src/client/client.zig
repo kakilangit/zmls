@@ -69,22 +69,22 @@ pub fn Client(comptime P: type) type {
         /// In-memory cache of serialized group bundles.
         /// Keyed by group_id. Eliminates GroupStore I/O
         /// for repeated loads of the same group.
-        const BlobCache = struct {
+        pub const BlobCache = struct {
             /// Maximum cached entries. Oldest entry is
             /// evicted when capacity is reached.
-            const max_entries: u32 = 16;
+            pub const max_entries: u32 = 16;
 
             map: std.StringArrayHashMapUnmanaged([]u8),
             alloc: Allocator,
 
-            fn init(allocator: Allocator) BlobCache {
+            pub fn init(allocator: Allocator) BlobCache {
                 return .{
                     .map = .empty,
                     .alloc = allocator,
                 };
             }
 
-            fn deinit(self: *BlobCache) void {
+            pub fn deinit(self: *BlobCache) void {
                 var it = self.map.iterator();
                 while (it.next()) |e| {
                     secureZeroSlice(e.value_ptr.*);
@@ -96,13 +96,13 @@ pub fn Client(comptime P: type) type {
 
             /// Look up a cached blob. Returns a borrowed
             /// slice (valid until the next put/evict).
-            fn get(self: *BlobCache, gid: []const u8) ?[]const u8 {
+            pub fn get(self: *BlobCache, gid: []const u8) ?[]const u8 {
                 return self.map.get(gid);
             }
 
             /// Insert or replace a blob for a group.
             /// The cache takes ownership of a copy.
-            fn put(
+            pub fn put(
                 self: *BlobCache,
                 gid: []const u8,
                 blob: []const u8,
@@ -128,7 +128,7 @@ pub fn Client(comptime P: type) type {
                     secureZeroSlice(vals[0]);
                     self.alloc.free(vals[0]);
                     self.alloc.free(keys[0]);
-                    self.map.swapRemoveAt(0);
+                    self.map.orderedRemoveAt(0);
                 }
 
                 const key = self.alloc.dupe(
