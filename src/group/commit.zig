@@ -1370,8 +1370,12 @@ fn generateCommitPath(
     };
     if (!path_required) return result;
     const pp = path_params orelse {
-        // Single-leaf trees have no parent nodes, so path
-        // derivation is trivially empty. Allow zero commit_secret.
+        // Single-leaf trees have an empty filtered direct path
+        // (no parent nodes), so path derivation produces zero
+        // commit_secret and no UpdatePath. This is equivalent
+        // to providing an empty path. RFC §12.2 requires a path
+        // for Update/Remove/ExternalInit/GCE, but in a single-
+        // member group the path is necessarily empty.
         if (new_tree.leaf_count <= 1) return result;
         return error.MissingPath;
     };
