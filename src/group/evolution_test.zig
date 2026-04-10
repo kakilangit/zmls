@@ -700,6 +700,56 @@ test "validateAddsAgainstTree allows re-add when member removed" {
     );
 }
 
+test "validateAddsAgainstTree rejects duplicate credential identity" {
+    // RFC §12.2: two Add proposals with the same credential
+    // (identity) but different keys must be rejected.
+    const alloc = testing.allocator;
+    var tree = try RatchetTree.init(alloc, 2);
+    defer tree.deinit();
+
+    try tree.setLeaf(
+        LeafIndex.fromU32(0),
+        makeTestLeaf("alice"),
+    );
+
+    // Two KeyPackages with different keys but same identity.
+    var kp1 = makeTestKeyPackage("bob-key-1");
+    kp1.leaf_node.credential = Credential.initBasic("bob");
+
+    var kp2 = makeTestKeyPackage("bob-key-2");
+    kp2.leaf_node.credential = Credential.initBasic("bob");
+
+    const proposals = [_]Proposal{
+        .{
+            .tag = .add,
+            .payload = .{
+                .add = .{ .key_package = kp1 },
+            },
+        },
+        .{
+            .tag = .add,
+            .payload = .{
+                .add = .{ .key_package = kp2 },
+            },
+        },
+    };
+
+    const validated = try validateProposalList(
+        alloc,
+        &proposals,
+        makeCommitSender(0),
+        null,
+    );
+    defer validated.destroy(alloc);
+
+    const result = validateAddsAgainstTree(
+        validated,
+        &tree,
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+    );
+    try testing.expectError(error.InvalidKeyPackage, result);
+}
+
 // -- Phase 14.2: Update proposal tree-aware tests ----------------------------
 
 test "validateUpdatesAgainstTree rejects committer self-update" {

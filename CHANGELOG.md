@@ -18,6 +18,11 @@ All notable changes to this project will be documented in this file.
   structurally required for key_package source; the decoder always reads
   it. Previously the encoder silently skipped it, creating encode/decode
   asymmetry.
+- **Add proposal credential deduplication per RFC 9420 §12.2** --
+  `validateAddsAgainstTree` now checks that no two Add proposals in a
+  commit share the same credential identity. Two KeyPackages with
+  different keys but the same credential are rejected. Previously only
+  key uniqueness was checked.
 - **Welcome path_secret per RFC 9420 §12.4.3.1** -- `buildWelcome` now
   computes and includes the per-member `path_secret` in GroupSecrets.
   Previously hardcoded to `null`, new members can now receive the path
