@@ -172,8 +172,16 @@ pub const LeafNodeSource = enum(u8) {
 };
 
 /// Maximum size for variable-length vectors in bytes.
-/// The varint encoding supports up to 2^30 bytes, but we set a practical
-/// upper bound to prevent memory exhaustion from malicious input.
+///
+/// RFC 9420 §6 uses a varint encoding that supports vectors up to 2^30-1
+/// bytes (~1 GiB). This implementation intentionally uses a much smaller
+/// limit as a security hardening measure to prevent memory exhaustion from
+/// malicious or malformed input.
+///
+/// NOTE: deployments that use very large ratchet_tree extensions, long
+/// certificate chains, or other large payloads may need to increase this
+/// value. Doing so trades memory-safety margin for interoperability with
+/// peers that produce large vectors.
 pub const max_vec_length: u32 = 1 << 20; // 1 MiB.
 
 /// Per-field decode limits for known-bounded MLS fields.
