@@ -167,6 +167,9 @@ pub fn ProcessWelcomeOpts(comptime P: type) type {
         /// Init public key matching the KeyPackage.
         init_pk: *const [P.npk]u8,
         /// Signer's verification key (from GroupInfo).
+        /// Must match the signature_key of the leaf at
+        /// GroupInfo.signer in the ratchet tree. Validated
+        /// after tree construction (constant-time compare).
         signer_verify_key: *const [P.sign_pk_len]u8,
         /// Source of the ratchet tree.
         tree_data: TreeInput,
@@ -292,6 +295,24 @@ pub fn processWelcome(
 
     // Validate tree leaf nodes and structural invariants.
     try validateWelcomeTree(&tree, gc.cipher_suite);
+
+    // RFC 9420 §12.4.3.1: verify that the caller-provided
+    // signer_verify_key matches the signer's leaf in the
+    // tree. The GroupInfo signer is at leaf index gi.signer.
+    const signer_leaf_idx = LeafIndex.fromU32(gi.signer);
+    const signer_leaf = tree.getLeaf(signer_leaf_idx) catch
+        return error.IndexOutOfRange;
+    if (signer_leaf) |sl| {
+        if (sl.signature_key.len != P.sign_pk_len or
+            !primitives.constantTimeEql(
+                P.sign_pk_len,
+                sl.signature_key[0..P.sign_pk_len],
+                signer_verify_key,
+            ))
+            return error.SignatureVerifyFailed;
+    } else {
+        return error.InvalidLeafNode;
+    }
 
     // 7c. Verify joiner's leaf is present at my_leaf_index.
     const my_leaf = tree.getLeaf(my_leaf_index) catch

@@ -16,6 +16,11 @@ All notable changes to this project will be documented in this file.
   `GroupState` plus derived parent node private keys from the Welcome's
   `path_secret`. The joiner can use these keys for future UpdatePath
   decryption where they are matched via a parent node.
+- **processWelcome validates signer key against tree** --
+  `processWelcome` now verifies that the caller-provided
+  `signer_verify_key` matches the `signature_key` of the leaf at
+  `GroupInfo.signer` in the ratchet tree (constant-time compare).
+  Previously the key was trusted entirely from caller input.
 
 ## [0.1.2] - 2026-04-10
 
