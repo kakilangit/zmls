@@ -530,6 +530,7 @@ test "suite 0x0003 full group lifecycle" {
                 .kp_ref = &kp_ref,
                 .init_pk = &bob.init_pk,
                 .eph_seed = &eph_seed,
+                .leaf_index = LeafIndex.fromU32(1),
             },
         };
 
@@ -545,6 +546,10 @@ test "suite 0x0003 full group lifecycle" {
         suite_0x0003,
         &new_members,
         &.{},
+        null,
+        0,
+        null,
+        0,
     );
     defer wr.deinit(alloc);
 

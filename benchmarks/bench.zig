@@ -1506,6 +1506,7 @@ fn benchProcessWelcome() void {
         .kp_ref = &kp_ref,
         .init_pk = bob_kp.kp.init_key,
         .eph_seed = &eph_seed,
+        .leaf_index = mls.LeafIndex.fromU32(1),
     }};
 
     var wr = mls.buildWelcome(
@@ -1520,6 +1521,10 @@ fn benchProcessWelcome() void {
         .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
         &nm,
         &.{},
+        null,
+        0,
+        null,
+        0,
     ) catch {
         cr.deinit(alloc);
         gs.deinit();

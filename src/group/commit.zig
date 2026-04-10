@@ -164,6 +164,25 @@ pub fn CommitResult(comptime P: type) type {
         /// source).
         leaf_sig: [P.sig_len]u8,
 
+        /// Path secrets from the committer's filtered direct
+        /// path. path_secrets[i] corresponds to fdp_nodes[i].
+        /// Only valid for 0..path_secret_count. Needed for
+        /// Welcome construction (RFC 9420 §12.4.3.1).
+        path_secrets: [path_mod.max_path_nodes][P.nh]u8,
+        path_secret_count: u32,
+        /// Filtered direct path node indices (parallel to
+        /// path_secrets).
+        fdp_nodes: [path_mod.max_path_nodes]NodeIndex,
+
+        /// Zero path secrets. Must be called after Welcome
+        /// construction is complete.
+        pub fn zeroPathSecrets(self: *@This()) void {
+            for (0..self.path_secret_count) |i| {
+                secureZero(&self.path_secrets[i]);
+            }
+            self.path_secret_count = 0;
+        }
+
         /// Free heap-owned fields (group_context internals).
         pub fn deinit(
             self: *@This(),
@@ -457,7 +476,7 @@ pub fn createCommit(
     errdefer freeCommitPath(P, &path_out);
 
     // Compute tree hash, encode, sign, derive epoch state.
-    return encodeAndFinalizeCommit(
+    var cr = try encodeAndFinalizeCommit(
         P,
         allocator,
         group_context,
@@ -475,6 +494,14 @@ pub fn createCommit(
         leaf_sig,
         wire_format,
     );
+
+    // Copy path secrets for Welcome (RFC 9420 §12.4.3.1).
+    cr.path_secret_count = path_out.path_secret_count;
+    for (0..path_out.path_secret_count) |i| {
+        cr.path_secrets[i] = path_out.path_secrets[i];
+        cr.fdp_nodes[i] = path_out.fdp_nodes[i];
+    }
+    return cr;
 }
 
 // -- ProcessResult ----------------------------------------------------------
@@ -1297,6 +1324,15 @@ fn CommitPathOutput(comptime P: type) type {
         commit_secret: [P.nh]u8,
         update_path: ?UpdatePath,
         path_allocator: ?std.mem.Allocator,
+        /// Path secrets from the filtered direct path.
+        /// path_secrets[i] corresponds to fdp_nodes[i].
+        /// Only valid for indices 0..path_secret_count.
+        path_secrets: [path_mod.max_path_nodes][P.nh]u8,
+        path_secret_count: u32,
+        /// Filtered direct path node indices (parallel to
+        /// path_secrets). Needed for Welcome path_secret
+        /// computation per RFC 9420 §12.4.3.1.
+        fdp_nodes: [path_mod.max_path_nodes]NodeIndex,
     };
 }
 
@@ -1328,6 +1364,9 @@ fn generateCommitPath(
         .commit_secret = .{0} ** P.nh,
         .update_path = null,
         .path_allocator = null,
+        .path_secrets = undefined,
+        .path_secret_count = 0,
+        .fdp_nodes = undefined,
     };
     if (!path_required) return result;
     const pp = path_params orelse {
@@ -1349,6 +1388,14 @@ fn generateCommitPath(
     };
     result.commit_secret = derived.commit_secret;
     result.path_allocator = pp.allocator;
+
+    // Copy path secrets and fdp nodes for Welcome construction
+    // (RFC 9420 §12.4.3.1: path_secret per new member).
+    result.path_secret_count = derived.n_path;
+    for (0..derived.n_path) |i| {
+        result.path_secrets[i] = derived.secrets[i];
+        result.fdp_nodes[i] = derived.fdp_nodes[i];
+    }
 
     // b. Merge parent keys, compute parent hashes, then
     //    compute leaf parent_hash, sign leaf, set leaf.
@@ -1694,5 +1741,9 @@ fn buildCommitResult(
         .joiner_secret = epoch_secrets.joiner_secret,
         .welcome_secret = epoch_secrets.welcome_secret,
         .leaf_sig = leaf_sig,
+        // Path secrets populated by createCommit after return.
+        .path_secrets = undefined,
+        .path_secret_count = 0,
+        .fdp_nodes = undefined,
     };
 }

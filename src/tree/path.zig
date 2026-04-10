@@ -355,6 +355,11 @@ pub fn DerivedPathKeys(comptime P: type) type {
         public_keys: [max_path_nodes][P.npk]u8,
         commit_secret: [P.nh]u8,
         n_path: u32,
+        /// Filtered direct path node indices. fdp_nodes[i]
+        /// corresponds to secrets[i] and public_keys[i].
+        /// Needed for Welcome path_secret computation per
+        /// RFC 9420 §12.4.3.1.
+        fdp_nodes: [max_path_nodes]NodeIndex,
 
         /// Zero all secret material (path secrets and
         /// commit_secret). Public keys are not zeroed.
@@ -398,6 +403,7 @@ pub fn derivePathKeys(
     while (i < n_path) : (i += 1) {
         var kp = try deriveNodeKeypair(P, &result.secrets[i]);
         result.public_keys[i] = kp.pk;
+        result.fdp_nodes[i] = fdp.path[i];
         secureZero(&kp.sk);
     }
 

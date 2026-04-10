@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Welcome path_secret per RFC 9420 §12.4.3.1** -- `buildWelcome` now
+  computes and includes the per-member `path_secret` in GroupSecrets.
+  Previously hardcoded to `null`, new members can now receive the path
+  secret for the lowest node in the committer's filtered direct path
+  that is also in the new member's direct path.
+
 ## [0.1.2] - 2026-04-10
 
 ### Fixed

@@ -781,6 +781,8 @@ pub fn Client(comptime P: type) type {
                 .kp_ref = &key_package_ref,
                 .init_pk = key_package.init_key,
                 .eph_seed = &ephemeral_seed,
+                .leaf_index = commit_output
+                    .apply_result.added_leaves[0],
             }};
 
             var welcome_result = commit_output.group_state
@@ -799,6 +801,12 @@ pub fn Client(comptime P: type) type {
                 ),
                 .cipher_suite = self.cipher_suite,
                 .new_members = &members,
+                .path_secrets = &commit_output.path_secrets,
+                .path_secret_count = commit_output
+                    .path_secret_count,
+                .fdp_nodes = &commit_output.fdp_nodes,
+                .tree_size = commit_output.group_state
+                    .tree.leaf_count,
             }) catch return error.WelcomeBuildFailed;
             defer welcome_result.deinit(allocator);
 

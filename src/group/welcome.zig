@@ -41,9 +41,11 @@ const psk_lookup_mod = @import(
 );
 const psk_mod = @import("../key_schedule/psk.zig");
 const commit_mod = @import("commit.zig");
+const path_mod = @import("../tree/path.zig");
 
 const CipherSuite = types.CipherSuite;
 const LeafIndex = types.LeafIndex;
+const NodeIndex = types.NodeIndex;
 const Extension = node_mod.Extension;
 const LeafNode = node_mod.LeafNode;
 const RatchetTree = ratchet_tree_mod.RatchetTree;
@@ -165,6 +167,18 @@ pub fn BuildWelcomeOpts(comptime P: type) type {
         new_members: []const NewMemberEntry(P),
         /// PSK IDs to include (empty if no PSKs).
         psk_ids: []const psk_mod.PreSharedKeyId = &.{},
+        /// Path secrets from the committer's filtered direct
+        /// path. path_secrets[i] corresponds to fdp_nodes[i].
+        /// Null when the commit has no UpdatePath.
+        path_secrets: ?*const [path_mod.max_path_nodes][P.nh]u8 = null,
+        /// Number of valid entries in path_secrets/fdp_nodes.
+        path_secret_count: u32 = 0,
+        /// Filtered direct path node indices (parallel to
+        /// path_secrets).
+        fdp_nodes: ?*const [path_mod.max_path_nodes]NodeIndex = null,
+        /// Leaf count of the post-commit tree (needed for
+        /// direct path computation).
+        tree_size: u32 = 0,
     };
 }
 
@@ -693,6 +707,10 @@ pub fn NewMemberEntry(comptime P: type) type {
         init_pk: []const u8,
         /// Ephemeral seed for HPKE encryption of GroupSecrets.
         eph_seed: *const [P.seed_len]u8,
+        /// The new member's leaf index in the post-commit tree.
+        /// Used for Welcome path_secret computation per
+        /// RFC 9420 §12.4.3.1.
+        leaf_index: LeafIndex,
     };
 }
 
@@ -762,6 +780,10 @@ pub fn buildWelcome(
     cipher_suite: CipherSuite,
     new_members: []const NewMemberEntry(P),
     psk_ids: []const psk_mod.PreSharedKeyId,
+    path_secrets: ?*const [path_mod.max_path_nodes][P.nh]u8,
+    path_secret_count: u32,
+    fdp_nodes: ?*const [path_mod.max_path_nodes]NodeIndex,
+    tree_size: u32,
 ) WelcomeError!WelcomeResult {
     // 1. Sign and encode GroupInfo.
     var gi_buf: [max_gi_buf]u8 = undefined;
@@ -791,6 +813,11 @@ pub fn buildWelcome(
         psk_ids,
         new_members,
         egi_data,
+        signer,
+        path_secrets,
+        path_secret_count,
+        fdp_nodes,
+        tree_size,
     );
 
     return .{
@@ -861,6 +888,10 @@ fn encryptGroupInfoToHeap(
 }
 
 /// Encrypt GroupSecrets for each new member via HPKE.
+///
+/// Per RFC 9420 §12.4.3.1, each new member receives the
+/// path_secret for the lowest node in the committer's filtered
+/// direct path that is also in the new member's direct path.
 fn encryptMemberSecrets(
     comptime P: type,
     allocator: std.mem.Allocator,
@@ -868,13 +899,12 @@ fn encryptMemberSecrets(
     psk_ids: []const psk_mod.PreSharedKeyId,
     new_members: []const NewMemberEntry(P),
     egi_data: []const u8,
+    signer: u32,
+    path_secrets: ?*const [path_mod.max_path_nodes][P.nh]u8,
+    path_secret_count: u32,
+    fdp_nodes: ?*const [path_mod.max_path_nodes]NodeIndex,
+    tree_size: u32,
 ) WelcomeError![]EncryptedGroupSecrets {
-    const gs = GroupSecrets{
-        .joiner_secret = joiner_secret,
-        .path_secret = null,
-        .psks = psk_ids,
-    };
-
     const n_members: u32 = @intCast(new_members.len);
     const secrets = allocator.alloc(
         EncryptedGroupSecrets,
@@ -883,7 +913,29 @@ fn encryptMemberSecrets(
     var init_count: u32 = 0;
     errdefer freeSecretsSlice(allocator, secrets, init_count);
 
+    const committer_leaf = LeafIndex.fromU32(signer);
+
     for (new_members, 0..) |*nm, index| {
+        // Find path_secret for this new member.
+        const member_ps = findMemberPathSecret(
+            P,
+            path_secrets,
+            path_secret_count,
+            fdp_nodes,
+            committer_leaf,
+            nm.leaf_index,
+            tree_size,
+        );
+
+        const gs = GroupSecrets{
+            .joiner_secret = joiner_secret,
+            .path_secret = if (member_ps) |ps|
+                ps[0..P.nh]
+            else
+                null,
+            .psks = psk_ids,
+        };
+
         secrets[index] = try encryptOneMemberSecret(
             P,
             allocator,
@@ -894,6 +946,53 @@ fn encryptMemberSecrets(
         init_count += 1;
     }
     return secrets;
+}
+
+/// Find the path_secret for a new member per RFC 9420
+/// §12.4.3.1: the secret for the lowest node in the
+/// committer's filtered direct path that is also in the
+/// new member's direct path.
+fn findMemberPathSecret(
+    comptime P: type,
+    path_secrets: ?*const [path_mod.max_path_nodes][P.nh]u8,
+    path_secret_count: u32,
+    fdp_nodes: ?*const [path_mod.max_path_nodes]NodeIndex,
+    committer_leaf: LeafIndex,
+    member_leaf: LeafIndex,
+    tree_size: u32,
+) ?*const [P.nh]u8 {
+    const ps = path_secrets orelse return null;
+    const fdp = fdp_nodes orelse return null;
+    if (path_secret_count == 0 or tree_size == 0)
+        return null;
+
+    // Compute the new member's direct path (unfiltered).
+    var dp_buf: [32]NodeIndex = undefined;
+    const member_dp = tree_math.directPath(
+        member_leaf.toNodeIndex(),
+        tree_size,
+        &dp_buf,
+    );
+
+    // Find the lowest fdp node that is in the member's
+    // direct path. The fdp is ordered from leaf-to-root,
+    // so the first match is the lowest.
+    for (0..path_secret_count) |i| {
+        const fdp_node = fdp[i];
+        for (member_dp) |dp_node| {
+            if (fdp_node.toU32() == dp_node.toU32()) {
+                return &ps[i];
+            }
+        }
+    }
+
+    // No overlap — committer and new member share no
+    // filtered direct path nodes (e.g., they are under
+    // different subtrees and all intermediate nodes were
+    // filtered out). This can happen when the LCA node
+    // has an empty copath resolution.
+    _ = committer_leaf;
+    return null;
 }
 
 /// Encrypt GroupSecrets for a single new member.

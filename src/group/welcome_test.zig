@@ -1132,6 +1132,7 @@ test "buildWelcome round-trip with processWelcome" {
         .kp_ref = &kp_ref,
         .init_pk = &bob_tkp.init_pk,
         .eph_seed = &eph_seed,
+        .leaf_index = LeafIndex.fromU32(1),
     }};
 
     var wr = try buildWelcome(
@@ -1146,6 +1147,10 @@ test "buildWelcome round-trip with processWelcome" {
         .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
         &nm,
         &.{},
+        null,
+        0,
+        null,
+        0,
     );
     defer wr.deinit(alloc);
 
@@ -1290,6 +1295,7 @@ test "Welcome with external PSK decrypts correctly" {
         .kp_ref = &kp_ref,
         .init_pk = &bob_tkp.init_pk,
         .eph_seed = &eph_seed,
+        .leaf_index = LeafIndex.fromU32(1),
     }};
     const psk_ids = [_]psk_mod.PreSharedKeyId{psk_id};
 
@@ -1305,6 +1311,10 @@ test "Welcome with external PSK decrypts correctly" {
         .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
         &nm,
         &psk_ids,
+        null,
+        0,
+        null,
+        0,
     );
     defer wr.deinit(alloc);
 

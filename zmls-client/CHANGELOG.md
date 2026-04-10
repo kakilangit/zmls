@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Welcome path_secret in inviteMember** -- `buildInviteResult` now
+  passes path secrets, filtered direct path nodes, and the new member's
+  leaf index through to `buildWelcome` per RFC 9420 §12.4.3.1.
+
 ## [0.1.1] - 2026-04-10
 
 ### Fixed

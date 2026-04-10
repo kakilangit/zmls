@@ -229,6 +229,7 @@ test "full lifecycle: create → add → welcome → join" {
             .kp_ref = &kp_ref,
             .init_pk = &bob_tkp.init_pk,
             .eph_seed = &eph_seed,
+            .leaf_index = LeafIndex.fromU32(1),
         },
     };
 
@@ -244,6 +245,10 @@ test "full lifecycle: create → add → welcome → join" {
         suite,
         &new_members,
         &.{},
+        null,
+        0,
+        null,
+        0,
     );
     defer wr.deinit(alloc);
 
@@ -1144,6 +1149,7 @@ test "method API: createCommit + joinViaWelcome" {
             .kp_ref = &kp_ref,
             .init_pk = &bob_tkp.init_pk,
             .eph_seed = &eph_seed,
+            .leaf_index = LeafIndex.fromU32(1),
         },
     };
 
@@ -2103,6 +2109,7 @@ test "unified API: commit + applyCommit + joinViaWelcome" {
             .kp_ref = &kp_ref,
             .init_pk = &bob_tkp.init_pk,
             .eph_seed = &eph_seed,
+            .leaf_index = LeafIndex.fromU32(1),
         },
     };
 
@@ -2115,6 +2122,10 @@ test "unified API: commit + applyCommit + joinViaWelcome" {
         .signer = 0,
         .cipher_suite = suite,
         .new_members = &new_members,
+        .path_secrets = &output.path_secrets,
+        .path_secret_count = output.path_secret_count,
+        .fdp_nodes = &output.fdp_nodes,
+        .tree_size = output.group_state.tree.leaf_count,
     });
     defer wr.deinit(alloc);
 

@@ -42,6 +42,8 @@ const framed_content_mod = @import(
 const proposal_mod = @import("../messages/proposal.zig");
 const path_mod = @import("../tree/path.zig");
 const evolution = @import("evolution.zig");
+const primitives = @import("../crypto/primitives.zig");
+const secureZero = primitives.secureZero;
 
 const ProtocolVersion = types.ProtocolVersion;
 const CipherSuite = types.CipherSuite;
@@ -345,6 +347,10 @@ pub fn GroupState(comptime P: type) type {
                 opts.cipher_suite,
                 opts.new_members,
                 opts.psk_ids,
+                opts.path_secrets,
+                opts.path_secret_count,
+                opts.fdp_nodes,
+                opts.tree_size,
             );
         }
 
@@ -371,8 +377,23 @@ pub fn GroupState(comptime P: type) type {
             leaf_sig: [P.sig_len]u8,
             /// Added leaves (for Welcome recipients).
             apply_result: evolution.ProposalApplyResult,
+            /// Path secrets from filtered direct path
+            /// (for Welcome, RFC 9420 §12.4.3.1).
+            path_secrets: [path_mod.max_path_nodes][P.nh]u8,
+            path_secret_count: u32,
+            /// Filtered direct path node indices.
+            fdp_nodes: [path_mod.max_path_nodes]NodeIndex,
+
+            /// Zero path secrets after Welcome construction.
+            pub fn zeroPathSecrets(self: *@This()) void {
+                for (0..self.path_secret_count) |i| {
+                    secureZero(&self.path_secrets[i]);
+                }
+                self.path_secret_count = 0;
+            }
 
             pub fn deinit(self: *@This()) void {
+                self.zeroPathSecrets();
                 self.group_state.deinit();
                 self.* = undefined;
             }
@@ -433,6 +454,9 @@ pub fn GroupState(comptime P: type) type {
                 .welcome_secret = cr.welcome_secret,
                 .leaf_sig = cr.leaf_sig,
                 .apply_result = cr.apply_result,
+                .path_secrets = cr.path_secrets,
+                .path_secret_count = cr.path_secret_count,
+                .fdp_nodes = cr.fdp_nodes,
             };
         }
 
