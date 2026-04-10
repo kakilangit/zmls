@@ -23,6 +23,11 @@ All notable changes to this project will be documented in this file.
   commit share the same credential identity. Two KeyPackages with
   different keys but the same credential are rejected. Previously only
   key uniqueness was checked.
+- **validateSenderLeafIndex checks non-blank per RFC 9420 §6.3.2** --
+  `validateSenderLeafIndex` now takes the tree's nodes slice and verifies
+  that the sender's leaf is non-blank (occupied by an active member).
+  Returns `error.BlankNode` for blank sender leaves. Previously only
+  bounds were checked.
 - **Welcome path_secret per RFC 9420 §12.4.3.1** -- `buildWelcome` now
   computes and includes the per-member `path_secret` in GroupSecrets.
   Previously hardcoded to `null`, new members can now receive the path

@@ -337,6 +337,7 @@ pub fn MessageProtect(comptime P: type) type {
             zmls.validateSenderLeafIndex(
                 sender_data,
                 group_state.leafCount(),
+                group_state.tree.nodes,
             ) catch return error.InvalidSender;
 
             const decrypted = forwardRatchetAndDecrypt(
