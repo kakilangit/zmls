@@ -806,3 +806,48 @@ test "GREASE capabilities survive LeafNode encode/decode" {
     }
     try testing.expect(found_cred);
 }
+
+test "validate rejects leaf without mls10 in versions" {
+    const leaf = LeafNode{
+        .encryption_key = &.{},
+        .signature_key = &.{},
+        .credential = .{
+            .tag = .basic,
+            .payload = .{ .basic = &.{} },
+        },
+        .capabilities = .{
+            .versions = &.{}, // missing mls10
+            .cipher_suites = &.{
+                .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+            },
+            .extensions = &.{},
+            .proposals = &.{},
+            .credentials = &.{.basic},
+        },
+        .source = .key_package,
+        .extensions = &.{},
+        .signature = &.{},
+        .lifetime = null,
+        .parent_hash = null,
+    };
+    const result = leaf.validate(
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        null,
+    );
+    try testing.expectError(error.InvalidLeafNode, result);
+}
+
+test "validateEncryptionKey rejects invalid HPKE key" {
+    // A valid-length but all-zero key is invalid for X25519.
+    const zero_key = [_]u8{0x00} ** Default.npk;
+    const leaf = testLeaf(.key_package, &zero_key, &.{});
+    const result = leaf.validateEncryptionKey(Default);
+    try testing.expectError(error.InvalidPublicKey, result);
+}
+
+test "validateEncryptionKey rejects wrong-length key" {
+    const short_key = [_]u8{0x01} ** 16; // too short
+    const leaf = testLeaf(.key_package, &short_key, &.{});
+    const result = leaf.validateEncryptionKey(Default);
+    try testing.expectError(error.InvalidPublicKey, result);
+}

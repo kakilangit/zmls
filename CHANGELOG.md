@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.1.2] - 2026-04-10
 
 ### Fixed
 
@@ -56,10 +56,6 @@ All notable changes to this project will be documented in this file.
   `KeyPackage.validate` now checks that the leaf node's
   `capabilities.versions` contains `mls10` per RFC 9420
   §10.1 and §7.2.
-
-## [0.1.2] - 2026-04-10
-
-### Fixed
 
 - **PublicMessage membership tag validation** -- reject invalid-length
   membership tags on decode instead of silently setting to null.

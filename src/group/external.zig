@@ -1323,3 +1323,58 @@ fn validateExternalProposals(
     if (ext_init_count != 1) return error.InvalidProposalList;
     if (remove_count > 1) return error.InvalidProposalList;
 }
+
+// -- Inline tests --------------------------------------------------------
+
+const testing = std.testing;
+
+test "validateExternalProposals rejects multiple Removes" {
+    const ext_init = Proposal{
+        .tag = .external_init,
+        .payload = .{
+            .external_init = .{ .kem_output = &.{} },
+        },
+    };
+    const remove1 = Proposal{
+        .tag = .remove,
+        .payload = .{ .remove = .{ .removed = 0 } },
+    };
+    const remove2 = Proposal{
+        .tag = .remove,
+        .payload = .{ .remove = .{ .removed = 1 } },
+    };
+    const proposals = [_]Proposal{ ext_init, remove1, remove2 };
+    const result = validateExternalProposals(&proposals);
+    try testing.expectError(
+        error.InvalidProposalList,
+        result,
+    );
+}
+
+test "validateExternalProposals accepts single Remove" {
+    const ext_init = Proposal{
+        .tag = .external_init,
+        .payload = .{
+            .external_init = .{ .kem_output = &.{} },
+        },
+    };
+    const remove = Proposal{
+        .tag = .remove,
+        .payload = .{ .remove = .{ .removed = 0 } },
+    };
+    const proposals = [_]Proposal{ ext_init, remove };
+    try validateExternalProposals(&proposals);
+}
+
+test "validateExternalProposals rejects missing ExternalInit" {
+    const remove = Proposal{
+        .tag = .remove,
+        .payload = .{ .remove = .{ .removed = 0 } },
+    };
+    const proposals = [_]Proposal{remove};
+    const result = validateExternalProposals(&proposals);
+    try testing.expectError(
+        error.InvalidProposalList,
+        result,
+    );
+}

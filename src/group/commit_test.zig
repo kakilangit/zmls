@@ -2771,3 +2771,48 @@ test "epochAuthenticator changes across epochs" {
     // Must differ.
     try testing.expect(!std.mem.eql(u8, &ea0, &ea1));
 }
+
+test "createCommit single-member empty commit succeeds without path" {
+    // RFC 9420 §12.2: In a single-leaf tree the filtered direct
+    // path is empty, so path derivation produces zero commit_secret
+    // and no UpdatePath. An empty commit still advances the epoch.
+    const alloc = testing.allocator;
+    var tg: TestGroup = undefined;
+    try tg.init(alloc);
+    defer tg.deinit();
+
+    // Ensure this is truly a single-member group.
+    try testing.expectEqual(@as(u32, 1), tg.gs.leafCount());
+
+    // Empty proposal list — no path needed for single-leaf.
+    const proposals = [_]Proposal{};
+
+    var cr = try createCommit(
+        Default,
+        alloc,
+        &tg.gs.group_context,
+        &tg.gs.tree,
+        tg.gs.my_leaf_index,
+        &proposals,
+        &tg.sign_sk,
+        &tg.gs.interim_transcript_hash,
+        &tg.gs.epoch_secrets.init_secret,
+        null, // no PathParams
+        null, // no PskResolver
+        .mls_public_message,
+    );
+    defer cr.tree.deinit();
+    defer cr.deinit(alloc);
+
+    // Epoch should advance.
+    try testing.expectEqual(
+        @as(u64, 1),
+        cr.new_epoch,
+    );
+
+    // No path secrets (empty filtered direct path).
+    try testing.expectEqual(
+        @as(u32, 0),
+        cr.path_secret_count,
+    );
+}

@@ -467,3 +467,25 @@ test "global max_vec_length is 1 MiB" {
         max_vec_length,
     );
 }
+
+test "encodeVarVector rejects oversized data" {
+    // Create a slice that claims to be larger than max_vec_length.
+    // We can't actually allocate 1 MiB+ on the stack, but we can
+    // test via a pointer-length pair using a small backing buffer
+    // with an artificially large slice.
+    var buf: [64]u8 = undefined;
+    // Use max_vec_length + 1 as input length via a 0-byte slice
+    // trick: Zig slices carry length, so we cast to get an
+    // oversized length.
+    const big_len: usize = max_vec_length + 1;
+    // Build a slice with length > max_vec_length. The backing
+    // memory doesn't matter since encodeVarVector checks length
+    // before reading any data.
+    var dummy: [1]u8 = .{0};
+    const oversized: []const u8 = @as(
+        [*]const u8,
+        &dummy,
+    )[0..big_len];
+    const result = encodeVarVector(&buf, 0, oversized);
+    try testing.expectError(error.VectorTooLarge, result);
+}

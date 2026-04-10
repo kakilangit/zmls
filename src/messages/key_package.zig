@@ -778,3 +778,69 @@ test "last_resort_extension encodes empty data" {
         last_resort_extension.data.len,
     );
 }
+
+test "KeyPackage validate rejects invalid init_key" {
+    var t = try makeTestKeyPackage();
+    try fixTestKeyPackage(&t);
+
+    // Replace init_key with all-zeros (invalid for X25519).
+    t.init_pk = [_]u8{0x00} ** Default.npk;
+    t.kp.init_key = &t.init_pk;
+
+    // Re-sign after mutation.
+    try t.kp.signKeyPackage(Default, &t.sign_sk, &t.sig_buf);
+
+    const result = t.kp.validate(
+        Default,
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        null,
+    );
+    try testing.expectError(error.InvalidKeyPackage, result);
+}
+
+test "KeyPackage validate rejects extension not in capabilities" {
+    var t = try makeTestKeyPackage();
+    try fixTestKeyPackage(&t);
+
+    // Add a non-default extension (0xBEEF) to KeyPackage but NOT
+    // to leaf_node.capabilities.extensions.
+    const beef_ext: types.ExtensionType = @enumFromInt(0xBEEF);
+    const ext = Extension{
+        .extension_type = beef_ext,
+        .data = &.{},
+    };
+    const exts = [_]Extension{ext};
+    t.kp.extensions = &exts;
+
+    // Re-sign after mutation.
+    try t.kp.signKeyPackage(Default, &t.sign_sk, &t.sig_buf);
+
+    const result = t.kp.validate(
+        Default,
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        null,
+    );
+    try testing.expectError(error.InvalidKeyPackage, result);
+}
+
+test "KeyPackage validate rejects missing mls10 in capabilities" {
+    var t = try makeTestKeyPackage();
+    try fixTestKeyPackage(&t);
+
+    // Override capabilities.versions to exclude mls10.
+    const empty_versions = [_]ProtocolVersion{};
+    t.kp.leaf_node.capabilities.versions = &empty_versions;
+
+    // Re-sign after mutation.
+    try t.kp.signKeyPackage(Default, &t.sign_sk, &t.sig_buf);
+
+    // LeafNode.validate (step 6) catches this first as
+    // InvalidLeafNode. The KeyPackage-level check (step 10)
+    // is a defense-in-depth backstop.
+    const result = t.kp.validate(
+        Default,
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        null,
+    );
+    try testing.expectError(error.InvalidLeafNode, result);
+}

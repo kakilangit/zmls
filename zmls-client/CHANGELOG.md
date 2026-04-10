@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.1.1] - 2026-04-10
 
 ### Fixed
 
@@ -12,11 +12,6 @@ All notable changes to this project will be documented in this file.
 - **joinGroup adapts to WelcomeJoinResult** -- `joinGroup` now handles
   the `WelcomeJoinResult` return type from `joinViaWelcome`, extracting
   the group state from the result.
-
-## [0.1.1] - 2026-04-10
-
-### Fixed
-
 - **Proposal cache on failed commit** -- `commitPending` no longer
   clears cached proposals when the commit fails. Proposals are only
   cleared on the success path.
