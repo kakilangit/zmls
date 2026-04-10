@@ -4,51 +4,117 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-04-10
+
 ### Fixed
 
-- **CipherSuite IANA compliance** -- aligned enum values 0x0004–0x0007
+- **PublicMessage membership tag validation** -- reject invalid-length
+  membership tags on decode instead of silently setting to null.
+  Encode now errors when a member sender has no tag.
+- **MLSMessage protocol version validation** -- reject unsupported
+  protocol versions on decode; encode uses unconditional check
+  instead of debug-only assert.
+- **X.509 external sender credentials** -- external sender decoding
+  now supports X.509 credentials (previously only Basic).
+- **Secret key zeroing in all backends** -- `defer secureZero` added
+  for KeyPair/SecretKey locals in `sign()` and `signKeypairFromSeed`
+  across all five crypto backends.
+- **HPKE exporter_secret zeroing** -- `sealBase`/`openBase` now zero
+  the unused `exporter_secret` via `defer secureZero`.
+- **CryptoProvider signature validation** -- `assertValid` now
+  validates function signatures (parameter counts, return types) and
+  all required constants (`nt`, `npk`, `nsk`, `sign_pk_len`,
+  `sign_sk_len`, `sig_len`, `seed_len`).
+- **P-384 native 48-byte seeds** -- seed size changed from 32 to 48
+  bytes for P-384 backends, matching 192-bit security level.
+  `encapDeterministic` accepts suite-appropriate seed sizes.
+- **Epoch overflow** -- returns `error.EpochOverflow` instead of
+  `@panic` at u64 boundary.
+- **GroupState ownership** -- `buildWelcomeGroupState` clones
+  `group_id` and `extensions` to avoid dangling pointers.
+- **truncateTree invariant** -- on allocation failure, preserves
+  original `leaf_count` to maintain `nodes.len == nodeWidth(leaf_count)`.
+- **OutOfMemory propagation** -- `OutOfMemory` no longer erased to
+  `IndexOutOfRange` in `hashes.zig` and `path.zig`.
+- **resolveWelcomePskSecret** -- returns error union instead of
+  optional null for consistency with `resolvePskSecret`.
+- **CipherSuite IANA compliance** -- aligned enum values 0x0004--0x0007
   with the IANA MLS Cipher Suites registry. P-384/AES-256 moved from
   0x0006 to 0x0007 (correct IANA value). P-256/ChaCha20 moved to
-  private-use value 0xF001. Suites 0x0004–0x0006 now correctly
-  represent X448/Ed448 and P-521 (not implemented).
+  private-use value 0xF001.
 - **DER ECDSA signature support** -- `verifyWithLabel` now accepts
   both IEEE P1363 (raw r||s) and DER-encoded ECDSA signatures,
-  enabling interoperability with other MLS implementations that use
-  DER encoding for P-256/P-384 signatures.
+  enabling interoperability with other MLS implementations.
 
 ### Changed
 
-- **Heap-allocate ValidatedProposals** -- `ValidatedProposals` (~120 KiB)
-  is now heap-allocated instead of stack-allocated.
-  `validateProposalList` takes an allocator parameter and returns
-  `*ValidatedProposals`; callers use `defer validated.destroy(allocator)`
-  for cleanup. Eliminates ~120 KiB of stack pressure per commit
-  operation.
+- **Heap-allocate ValidatedProposals** -- `ValidatedProposals`
+  (~120 KiB) is now heap-allocated. `validateProposalList` takes an
+  allocator parameter and returns `*ValidatedProposals`; callers use
+  `defer validated.destroy(allocator)`.
+- **processCommit/stageCommit opts struct** -- internal 17-parameter
+  functions refactored to accept `ProcessCommitOpts` / context
+  structs.
+- **hasResolution()** -- new bool-returning method avoids allocating
+  256 KiB resolution buffer just to check emptiness.
+- **LeafNode.decode split** -- 123-line decode split into
+  `decodeIdentityFields` and `decodeSourceFields` sub-decoders.
+- **path.zig split** -- extracted `update_path.zig` (wire types +
+  codec) and `path_secrets.zig` (derivation + encryption).
+- **encodeVarPrefixedList** -- generic helper replaces 3 duplicated
+  gap-then-shift encoding patterns.
+- **consumeKey/deriveKeyNonce deduplication** -- `consumeKey` now
+  delegates to `deriveKeyNonce`.
+- **buildConfirmedHash deduplication** -- single shared function
+  replaces identical logic in `commit.zig` and `external.zig`.
+- **encryptContent single-serialize** -- content serialized once with
+  padding appended in-place, eliminating double serialization.
+- **resolution iterative** -- `resolutionInner` converted from
+  recursion to explicit stack per RULES.md.
+- **Cipher suite constants** -- all suites reference provider
+  constants instead of hardcoded magic numbers.
+- **Test extraction** -- 13 test files extracted from source modules
+  to dedicated `*_test.zig` files for cleaner separation.
+
+### Performance
+
+- **treeHash O(n)** -- stride-based level enumeration replaces
+  O(n log n) level-scanning approach.
+- **verifyParentHashes** -- precomputed base tree hashes eliminate
+  redundant O(k x d x width) allocation cost.
 
 ### Added
 
-- **Client PSK support** -- `Client` now accepts an optional
-  `psk_lookup` in `Options` for external PSK resolution. Added
-  `proposeExternalPsk` method for standalone PSK proposals.
-  `PskResolver` is threaded through all commit paths
-  (`commitWithProposals`, `commitWithPath`, `stageCommit`,
-  `inviteMember`) and incoming commit processing
-  (`processPublicCommit`).
-- **Crypto fuzz targets** -- 6 new fuzz targets in `tests/fuzz_crypto.zig`
-  for HPKE seal/open, sign/verify, DeriveKeyPair, and tree hash.
-- **Commit fuzz targets** -- 2 new fuzz targets in `tests/fuzz_commit.zig`
-  for `processCommit` with random proposals and PrivateMessage
-  encrypt/decrypt round-trip with corruption testing.
+- **Crypto fuzz targets** -- 6 new fuzz targets in
+  `tests/fuzz_crypto.zig` for HPKE seal/open, sign/verify,
+  DeriveKeyPair, and tree hash.
+- **Commit fuzz targets** -- 2 new fuzz targets in
+  `tests/fuzz_commit.zig` for `processCommit` with random proposals
+  and PrivateMessage encrypt/decrypt round-trip with corruption.
 - **Add proposal fuzzing** -- `tests/fuzz_proposals.zig` now includes
-  Add proposals with KeyPackage in both codec and validation fuzzing.
+  Add proposals with KeyPackage.
 - **Integration tests** -- 7 new end-to-end tests: PSK through commit
   pipeline, mixed Add+Remove in same commit, concurrent commit
   rejection, GroupContextExtensions proposal, ReInit proposal
-  end-to-end, out-of-order stale-epoch rejection, and group with
-  257 members (>256 leaf tree).
+  end-to-end, out-of-order stale-epoch rejection, and 257-member
+  group.
 - **Multi-suite interop tests** -- PSK, Welcome, and tree-validation
-  test vectors now verified for suites 2 (P-256) and 7 (P-384) in
+  test vectors verified for suites 2 (P-256) and 7 (P-384) in
   addition to suites 1 and 3.
+- **Adversarial tests** -- tampered commit signature, replay
+  protection, forward secrecy verification.
+
+### Documented
+
+- GCE intentional over-restriction vs RFC 9420 (commit.zig).
+- Unknown proposal zero-length body limitation (proposal.zig).
+- `encapDeterministic` seed reuse risk (hpke.zig).
+- `n_secret == nh` coincidence (hpke.zig).
+- Auth verification security contract (auth.zig).
+- `forwardRatchet` lost generation behavior (secret_tree.zig).
+- P-384 non-standard HKDF seed expansion labels (p384.zig).
+- Stack usage for HPKE labeled buffers and EncryptContextBuf.
+- X448/Ed448 and P-521 suites as explicitly out-of-scope (DESIGN.md).
 
 ## [0.1.1] - 2026-04-08
 
