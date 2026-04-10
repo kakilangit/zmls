@@ -29,6 +29,12 @@ All notable changes to this project will be documented in this file.
 - **LeafNode capabilities.versions must include mls10** --
   `LeafNode.validate()` now checks that `capabilities.versions`
   contains `mls10` per RFC 9420 §7.2.
+- **External commit Remove count enforced** --
+  `validateExternalProposals` now enforces at most one Remove
+  proposal in external commits per RFC 9420 §12.4.3.2. Previously
+  multiple Removes were silently accepted. Credential matching
+  between joiner and removed leaf is documented as application-level
+  policy per the RFC.
 
 ## [0.1.2] - 2026-04-10
 

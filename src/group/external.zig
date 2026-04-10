@@ -1293,15 +1293,23 @@ pub fn resolveExternalInlineProposals(
 
 /// Validate that an external commit's proposal list only contains
 /// allowed types per RFC 9420 Section 12.4.3.2: exactly one
-/// ExternalInit, zero or more Removes and PSKs, nothing else.
+/// ExternalInit, at most one Remove, zero or more PSKs,
+/// nothing else.
+///
+/// Credential matching between the joiner's LeafNode and the
+/// removed leaf is application-level policy per RFC 9420
+/// §12.4.3.2 ("acceptable to the application for the removed
+/// participant") and is NOT enforced here.
 fn validateExternalProposals(
     proposals: []const Proposal,
 ) ValidationError!void {
     var ext_init_count: u32 = 0;
+    var remove_count: u32 = 0;
     for (proposals) |*prop| {
         switch (prop.tag) {
             .external_init => ext_init_count += 1,
-            .remove, .psk => {},
+            .remove => remove_count += 1,
+            .psk => {},
             .add,
             .update,
             .reinit,
@@ -1313,4 +1321,5 @@ fn validateExternalProposals(
         }
     }
     if (ext_init_count != 1) return error.InvalidProposalList;
+    if (remove_count > 1) return error.InvalidProposalList;
 }
