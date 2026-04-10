@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] - 2026-04-10
+
+### Fixed
+
+- **Welcome path_secret public key verification per RFC 9420 §12.4.3.1** --
+  `deriveWelcomePathKeys` now verifies that each public key derived from
+  `path_secret` matches the corresponding ratchet tree node's public key
+  using constant-time comparison. Returns `error.PathSecretMismatch` if
+  any derived key disagrees with the tree. Previously the comment stated
+  "verify against tree public keys" but no verification occurred.
+- **LeafNode.encodeTbs rejects key_package without Lifetime** --
+  `encodeTbs` now returns `error.MissingLifetime` when `source` is
+  `.key_package` and `lifetime` is null. RFC §7.2 defines Lifetime as
+  structurally required for key_package source; the decoder always reads
+  it. Previously the encoder silently skipped it, creating encode/decode
+  asymmetry.
+- **Add proposal credential deduplication per RFC 9420 §12.2** --
+  `validateAddsAgainstTree` now checks that no two Add proposals in a
+  commit share the same credential identity. Two KeyPackages with
+  different keys but the same credential are rejected. Previously only
+  key uniqueness was checked.
+- **validateSenderLeafIndex checks non-blank per RFC 9420 §6.3.2** --
+  `validateSenderLeafIndex` now takes the tree's nodes slice and verifies
+  that the sender's leaf is non-blank (occupied by an active member).
+  Returns `error.BlankNode` for blank sender leaves. Previously only
+  bounds were checked.
+- **generateCommitPath handles empty filtered direct path** --
+  `generateCommitPath` now pre-checks the filtered direct path length
+  before attempting derivation. When `path_params` is provided but the
+  post-proposal tree has only one non-blank leaf (e.g. after removing
+  all other members), the function returns an empty path result instead
+  of propagating `EmptyTree` from `derivePathKeys`.
+- **encodeVarPrefixedList enforces max_vec_length** --
+  `encodeVarPrefixedList` now checks the total serialized inner length
+  against `max_vec_length` (1 MiB), returning `error.VectorTooLarge`
+  if exceeded. Previously only the decoder enforced this limit.
+
+### Documented
+
+- **max_vec_length intentional deviation** -- expanded doc comment on
+  `max_vec_length` explaining that the 1 MiB limit is an intentional
+  security hardening choice versus RFC 9420 §6's 2^30-1 maximum, and
+  that deployments with large payloads may need to increase it.
+
 ## [0.1.2] - 2026-04-10
 
 ### Fixed

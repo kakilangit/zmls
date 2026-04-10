@@ -1,6 +1,6 @@
 .{
     .name = .zmls_client,
-    .version = "0.1.1",
+    .version = "0.1.2",
     .fingerprint = 0x6880ec30d166116a,
     .minimum_zig_version = "0.16.0-dev.3039+b490412cd",
     .dependencies = .{

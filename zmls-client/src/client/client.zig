@@ -69,22 +69,22 @@ pub fn Client(comptime P: type) type {
         /// In-memory cache of serialized group bundles.
         /// Keyed by group_id. Eliminates GroupStore I/O
         /// for repeated loads of the same group.
-        const BlobCache = struct {
+        pub const BlobCache = struct {
             /// Maximum cached entries. Oldest entry is
             /// evicted when capacity is reached.
-            const max_entries: u32 = 16;
+            pub const max_entries: u32 = 16;
 
             map: std.StringArrayHashMapUnmanaged([]u8),
             alloc: Allocator,
 
-            fn init(allocator: Allocator) BlobCache {
+            pub fn init(allocator: Allocator) BlobCache {
                 return .{
                     .map = .empty,
                     .alloc = allocator,
                 };
             }
 
-            fn deinit(self: *BlobCache) void {
+            pub fn deinit(self: *BlobCache) void {
                 var it = self.map.iterator();
                 while (it.next()) |e| {
                     secureZeroSlice(e.value_ptr.*);
@@ -96,13 +96,13 @@ pub fn Client(comptime P: type) type {
 
             /// Look up a cached blob. Returns a borrowed
             /// slice (valid until the next put/evict).
-            fn get(self: *BlobCache, gid: []const u8) ?[]const u8 {
+            pub fn get(self: *BlobCache, gid: []const u8) ?[]const u8 {
                 return self.map.get(gid);
             }
 
             /// Insert or replace a blob for a group.
             /// The cache takes ownership of a copy.
-            fn put(
+            pub fn put(
                 self: *BlobCache,
                 gid: []const u8,
                 blob: []const u8,
@@ -128,7 +128,7 @@ pub fn Client(comptime P: type) type {
                     secureZeroSlice(vals[0]);
                     self.alloc.free(vals[0]);
                     self.alloc.free(keys[0]);
-                    self.map.swapRemoveAt(0);
+                    self.map.orderedRemoveAt(0);
                 }
 
                 const key = self.alloc.dupe(
@@ -339,6 +339,7 @@ pub fn Client(comptime P: type) type {
             GroupNotFound,
             BundleDeserializeFailed,
             CommitFailed,
+            KeyGenerationFailed,
         };
 
         // ────────────────────────────────────────────────
@@ -1743,7 +1744,10 @@ pub fn Client(comptime P: type) type {
             ) catch |err| return err;
 
             // Clear proposals only after successful commit.
-            self.proposal_store.clearGroup(group_id);
+            self.proposal_store.clearGroup(
+                allocator,
+                group_id,
+            );
 
             return wire_bytes;
         }
@@ -1763,6 +1767,9 @@ pub fn Client(comptime P: type) type {
             allocator: Allocator,
             confirmed: bool,
             staged_epoch: u64,
+            /// Encryption secret key for the new leaf
+            /// (set when an UpdatePath was generated).
+            staged_enc_sk: ?[P.nsk]u8,
 
             pub fn deinit(
                 self_h: *StagedCommitHandle,
@@ -1771,6 +1778,9 @@ pub fn Client(comptime P: type) type {
                 // after confirm (which serializes to store),
                 // the in-memory structs still own heap
                 // allocations that must be freed.
+                if (self_h.staged_enc_sk) |*sk| {
+                    secureZeroSlice(sk);
+                }
                 self_h.staged_group_state.deinit();
                 self_h.staged_secret_tree.deinit(
                     self_h.allocator,
@@ -1788,12 +1798,12 @@ pub fn Client(comptime P: type) type {
             }
 
             pub const ConfirmError = GroupStore.Error ||
-                error{
-                    BundleSerializeFailed,
-                    BundleDeserializeFailed,
-                    GroupNotFound,
-                    ConflictingCommit,
-                };
+                KS.Error || error{
+                BundleSerializeFailed,
+                BundleDeserializeFailed,
+                GroupNotFound,
+                ConflictingCommit,
+            };
 
             /// Persist the staged state, advancing the
             /// group to the new epoch. Returns
@@ -1823,6 +1833,22 @@ pub fn Client(comptime P: type) type {
                     &self_h.staged_group_state,
                     &self_h.staged_secret_tree,
                 );
+
+                // Persist the new leaf encryption key when
+                // an UpdatePath was generated.
+                if (self_h.staged_enc_sk) |*sk| {
+                    const idx = @intFromEnum(
+                        self_h.staged_group_state
+                            .my_leaf_index,
+                    );
+                    try client.key_store.storeEncryptionKey(
+                        io,
+                        self_h.group_id,
+                        idx,
+                        sk,
+                    );
+                }
+
                 self_h.confirmed = true;
             }
 
@@ -1844,6 +1870,10 @@ pub fn Client(comptime P: type) type {
         /// Returns a `StagedCommitHandle` containing the
         /// commit bytes and the staged group state. Call
         /// `confirm` to persist or `discard` to abandon.
+        ///
+        /// Automatically generates an UpdatePath when
+        /// required by the proposal set (Update, Remove,
+        /// GCE, or empty commit in multi-member groups).
         pub fn stageCommit(
             self: *Self,
             allocator: Allocator,
@@ -1859,6 +1889,20 @@ pub fn Client(comptime P: type) type {
             );
             defer bundle.deinit(self.allocator);
 
+            var pp_ctx = buildPathContext(
+                self,
+                allocator,
+                io,
+                &bundle.group_state,
+            ) catch |e| return e;
+            defer pp_ctx.deinit(allocator);
+
+            // Fix up leaf_secret pointer after struct copy.
+            if (pp_ctx.params != null) {
+                pp_ctx.params.?.leaf_secret =
+                    &pp_ctx.leaf_secret;
+            }
+
             var commit_output = bundle.group_state.commit(
                 allocator,
                 .{
@@ -1867,14 +1911,112 @@ pub fn Client(comptime P: type) type {
                     .psk_resolver = self.buildPskResolver(
                         &bundle.group_state,
                     ),
+                    .path_params = pp_ctx.params,
                 },
             ) catch return error.CommitFailed;
             errdefer commit_output.deinit();
 
-            const wire_bytes = encodeCommitAsWireMessage(
+            return buildStagedHandle(
                 allocator,
+                group_id,
                 &bundle.group_state,
                 &commit_output,
+                pp_ctx.enc_sk,
+            );
+        }
+
+        /// Ephemeral context for UpdatePath generation.
+        /// Holds borrowed eph_seeds and leaf_secret that
+        /// must outlive the commit() call.
+        const PathContext = struct {
+            params: ?zmls.PathParams(P),
+            enc_sk: ?[P.nsk]u8,
+            eph_seeds: [][P.seed_len]u8,
+            leaf_secret: [P.nh]u8,
+
+            fn deinit(
+                self: *PathContext,
+                allocator: Allocator,
+            ) void {
+                secureZeroSlice(&self.leaf_secret);
+                allocator.free(self.eph_seeds);
+                self.* = undefined;
+            }
+        };
+
+        fn buildPathContext(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            gs: *const GS,
+        ) StageCommitError!PathContext {
+            if (gs.leafCount() <= 1) {
+                return .{
+                    .params = null,
+                    .enc_sk = null,
+                    .eph_seeds = &.{},
+                    .leaf_secret = .{0} ** P.nh,
+                };
+            }
+
+            const enc_kp = generateDhKeypair(
+                io,
+            ) catch return error.KeyGenerationFailed;
+
+            var new_leaf = buildLeafNode(
+                self,
+                &enc_kp.pk,
+            );
+            new_leaf.source = .commit;
+
+            var leaf_secret: [P.nh]u8 = undefined;
+            io.randomSecure(&leaf_secret) catch
+                return error.KeyGenerationFailed;
+
+            const eph_count = countEphSeedsForLeaf(
+                &gs.tree,
+                gs.my_leaf_index,
+            ) catch return error.CommitFailed;
+
+            const eph_seeds = allocator.alloc(
+                [P.seed_len]u8,
+                eph_count,
+            ) catch return error.OutOfMemory;
+            errdefer allocator.free(eph_seeds);
+
+            for (eph_seeds) |*s| {
+                io.randomSecure(s) catch
+                    return error.KeyGenerationFailed;
+            }
+
+            var ctx: PathContext = .{
+                .params = undefined,
+                .enc_sk = enc_kp.sk,
+                .eph_seeds = eph_seeds,
+                .leaf_secret = leaf_secret,
+            };
+            // leaf_secret pointer is fixed up by caller
+            // after struct copy to avoid dangling pointer.
+            ctx.params = .{
+                .allocator = allocator,
+                .new_leaf = new_leaf,
+                .leaf_secret = undefined,
+                .eph_seeds = ctx.eph_seeds,
+            };
+            return ctx;
+        }
+
+        fn buildStagedHandle(
+            allocator: Allocator,
+            group_id: []const u8,
+            old_gs: *const GS,
+            commit_output: *GS.CommitOutput,
+            enc_sk: ?[P.nsk]u8,
+        ) StageCommitError!StagedCommitHandle {
+            const wire_bytes = encodeCommitAsWireMessage(
+                allocator,
+                old_gs,
+                commit_output,
             ) catch return error.CommitFailed;
             errdefer allocator.free(wire_bytes);
 
@@ -1884,11 +2026,7 @@ pub fn Client(comptime P: type) type {
             ) catch return error.CommitFailed;
             errdefer secret_tree.deinit(allocator);
 
-            // Record epoch at staging time for conflict
-            // detection in confirm().
-            const staged_epoch = bundle.group_state.epoch();
-
-            // Move ownership of staged state to handle.
+            const staged_epoch = old_gs.epoch();
             const gs = commit_output.group_state;
             commit_output.group_state = undefined;
 
@@ -1906,6 +2044,7 @@ pub fn Client(comptime P: type) type {
                 .allocator = allocator,
                 .confirmed = false,
                 .staged_epoch = staged_epoch,
+                .staged_enc_sk = enc_sk,
             };
         }
 
@@ -1951,6 +2090,7 @@ pub fn Client(comptime P: type) type {
                 ref,
                 proposal.*,
                 sender,
+                false,
             ) catch return error.ProposalCacheFailed;
 
             return encoded.wire_bytes;
@@ -2322,6 +2462,7 @@ pub fn Client(comptime P: type) type {
                 ),
                 .proposal => self.processPublicProposal(
                     allocator,
+                    io,
                     group_id,
                     wire_bytes,
                 ),
@@ -2437,7 +2578,10 @@ pub fn Client(comptime P: type) type {
             result.deinit();
 
             // Clear stored proposals — epoch advanced.
-            self.proposal_store.clearGroup(group_id);
+            self.proposal_store.clearGroup(
+                allocator,
+                group_id,
+            );
 
             return .{ .commit_applied = commit_applied };
         }
@@ -2445,6 +2589,7 @@ pub fn Client(comptime P: type) type {
         fn processPublicProposal(
             self: *Self,
             allocator: Allocator,
+            io: Io,
             group_id: []const u8,
             wire_bytes: []const u8,
         ) ProcessIncomingError!ProcessingResult {
@@ -2452,6 +2597,61 @@ pub fn Client(comptime P: type) type {
                 allocator,
                 wire_bytes,
             ) catch return error.WireDecodeFailed;
+
+            // Load group state for cryptographic verification.
+            var bundle = try self.loadBundle(io, group_id);
+            defer bundle.deinit(self.allocator);
+
+            const fc = &decoded.framed_content;
+            const sender = fc.sender;
+
+            // Verify sender is a valid group member.
+            if (sender.sender_type == .member) {
+                const sender_leaf = zmls.types.LeafIndex
+                    .fromU32(sender.leaf_index);
+                const leaf = bundle.group_state.tree
+                    .getLeaf(sender_leaf) catch
+                    return error.WireDecodeFailed;
+                if (leaf == null)
+                    return error.WireDecodeFailed;
+
+                const sig_key = leaf.?.signature_key;
+                if (sig_key.len != P.sign_pk_len)
+                    return error.WireDecodeFailed;
+
+                // Verify signature per RFC 9420 §6.1.
+                var gc_buf: [max_group_context_encode]u8 =
+                    undefined;
+                const gc_bytes = bundle.group_state
+                    .serializeContext(&gc_buf) catch
+                    return error.WireDecodeFailed;
+
+                zmls.verifyFramedContent(
+                    P,
+                    fc,
+                    .mls_public_message,
+                    gc_bytes,
+                    sig_key[0..P.sign_pk_len],
+                    &decoded.auth,
+                ) catch return error.WireDecodeFailed;
+
+                // Verify membership tag per RFC 9420 §6.2.
+                if (decoded.membership_tag) |*tag| {
+                    zmls.public_msg.verifyMembershipTag(
+                        P,
+                        &bundle.group_state.epoch_secrets
+                            .membership_key,
+                        fc,
+                        &decoded.auth,
+                        tag,
+                        gc_bytes,
+                    ) catch
+                        return error.WireDecodeFailed;
+                } else {
+                    // Member proposals require a tag.
+                    return error.WireDecodeFailed;
+                }
+            }
 
             // Build AuthenticatedContent for ref hash.
             const auth_content = buildProposalAuthContent(
@@ -2465,7 +2665,7 @@ pub fn Client(comptime P: type) type {
                 auth_content.slice(),
             );
 
-            const sender = zmls.Sender{
+            const cached_sender = zmls.Sender{
                 .sender_type = decoded.framed_content
                     .sender.sender_type,
                 .leaf_index = decoded.framed_content
@@ -2476,7 +2676,8 @@ pub fn Client(comptime P: type) type {
                 group_id,
                 ref,
                 decoded.proposal,
-                sender,
+                cached_sender,
+                true,
             ) catch return error.WireDecodeFailed;
 
             return .{ .proposal_cached = .{
@@ -2651,7 +2852,10 @@ pub fn Client(comptime P: type) type {
             self: *Self,
             group_id: []const u8,
         ) void {
-            self.proposal_store.clearGroup(group_id);
+            self.proposal_store.clearGroup(
+                self.allocator,
+                group_id,
+            );
         }
 
         /// Evict a group's cached bundle blob, forcing the
@@ -2806,6 +3010,7 @@ pub fn Client(comptime P: type) type {
             framed_content: zmls.FramedContent,
             auth: Auth,
             proposal: zmls.Proposal,
+            membership_tag: ?[P.nh]u8,
         };
 
         /// Decode a proposal from wire bytes.
@@ -2844,6 +3049,7 @@ pub fn Client(comptime P: type) type {
                 .framed_content = fc,
                 .auth = decoded.value.auth,
                 .proposal = prop_decoded.value,
+                .membership_tag = decoded.value.membership_tag,
             };
         }
 

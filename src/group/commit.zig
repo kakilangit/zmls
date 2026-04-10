@@ -1380,6 +1380,19 @@ fn generateCommitPath(
         return error.MissingPath;
     };
 
+    // Check for an empty filtered direct path. This occurs
+    // when only one non-blank leaf remains (e.g. after
+    // removing all other members). The path is vacuously
+    // satisfied — no parent nodes need updating.
+    var fp_buf: [path_mod.max_path_nodes]NodeIndex = undefined;
+    var fc_buf: [path_mod.max_path_nodes]NodeIndex = undefined;
+    const fdp = new_tree.filteredDirectPath(
+        my_leaf,
+        &fp_buf,
+        &fc_buf,
+    ) catch return error.MissingPath;
+    if (fdp.path.len == 0) return result;
+
     // a. Derive path secrets and public keys.
     var derived = try path_mod.derivePathKeys(
         P,

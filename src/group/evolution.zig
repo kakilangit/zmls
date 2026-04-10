@@ -46,6 +46,9 @@ const CredentialType = types.CredentialType;
 const Extension = node_mod.Extension;
 const Capabilities = node_mod.Capabilities;
 const LeafNode = node_mod.LeafNode;
+const Credential = @import(
+    "../credential/credential.zig",
+).Credential;
 const RatchetTree = ratchet_tree_mod.RatchetTree;
 const Proposal = proposal_mod.Proposal;
 const Add = proposal_mod.Add;
@@ -515,6 +518,14 @@ pub fn validateAddsAgainstTree(
 
         // Check init key uniqueness among other Adds.
         try checkInitKeyUniqueness(adds, kp.init_key);
+
+        // RFC §12.2: "It MUST NOT contain multiple Add
+        // proposals that apply to the same client." Identity
+        // is determined by the credential.
+        try checkAddCredentialUniqueness(
+            adds,
+            &kp.leaf_node.credential,
+        );
     }
 }
 
@@ -594,6 +605,61 @@ fn checkAddKeyUniqueness(
     }
     if (ek_count > 1) return error.InvalidKeyPackage;
     if (sk_count > 1) return error.InvalidKeyPackage;
+}
+
+/// RFC §12.2: "It MUST NOT contain multiple Add proposals that
+/// apply to the same client." Identity is determined by the
+/// credential (type + payload). Two Adds with the same identity
+/// but different keys are still a duplicate.
+fn checkAddCredentialUniqueness(
+    adds: []const Add,
+    cred: *const Credential,
+) ValidationError!void {
+    var count: u32 = 0;
+    for (adds) |*add| {
+        if (credentialsEqual(
+            cred,
+            &add.key_package.leaf_node.credential,
+        )) {
+            count += 1;
+        }
+    }
+    if (count > 1) return error.InvalidKeyPackage;
+}
+
+/// Compare two credentials by type and payload bytes.
+fn credentialsEqual(
+    a: *const Credential,
+    b: *const Credential,
+) bool {
+    if (a.tag != b.tag) return false;
+    return switch (a.tag) {
+        .basic => std.mem.eql(
+            u8,
+            a.payload.basic,
+            b.payload.basic,
+        ),
+        else => blk: {
+            // For X.509 and unknown types, encode both and
+            // compare. Use stack buffers sized for typical
+            // credentials.
+            var buf_a: [4096]u8 = undefined;
+            var buf_b: [4096]u8 = undefined;
+            const end_a = a.encode(
+                &buf_a,
+                0,
+            ) catch break :blk false;
+            const end_b = b.encode(
+                &buf_b,
+                0,
+            ) catch break :blk false;
+            break :blk std.mem.eql(
+                u8,
+                buf_a[0..end_a],
+                buf_b[0..end_b],
+            );
+        },
+    };
 }
 
 // -- validateUpdatesAgainstTree ----------------------------------------------

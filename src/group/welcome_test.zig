@@ -1885,6 +1885,179 @@ test "Welcome without path has zero path keys" {
     );
 }
 
+test "Welcome rejects corrupted path_secret" {
+    // Verifies RFC 9420 §12.4.3.1: derived public keys from
+    // path_secret must match the tree's node public keys.
+    // A tampered path_secret derives different keys, so
+    // processWelcome must return PathSecretMismatch.
+    const alloc = testing.allocator;
+    const PathParams = commit_mod.PathParams;
+
+    // --- Alice keys ---
+    const alice_kp = try Default.signKeypairFromSeed(
+        &testSeed(0xA0),
+    );
+    const alice_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0xA1),
+    );
+
+    // --- Create group with Alice ---
+    var gs = try createGroup(
+        Default,
+        alloc,
+        "path-secret-tamper",
+        makeTestLeafWithKeys(&alice_enc.pk, &alice_kp.pk),
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &.{},
+    );
+    defer gs.deinit();
+
+    // --- Add Bob (no path) => 2-member tree, epoch 1 ---
+    var bob_tkp: TestKP = undefined;
+    try bob_tkp.init(0xB0, 0xBB, 0xB2);
+
+    const add_bob = Proposal{
+        .tag = .add,
+        .payload = .{
+            .add = .{ .key_package = bob_tkp.kp },
+        },
+    };
+    const bob_proposals = [_]Proposal{add_bob};
+
+    var cr1 = try createCommit(
+        Default,
+        alloc,
+        &gs.group_context,
+        &gs.tree,
+        gs.my_leaf_index,
+        &bob_proposals,
+        &alice_kp.sk,
+        &gs.interim_transcript_hash,
+        &gs.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr1.tree.deinit();
+    defer cr1.deinit(alloc);
+
+    // --- Remove Bob + Add Carol (requires path) ---
+    var carol_tkp: TestKP = undefined;
+    try carol_tkp.init(0xC0, 0xCC, 0xC2);
+
+    const remove_bob = Proposal{
+        .tag = .remove,
+        .payload = .{
+            .remove = .{ .removed = 1 },
+        },
+    };
+    const add_carol = Proposal{
+        .tag = .add,
+        .payload = .{
+            .add = .{ .key_package = carol_tkp.kp },
+        },
+    };
+    const proposals = [_]Proposal{ remove_bob, add_carol };
+
+    const new_alice_leaf = makeTestLeafWithKeys(
+        &alice_enc.pk,
+        &alice_kp.pk,
+    );
+
+    const leaf_secret = [_]u8{0xF0} ** Default.nh;
+    const eph_seeds = [_][32]u8{
+        [_]u8{0xE1} ** 32,
+    };
+
+    const pp: PathParams(Default) = .{
+        .allocator = alloc,
+        .new_leaf = new_alice_leaf,
+        .leaf_secret = &leaf_secret,
+        .eph_seeds = &eph_seeds,
+    };
+
+    var cr2 = try createCommit(
+        Default,
+        alloc,
+        &cr1.group_context,
+        &cr1.tree,
+        gs.my_leaf_index,
+        &proposals,
+        &alice_kp.sk,
+        &cr1.interim_transcript_hash,
+        &cr1.epoch_secrets.init_secret,
+        pp,
+        null,
+        .mls_public_message,
+    );
+    defer cr2.tree.deinit();
+    defer cr2.deinit(alloc);
+
+    try testing.expect(cr2.path_secret_count > 0);
+
+    // --- Build Welcome with TAMPERED path_secrets ---
+    var gc_buf: [max_gc_encode]u8 = undefined;
+    const gc_bytes = try cr2.group_context.serialize(&gc_buf);
+
+    var kp_buf: [4096]u8 = undefined;
+    const kp_end = try carol_tkp.kp.encode(&kp_buf, 0);
+    const kp_ref = primitives.refHash(
+        Default,
+        "MLS 1.0 KeyPackage Reference",
+        kp_buf[0..kp_end],
+    );
+
+    // Tamper: flip every byte in the first path_secret.
+    var bad_secrets = cr2.path_secrets;
+    for (&bad_secrets[0]) |*b| b.* ^= 0xFF;
+
+    const eph_seed = [_]u8{0xDD} ** 32;
+    const nm = [_]NewMemberEntry(Default){.{
+        .kp_ref = &kp_ref,
+        .init_pk = &carol_tkp.init_pk,
+        .eph_seed = &eph_seed,
+        .leaf_index = LeafIndex.fromU32(1),
+    }};
+
+    var wr = try buildWelcome(
+        Default,
+        alloc,
+        gc_bytes,
+        &cr2.confirmation_tag,
+        &cr2.welcome_secret,
+        &cr2.joiner_secret,
+        &alice_kp.sk,
+        0,
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &nm,
+        &.{},
+        &bad_secrets,
+        cr2.path_secret_count,
+        &cr2.fdp_nodes,
+        cr2.tree.leaf_count,
+    );
+    defer wr.deinit(alloc);
+
+    // Carol processes — should fail because derived public
+    // keys won't match the tree.
+    const result = processWelcome(
+        Default,
+        alloc,
+        &wr.welcome,
+        &kp_ref,
+        &carol_tkp.init_sk,
+        &carol_tkp.init_pk,
+        &alice_kp.pk,
+        .{ .prebuilt = cr2.tree },
+        LeafIndex.fromU32(1),
+        null,
+    );
+    try testing.expectError(
+        error.PathSecretMismatch,
+        result,
+    );
+}
+
 test "verifyParentHashes rejects tampered tree in welcome context" {
     const alloc = testing.allocator;
 

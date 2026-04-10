@@ -17,7 +17,7 @@ const errors = @import("../common/errors.zig");
 const DecodeError = errors.DecodeError;
 const max_vec_length = @import("../common/types.zig").max_vec_length;
 
-pub const EncodeError = error{ BufferTooSmall, MissingConfirmationTag, VectorTooLarge };
+pub const EncodeError = error{ BufferTooSmall, MissingConfirmationTag, MissingLifetime, VectorTooLarge };
 
 // -- Encoding ----------------------------------------------------------------
 
@@ -129,6 +129,8 @@ pub fn encodeVarPrefixedList(
     }
 
     const inner_len: u32 = p - start;
+    if (inner_len > max_vec_length)
+        return error.VectorTooLarge;
     var len_buf: [4]u8 = undefined;
     const len_end = try varint.encode(
         &len_buf,
@@ -487,5 +489,37 @@ test "encodeVarVector rejects oversized data" {
         &dummy,
     )[0..big_len];
     const result = encodeVarVector(&buf, 0, oversized);
+    try testing.expectError(error.VectorTooLarge, result);
+}
+
+test "encodeVarPrefixedList rejects oversized inner length" {
+    // Mock type whose encode advances position by a
+    // configurable amount without writing to the buffer.
+    const BigItem = struct {
+        advance: u32,
+
+        pub fn encode(
+            self: *const @This(),
+            _: []u8,
+            pos: u32,
+        ) EncodeError!u32 {
+            return pos + self.advance;
+        }
+    };
+
+    // A single item that claims to produce max_vec_length + 1
+    // bytes of output.
+    const items = [_]BigItem{.{
+        .advance = max_vec_length + 1,
+    }};
+    // Buffer only needs to be large enough for the varint
+    // prefix gap (4 bytes); the mock doesn't write data.
+    var buf: [64]u8 = undefined;
+    const result = encodeVarPrefixedList(
+        BigItem,
+        &buf,
+        0,
+        &items,
+    );
     try testing.expectError(error.VectorTooLarge, result);
 }

@@ -25,6 +25,10 @@ pub fn PendingProposalStore(comptime P: type) type {
 
         const Entry = struct {
             occupied: bool = false,
+            /// True when proposal was decoded from wire and
+            /// owns heap-allocated data that must be freed
+            /// via Proposal.deinit on eviction.
+            owns_data: bool = false,
             group_id_buf: [max_group_id_len]u8 =
                 .{0} ** max_group_id_len,
             group_id_len: u32 = 0,
@@ -55,12 +59,16 @@ pub fn PendingProposalStore(comptime P: type) type {
         }
 
         /// Store a proposal with its pre-computed ref.
+        /// When `owns_data` is true, the store takes
+        /// ownership of heap allocations inside the
+        /// proposal and frees them on clearGroup.
         pub fn store(
             self: *Self,
             group_id: []const u8,
             ref: [P.nh]u8,
             proposal: zmls.Proposal,
             sender: zmls.Sender,
+            owns_data: bool,
         ) error{CapacityExhausted}!void {
             if (group_id.len > max_group_id_len) {
                 return error.CapacityExhausted;
@@ -69,6 +77,7 @@ pub fn PendingProposalStore(comptime P: type) type {
                 if (!e.occupied) {
                     e.* = .{
                         .occupied = true,
+                        .owns_data = owns_data,
                         .group_id_len = @intCast(
                             group_id.len,
                         ),
@@ -106,13 +115,18 @@ pub fn PendingProposalStore(comptime P: type) type {
         }
 
         /// Clear all stored proposals for a group
-        /// (after epoch transition).
+        /// (after epoch transition). Frees heap data
+        /// for proposals that own their allocations.
         pub fn clearGroup(
             self: *Self,
+            allocator: std.mem.Allocator,
             group_id: []const u8,
         ) void {
             for (&self.entries) |*e| {
                 if (e.matchesGroup(group_id)) {
+                    if (e.owns_data) {
+                        e.proposal.deinit(allocator);
+                    }
                     e.* = .{};
                     self.count -= 1;
                 }
@@ -138,4 +152,64 @@ pub fn PendingProposalStore(comptime P: type) type {
             return out[0..n];
         }
     };
+}
+
+const testing = @import("std").testing;
+
+test "clearGroup frees decoded proposal data" {
+    const P = zmls.DefaultCryptoProvider;
+    var store = PendingProposalStore(P).init();
+    const alloc = testing.allocator;
+
+    // Simulate a decoded Add proposal with heap data.
+    const init_key = try alloc.alloc(u8, 32);
+    const sig = try alloc.alloc(u8, 64);
+    const ext = try alloc.alloc(zmls.Extension, 0);
+
+    const kp = zmls.KeyPackage{
+        .version = .mls10,
+        .cipher_suite = .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        .init_key = init_key,
+        .leaf_node = .{
+            .encryption_key = &.{},
+            .signature_key = &.{},
+            .credential = zmls.Credential.initBasic(&.{}),
+            .capabilities = .{
+                .versions = &.{},
+                .cipher_suites = &.{},
+                .extensions = &.{},
+                .proposals = &.{},
+                .credentials = &.{},
+            },
+            .source = .key_package,
+            .lifetime = .{
+                .not_before = 0,
+                .not_after = 0,
+            },
+            .parent_hash = null,
+            .extensions = &.{},
+            .signature = &.{},
+        },
+        .extensions = ext,
+        .signature = sig,
+    };
+
+    const proposal = zmls.Proposal{
+        .tag = .add,
+        .payload = .{ .add = .{ .key_package = kp } },
+    };
+
+    try store.store(
+        "test-group",
+        .{0} ** P.nh,
+        proposal,
+        .{ .sender_type = .member, .leaf_index = 0 },
+        true,
+    );
+    try testing.expectEqual(@as(u32, 1), store.count);
+
+    // clearGroup must free heap data; testing allocator
+    // will fail the test if any allocation leaks.
+    store.clearGroup(alloc, "test-group");
+    try testing.expectEqual(@as(u32, 0), store.count);
 }

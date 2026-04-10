@@ -545,13 +545,21 @@ test "encryptContent with no padding" {
 
 // -- Sender validation ---------------------------------------------------
 
+const node_mod = @import("../tree/node.zig");
+
 test "validateSenderLeafIndex rejects out-of-bounds" {
     const sd = SenderData{
         .leaf_index = 5,
         .generation = 0,
         .reuse_guard = .{ 0, 0, 0, 0 },
     };
-    const result = validateSenderLeafIndex(sd, 4);
+    // 4 leaves => 7 nodes (indices 0..6).
+    var nodes: [7]?node_mod.Node = .{null} ** 7;
+    // Populate all leaf slots as non-blank.
+    inline for ([_]usize{ 0, 2, 4, 6 }) |i| {
+        nodes[i] = makeDummyLeaf();
+    }
+    const result = validateSenderLeafIndex(sd, 4, &nodes);
     try testing.expectError(error.IndexOutOfRange, result);
 }
 
@@ -561,5 +569,50 @@ test "validateSenderLeafIndex accepts valid index" {
         .generation = 0,
         .reuse_guard = .{ 0, 0, 0, 0 },
     };
-    try validateSenderLeafIndex(sd, 4);
+    // 4 leaves => 7 nodes.
+    var nodes: [7]?node_mod.Node = .{null} ** 7;
+    inline for ([_]usize{ 0, 2, 4, 6 }) |i| {
+        nodes[i] = makeDummyLeaf();
+    }
+    try validateSenderLeafIndex(sd, 4, &nodes);
+}
+
+test "validateSenderLeafIndex rejects blank leaf" {
+    // RFC §6.3.2: sender leaf must be non-blank.
+    const sd = SenderData{
+        .leaf_index = 1,
+        .generation = 0,
+        .reuse_guard = .{ 0, 0, 0, 0 },
+    };
+    // 4 leaves => 7 nodes. Leaf 1 (node index 2) is blank.
+    var nodes: [7]?node_mod.Node = .{null} ** 7;
+    nodes[0] = makeDummyLeaf();
+    // nodes[2] intentionally left null (blank leaf 1).
+    nodes[4] = makeDummyLeaf();
+    nodes[6] = makeDummyLeaf();
+
+    const result = validateSenderLeafIndex(sd, 4, &nodes);
+    try testing.expectError(error.BlankNode, result);
+}
+
+fn makeDummyLeaf() node_mod.Node {
+    return node_mod.Node.initLeaf(.{
+        .encryption_key = "",
+        .signature_key = "",
+        .credential = @import(
+            "../credential/credential.zig",
+        ).Credential.initBasic(""),
+        .capabilities = .{
+            .versions = &.{},
+            .cipher_suites = &.{},
+            .extensions = &.{},
+            .proposals = &.{},
+            .credentials = &.{},
+        },
+        .source = .commit,
+        .lifetime = null,
+        .parent_hash = null,
+        .extensions = &.{},
+        .signature = "",
+    });
 }

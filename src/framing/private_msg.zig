@@ -30,6 +30,7 @@ const primitives = @import("../crypto/primitives.zig");
 const framed_content_mod = @import("framed_content.zig");
 const auth_mod = @import("auth.zig");
 const content_type_mod = @import("content_type.zig");
+const node_mod = @import("../tree/node.zig");
 
 const EncodeError = codec.EncodeError;
 const DecodeError = errors.DecodeError;
@@ -316,13 +317,22 @@ pub fn decryptSenderData(
 }
 
 /// Validate that the decrypted sender leaf_index is within the
-/// tree bounds. Call this after decryptSenderData.
+/// tree bounds and refers to a non-blank leaf. RFC §6.3.2
+/// requires that the sender leaf index identifies a non-blank
+/// member. Call this after decryptSenderData.
 pub fn validateSenderLeafIndex(
     sender: SenderData,
     leaf_count: u32,
+    nodes: []const ?node_mod.Node,
 ) errors.TreeError!void {
     if (sender.leaf_index >= leaf_count)
         return error.IndexOutOfRange;
+    // The leaf's node index = 2 * leaf_index.
+    const ni = @as(usize, sender.leaf_index) * 2;
+    if (ni >= nodes.len)
+        return error.IndexOutOfRange;
+    if (nodes[ni] == null)
+        return error.BlankNode;
 }
 
 /// Apply a reuse guard to a nonce by XOR-ing the guard bytes

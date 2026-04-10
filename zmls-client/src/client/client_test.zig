@@ -2092,6 +2092,72 @@ test "Client: stageCommit conflicting commit" {
     try testing.expectEqual(@as(u64, 1), epoch_final);
 }
 
+test "Client: stageCommit with Remove generates UpdatePath" {
+    const io = testIo();
+
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+    var alice = try makeTestClient(
+        &alice_group_store,
+        &alice_key_store,
+    );
+    defer alice.deinit();
+
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    // Add Bob so the group has 2 members.
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+    var bob = try makeTestClientBob(
+        &bob_group_store,
+        &bob_key_store,
+    );
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        group_id,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    // Stage a commit that removes Bob (leaf 1).
+    // This requires an UpdatePath because Remove is in
+    // pathRequiredTypes (RFC 9420 §12.2).
+    const remove_proposal = zmls.Proposal{
+        .tag = .remove,
+        .payload = .{ .remove = .{ .removed = 1 } },
+    };
+
+    var handle = try alice.stageCommit(
+        testing.allocator,
+        io,
+        group_id,
+        &.{remove_proposal},
+    );
+
+    try testing.expect(handle.commit_data.len > 0);
+
+    // Confirm and verify epoch advanced.
+    try handle.confirm(&alice, io);
+    defer handle.deinit();
+
+    const epoch = try alice.groupEpoch(io, group_id);
+    try testing.expectEqual(@as(u64, 2), epoch);
+}
+
 test "Client: credential validator rejects Add" {
     const io = testIo();
     const gpa = testing.allocator;
@@ -2625,5 +2691,185 @@ test "Client: PSK proposal flow through Client API" {
     try testing.expectEqual(
         @as(u64, 2),
         try bob.groupEpoch(io, group_id),
+    );
+}
+
+test "BlobCache: LRU eviction preserves insertion order" {
+    const C = Client(TestP);
+    var cache = C.BlobCache.init(testing.allocator);
+    defer cache.deinit();
+
+    // Fill cache to capacity.
+    var ids: [C.BlobCache.max_entries + 2][4]u8 = undefined;
+    for (0..C.BlobCache.max_entries + 2) |i| {
+        const v: u32 = @intCast(i);
+        ids[i] = @bitCast(v);
+    }
+
+    // Insert max_entries items (0..max_entries-1).
+    for (0..C.BlobCache.max_entries) |i| {
+        cache.put(&ids[i], &ids[i]);
+    }
+
+    // Inserting one more should evict item 0 (oldest).
+    const overflow_idx = C.BlobCache.max_entries;
+    cache.put(&ids[overflow_idx], &ids[overflow_idx]);
+    try testing.expect(cache.get(&ids[0]) == null);
+    try testing.expect(cache.get(&ids[1]) != null);
+    try testing.expect(
+        cache.get(&ids[overflow_idx]) != null,
+    );
+
+    // Inserting another should evict item 1 (now oldest).
+    const overflow_idx2 = C.BlobCache.max_entries + 1;
+    cache.put(&ids[overflow_idx2], &ids[overflow_idx2]);
+    try testing.expect(cache.get(&ids[1]) == null);
+    try testing.expect(cache.get(&ids[2]) != null);
+    try testing.expect(
+        cache.get(&ids[overflow_idx2]) != null,
+    );
+}
+
+test "Client: processIncoming rejects forged proposal signature" {
+    const io = testIo();
+
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(TestP, 8).init();
+    defer alice_ks.deinit();
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(TestP, 8).init();
+    defer bob_ks.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_gs,
+        &alice_ks,
+        &bob_gs,
+        &bob_ks,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    // Alice creates a valid proposal.
+    const proposal_bytes = try alice.proposeRemove(
+        testing.allocator,
+        io,
+        group_id,
+        1,
+    );
+    defer testing.allocator.free(proposal_bytes);
+
+    // Corrupt the signature by flipping a byte near
+    // the end of the message (signature region).
+    var corrupted = try testing.allocator.dupe(
+        u8,
+        proposal_bytes,
+    );
+    defer testing.allocator.free(corrupted);
+    corrupted[corrupted.len - 3] ^= 0xff;
+
+    // Bob should reject the forged proposal.
+    const result = bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        corrupted,
+    );
+    try testing.expectError(
+        error.WireDecodeFailed,
+        result,
+    );
+
+    // Proposal store should remain empty.
+    try testing.expectEqual(
+        @as(u32, 0),
+        bob.proposal_store.count,
+    );
+}
+
+test "Client: processIncoming rejects proposal from non-member" {
+    const io = testIo();
+
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(TestP, 8).init();
+    defer alice_ks.deinit();
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(TestP, 8).init();
+    defer bob_ks.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_gs,
+        &alice_ks,
+        &bob_gs,
+        &bob_ks,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    // Alice creates a valid proposal.
+    const proposal_bytes = try alice.proposeRemove(
+        testing.allocator,
+        io,
+        group_id,
+        1,
+    );
+    defer testing.allocator.free(proposal_bytes);
+
+    // Find the sender leaf_index in the wire bytes.
+    // MLSMessage: version(2) + wire_format(2) = 4 bytes header
+    // PublicMessage body starts at byte 4:
+    //   group_id: varint(1 byte for len<64) + bytes
+    //   epoch: 8 bytes
+    //   sender_type: 1 byte
+    //   leaf_index: 4 bytes (big-endian u32)
+    var patched = try testing.allocator.dupe(
+        u8,
+        proposal_bytes,
+    );
+    defer testing.allocator.free(patched);
+
+    // Varint for group_id length is at byte 4.
+    const gid_len: usize = @intCast(patched[4]);
+    // sender_type follows group_id + epoch.
+    const sender_type_off = 4 + 1 + gid_len + 8;
+    try testing.expectEqual(
+        @as(u8, 0x01),
+        patched[sender_type_off],
+    );
+    // Patch leaf_index to 5 (non-existent in 2-member group).
+    patched[sender_type_off + 1] = 0;
+    patched[sender_type_off + 2] = 0;
+    patched[sender_type_off + 3] = 0;
+    patched[sender_type_off + 4] = 5;
+
+    // Bob should reject the non-member proposal.
+    const result = bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        patched,
+    );
+    try testing.expectError(
+        error.WireDecodeFailed,
+        result,
+    );
+
+    // Proposal store should remain empty.
+    try testing.expectEqual(
+        @as(u32, 0),
+        bob.proposal_store.count,
     );
 }
