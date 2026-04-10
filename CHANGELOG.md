@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.2] - 2026-04-10
+## [0.1.3] - 2026-04-10
 
 ### Fixed
 
@@ -38,6 +38,18 @@ All notable changes to this project will be documented in this file.
   `encodeVarPrefixedList` now checks the total serialized inner length
   against `max_vec_length` (1 MiB), returning `error.VectorTooLarge`
   if exceeded. Previously only the decoder enforced this limit.
+
+### Documented
+
+- **max_vec_length intentional deviation** -- expanded doc comment on
+  `max_vec_length` explaining that the 1 MiB limit is an intentional
+  security hardening choice versus RFC 9420 §6's 2^30-1 maximum, and
+  that deployments with large payloads may need to increase it.
+
+## [0.1.2] - 2026-04-10
+
+### Fixed
+
 - **Welcome path_secret per RFC 9420 §12.4.3.1** -- `buildWelcome` now
   computes and includes the per-member `path_secret` in GroupSecrets.
   Previously hardcoded to `null`, new members can now receive the path
