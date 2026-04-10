@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **BlobCache LRU eviction order corrected** --
+  `BlobCache.put` now uses `orderedRemoveAt(0)` instead of
+  `swapRemoveAt(0)` when evicting the oldest entry at capacity. The swap
+  variant moved the last element to index 0, breaking insertion order and
+  causing the wrong (most recent) entry to be evicted on subsequent
+  overflows.
 - **processPublicProposal verifies signature and membership tag** --
   `processPublicProposal` now loads the group bundle via `io` to verify
   that the sender is a valid group member with a non-blank leaf, verifies
