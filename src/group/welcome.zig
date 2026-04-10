@@ -733,6 +733,29 @@ fn deriveWelcomePathKeys(
             @constCast(&secrets[i]),
         );
 
+        // RFC §12.4.3.1: "The private key MUST be the private
+        // key that corresponds to the public key in the node."
+        // Verify the derived public key matches the tree.
+        const tree_node = try tree.getNode(nodes_to_root[i]);
+        if (tree_node) |tn| {
+            const tree_pk = switch (tn.node_type) {
+                .parent => tn.payload.parent.encryption_key,
+                .leaf => tn.payload.leaf.encryption_key,
+            };
+            if (tree_pk.len != P.npk or
+                !primitives.constantTimeEql(
+                    P.npk,
+                    &kp.pk,
+                    tree_pk[0..P.npk],
+                ))
+            {
+                return error.PathSecretMismatch;
+            }
+        }
+        // Blank nodes: no public key to verify against — the
+        // committer's UpdatePath should have populated them,
+        // but the tree may not yet reflect it at this point.
+
         out[key_count] = .{
             .node = nodes_to_root[i],
             .sk = kp.sk,

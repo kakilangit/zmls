@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Welcome path_secret public key verification per RFC 9420 §12.4.3.1** --
+  `deriveWelcomePathKeys` now verifies that each public key derived from
+  `path_secret` matches the corresponding ratchet tree node's public key
+  using constant-time comparison. Returns `error.PathSecretMismatch` if
+  any derived key disagrees with the tree. Previously the comment stated
+  "verify against tree public keys" but no verification occurred.
 - **Welcome path_secret per RFC 9420 §12.4.3.1** -- `buildWelcome` now
   computes and includes the per-member `path_secret` in GroupSecrets.
   Previously hardcoded to `null`, new members can now receive the path

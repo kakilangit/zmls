@@ -77,6 +77,8 @@ pub const TreeError = error{
     InvalidLeafSignature,
     /// An UpdatePath has the wrong number of nodes.
     MalformedUpdatePath,
+    /// A derived public key does not match the tree node's public key.
+    PathSecretMismatch,
 };
 
 /// Errors from proposal and commit validation.
