@@ -35,6 +35,12 @@ All notable changes to this project will be documented in this file.
   multiple Removes were silently accepted. Credential matching
   between joiner and removed leaf is documented as application-level
   policy per the RFC.
+- **PSK resumption usage validation explicit** --
+  `validatePskProposals` now uses an explicit switch on
+  `.application`, `.reinit`, `.branch`, `.reserved`, and unknown
+  values instead of a negated comparison. Behavior is unchanged
+  but the code now clearly documents which usages are valid in a
+  normal commit context per RFC 9420 §12.2.
 
 ## [0.1.2] - 2026-04-10
 

@@ -768,10 +768,23 @@ pub fn validatePskProposals(
         }
 
         // Resumption usage check (normal commit context).
-        if (id.psk_type == .resumption and
-            id.resumption_usage != .application)
-        {
-            return error.InvalidProposalList;
+        // RFC 9420 §12.2: in a normal commit (not reinit or
+        // branch), only resumption PSKs with usage=application
+        // are valid.  The .reinit and .branch usages are only
+        // valid in their respective commit types, which are
+        // handled separately.
+        if (id.psk_type == .resumption) {
+            switch (id.resumption_usage) {
+                .application => {},
+                .reinit, .branch => {
+                    return error.InvalidProposalList;
+                },
+                // reserved (0) and unknown values are invalid
+                // resumption usages in any context.
+                .reserved, _ => {
+                    return error.InvalidProposalList;
+                },
+            }
         }
 
         // Duplicate check: compare against all prior IDs.
