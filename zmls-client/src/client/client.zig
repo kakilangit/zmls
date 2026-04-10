@@ -339,6 +339,7 @@ pub fn Client(comptime P: type) type {
             GroupNotFound,
             BundleDeserializeFailed,
             CommitFailed,
+            KeyGenerationFailed,
         };
 
         // ────────────────────────────────────────────────
@@ -1763,6 +1764,9 @@ pub fn Client(comptime P: type) type {
             allocator: Allocator,
             confirmed: bool,
             staged_epoch: u64,
+            /// Encryption secret key for the new leaf
+            /// (set when an UpdatePath was generated).
+            staged_enc_sk: ?[P.nsk]u8,
 
             pub fn deinit(
                 self_h: *StagedCommitHandle,
@@ -1771,6 +1775,9 @@ pub fn Client(comptime P: type) type {
                 // after confirm (which serializes to store),
                 // the in-memory structs still own heap
                 // allocations that must be freed.
+                if (self_h.staged_enc_sk) |*sk| {
+                    secureZeroSlice(sk);
+                }
                 self_h.staged_group_state.deinit();
                 self_h.staged_secret_tree.deinit(
                     self_h.allocator,
@@ -1788,12 +1795,12 @@ pub fn Client(comptime P: type) type {
             }
 
             pub const ConfirmError = GroupStore.Error ||
-                error{
-                    BundleSerializeFailed,
-                    BundleDeserializeFailed,
-                    GroupNotFound,
-                    ConflictingCommit,
-                };
+                KS.Error || error{
+                BundleSerializeFailed,
+                BundleDeserializeFailed,
+                GroupNotFound,
+                ConflictingCommit,
+            };
 
             /// Persist the staged state, advancing the
             /// group to the new epoch. Returns
@@ -1823,6 +1830,22 @@ pub fn Client(comptime P: type) type {
                     &self_h.staged_group_state,
                     &self_h.staged_secret_tree,
                 );
+
+                // Persist the new leaf encryption key when
+                // an UpdatePath was generated.
+                if (self_h.staged_enc_sk) |*sk| {
+                    const idx = @intFromEnum(
+                        self_h.staged_group_state
+                            .my_leaf_index,
+                    );
+                    try client.key_store.storeEncryptionKey(
+                        io,
+                        self_h.group_id,
+                        idx,
+                        sk,
+                    );
+                }
+
                 self_h.confirmed = true;
             }
 
@@ -1844,6 +1867,10 @@ pub fn Client(comptime P: type) type {
         /// Returns a `StagedCommitHandle` containing the
         /// commit bytes and the staged group state. Call
         /// `confirm` to persist or `discard` to abandon.
+        ///
+        /// Automatically generates an UpdatePath when
+        /// required by the proposal set (Update, Remove,
+        /// GCE, or empty commit in multi-member groups).
         pub fn stageCommit(
             self: *Self,
             allocator: Allocator,
@@ -1859,6 +1886,20 @@ pub fn Client(comptime P: type) type {
             );
             defer bundle.deinit(self.allocator);
 
+            var pp_ctx = buildPathContext(
+                self,
+                allocator,
+                io,
+                &bundle.group_state,
+            ) catch |e| return e;
+            defer pp_ctx.deinit(allocator);
+
+            // Fix up leaf_secret pointer after struct copy.
+            if (pp_ctx.params != null) {
+                pp_ctx.params.?.leaf_secret =
+                    &pp_ctx.leaf_secret;
+            }
+
             var commit_output = bundle.group_state.commit(
                 allocator,
                 .{
@@ -1867,14 +1908,112 @@ pub fn Client(comptime P: type) type {
                     .psk_resolver = self.buildPskResolver(
                         &bundle.group_state,
                     ),
+                    .path_params = pp_ctx.params,
                 },
             ) catch return error.CommitFailed;
             errdefer commit_output.deinit();
 
-            const wire_bytes = encodeCommitAsWireMessage(
+            return buildStagedHandle(
                 allocator,
+                group_id,
                 &bundle.group_state,
                 &commit_output,
+                pp_ctx.enc_sk,
+            );
+        }
+
+        /// Ephemeral context for UpdatePath generation.
+        /// Holds borrowed eph_seeds and leaf_secret that
+        /// must outlive the commit() call.
+        const PathContext = struct {
+            params: ?zmls.PathParams(P),
+            enc_sk: ?[P.nsk]u8,
+            eph_seeds: [][P.seed_len]u8,
+            leaf_secret: [P.nh]u8,
+
+            fn deinit(
+                self: *PathContext,
+                allocator: Allocator,
+            ) void {
+                secureZeroSlice(&self.leaf_secret);
+                allocator.free(self.eph_seeds);
+                self.* = undefined;
+            }
+        };
+
+        fn buildPathContext(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            gs: *const GS,
+        ) StageCommitError!PathContext {
+            if (gs.leafCount() <= 1) {
+                return .{
+                    .params = null,
+                    .enc_sk = null,
+                    .eph_seeds = &.{},
+                    .leaf_secret = .{0} ** P.nh,
+                };
+            }
+
+            const enc_kp = generateDhKeypair(
+                io,
+            ) catch return error.KeyGenerationFailed;
+
+            var new_leaf = buildLeafNode(
+                self,
+                &enc_kp.pk,
+            );
+            new_leaf.source = .commit;
+
+            var leaf_secret: [P.nh]u8 = undefined;
+            io.randomSecure(&leaf_secret) catch
+                return error.KeyGenerationFailed;
+
+            const eph_count = countEphSeedsForLeaf(
+                &gs.tree,
+                gs.my_leaf_index,
+            ) catch return error.CommitFailed;
+
+            const eph_seeds = allocator.alloc(
+                [P.seed_len]u8,
+                eph_count,
+            ) catch return error.OutOfMemory;
+            errdefer allocator.free(eph_seeds);
+
+            for (eph_seeds) |*s| {
+                io.randomSecure(s) catch
+                    return error.KeyGenerationFailed;
+            }
+
+            var ctx: PathContext = .{
+                .params = undefined,
+                .enc_sk = enc_kp.sk,
+                .eph_seeds = eph_seeds,
+                .leaf_secret = leaf_secret,
+            };
+            // leaf_secret pointer is fixed up by caller
+            // after struct copy to avoid dangling pointer.
+            ctx.params = .{
+                .allocator = allocator,
+                .new_leaf = new_leaf,
+                .leaf_secret = undefined,
+                .eph_seeds = ctx.eph_seeds,
+            };
+            return ctx;
+        }
+
+        fn buildStagedHandle(
+            allocator: Allocator,
+            group_id: []const u8,
+            old_gs: *const GS,
+            commit_output: *GS.CommitOutput,
+            enc_sk: ?[P.nsk]u8,
+        ) StageCommitError!StagedCommitHandle {
+            const wire_bytes = encodeCommitAsWireMessage(
+                allocator,
+                old_gs,
+                commit_output,
             ) catch return error.CommitFailed;
             errdefer allocator.free(wire_bytes);
 
@@ -1884,11 +2023,7 @@ pub fn Client(comptime P: type) type {
             ) catch return error.CommitFailed;
             errdefer secret_tree.deinit(allocator);
 
-            // Record epoch at staging time for conflict
-            // detection in confirm().
-            const staged_epoch = bundle.group_state.epoch();
-
-            // Move ownership of staged state to handle.
+            const staged_epoch = old_gs.epoch();
             const gs = commit_output.group_state;
             commit_output.group_state = undefined;
 
@@ -1906,6 +2041,7 @@ pub fn Client(comptime P: type) type {
                 .allocator = allocator,
                 .confirmed = false,
                 .staged_epoch = staged_epoch,
+                .staged_enc_sk = enc_sk,
             };
         }
 

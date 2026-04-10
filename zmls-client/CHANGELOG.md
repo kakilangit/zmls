@@ -13,6 +13,12 @@ All notable changes to this project will be documented in this file.
   verifies the membership tag. Previously proposals were cached without
   any cryptographic verification, allowing forged proposals to be
   injected.
+- **stageCommit generates UpdatePath for multi-member groups** --
+  `stageCommit` now produces `PathParams` (fresh HPKE key pair, leaf
+  secret, ephemeral seeds) when the tree has more than one leaf, so
+  commits that require an UpdatePath (Remove, Update, GCE, empty)
+  succeed instead of failing with `CommitFailed`. The new encryption
+  key is persisted via `KeyStore` when `confirm()` is called.
 - **Welcome path_secret in inviteMember** -- `buildInviteResult` now
   passes path secrets, filtered direct path nodes, and the new member's
   leaf index through to `buildWelcome` per RFC 9420 §12.4.3.1.

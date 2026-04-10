@@ -2092,6 +2092,72 @@ test "Client: stageCommit conflicting commit" {
     try testing.expectEqual(@as(u64, 1), epoch_final);
 }
 
+test "Client: stageCommit with Remove generates UpdatePath" {
+    const io = testIo();
+
+    var alice_group_store = MemGS(8).init();
+    defer alice_group_store.deinit();
+    var alice_key_store = MemKS(TestP, 8).init();
+    defer alice_key_store.deinit();
+    var alice = try makeTestClient(
+        &alice_group_store,
+        &alice_key_store,
+    );
+    defer alice.deinit();
+
+    const group_id = try alice.createGroup(io);
+    defer testing.allocator.free(group_id);
+
+    // Add Bob so the group has 2 members.
+    var bob_group_store = MemGS(8).init();
+    defer bob_group_store.deinit();
+    var bob_key_store = MemKS(TestP, 8).init();
+    defer bob_key_store.deinit();
+    var bob = try makeTestClientBob(
+        &bob_group_store,
+        &bob_key_store,
+    );
+    defer bob.deinit();
+
+    const bob_kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(bob_kp.data);
+
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        group_id,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    // Stage a commit that removes Bob (leaf 1).
+    // This requires an UpdatePath because Remove is in
+    // pathRequiredTypes (RFC 9420 §12.2).
+    const remove_proposal = zmls.Proposal{
+        .tag = .remove,
+        .payload = .{ .remove = .{ .removed = 1 } },
+    };
+
+    var handle = try alice.stageCommit(
+        testing.allocator,
+        io,
+        group_id,
+        &.{remove_proposal},
+    );
+
+    try testing.expect(handle.commit_data.len > 0);
+
+    // Confirm and verify epoch advanced.
+    try handle.confirm(&alice, io);
+    defer handle.deinit();
+
+    const epoch = try alice.groupEpoch(io, group_id);
+    try testing.expectEqual(@as(u64, 2), epoch);
+}
+
 test "Client: credential validator rejects Add" {
     const io = testIo();
     const gpa = testing.allocator;
