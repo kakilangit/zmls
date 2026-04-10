@@ -2322,6 +2322,7 @@ pub fn Client(comptime P: type) type {
                 ),
                 .proposal => self.processPublicProposal(
                     allocator,
+                    io,
                     group_id,
                     wire_bytes,
                 ),
@@ -2445,6 +2446,7 @@ pub fn Client(comptime P: type) type {
         fn processPublicProposal(
             self: *Self,
             allocator: Allocator,
+            io: Io,
             group_id: []const u8,
             wire_bytes: []const u8,
         ) ProcessIncomingError!ProcessingResult {
@@ -2452,6 +2454,61 @@ pub fn Client(comptime P: type) type {
                 allocator,
                 wire_bytes,
             ) catch return error.WireDecodeFailed;
+
+            // Load group state for cryptographic verification.
+            var bundle = try self.loadBundle(io, group_id);
+            defer bundle.deinit(self.allocator);
+
+            const fc = &decoded.framed_content;
+            const sender = fc.sender;
+
+            // Verify sender is a valid group member.
+            if (sender.sender_type == .member) {
+                const sender_leaf = zmls.types.LeafIndex
+                    .fromU32(sender.leaf_index);
+                const leaf = bundle.group_state.tree
+                    .getLeaf(sender_leaf) catch
+                    return error.WireDecodeFailed;
+                if (leaf == null)
+                    return error.WireDecodeFailed;
+
+                const sig_key = leaf.?.signature_key;
+                if (sig_key.len != P.sign_pk_len)
+                    return error.WireDecodeFailed;
+
+                // Verify signature per RFC 9420 §6.1.
+                var gc_buf: [max_group_context_encode]u8 =
+                    undefined;
+                const gc_bytes = bundle.group_state
+                    .serializeContext(&gc_buf) catch
+                    return error.WireDecodeFailed;
+
+                zmls.verifyFramedContent(
+                    P,
+                    fc,
+                    .mls_public_message,
+                    gc_bytes,
+                    sig_key[0..P.sign_pk_len],
+                    &decoded.auth,
+                ) catch return error.WireDecodeFailed;
+
+                // Verify membership tag per RFC 9420 §6.2.
+                if (decoded.membership_tag) |*tag| {
+                    zmls.public_msg.verifyMembershipTag(
+                        P,
+                        &bundle.group_state.epoch_secrets
+                            .membership_key,
+                        fc,
+                        &decoded.auth,
+                        tag,
+                        gc_bytes,
+                    ) catch
+                        return error.WireDecodeFailed;
+                } else {
+                    // Member proposals require a tag.
+                    return error.WireDecodeFailed;
+                }
+            }
 
             // Build AuthenticatedContent for ref hash.
             const auth_content = buildProposalAuthContent(
@@ -2465,7 +2522,7 @@ pub fn Client(comptime P: type) type {
                 auth_content.slice(),
             );
 
-            const sender = zmls.Sender{
+            const cached_sender = zmls.Sender{
                 .sender_type = decoded.framed_content
                     .sender.sender_type,
                 .leaf_index = decoded.framed_content
@@ -2476,7 +2533,7 @@ pub fn Client(comptime P: type) type {
                 group_id,
                 ref,
                 decoded.proposal,
-                sender,
+                cached_sender,
             ) catch return error.WireDecodeFailed;
 
             return .{ .proposal_cached = .{
@@ -2806,6 +2863,7 @@ pub fn Client(comptime P: type) type {
             framed_content: zmls.FramedContent,
             auth: Auth,
             proposal: zmls.Proposal,
+            membership_tag: ?[P.nh]u8,
         };
 
         /// Decode a proposal from wire bytes.
@@ -2844,6 +2902,7 @@ pub fn Client(comptime P: type) type {
                 .framed_content = fc,
                 .auth = decoded.value.auth,
                 .proposal = prop_decoded.value,
+                .membership_tag = decoded.value.membership_tag,
             };
         }
 

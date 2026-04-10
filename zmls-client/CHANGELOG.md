@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **processPublicProposal verifies signature and membership tag** --
+  `processPublicProposal` now loads the group bundle via `io` to verify
+  that the sender is a valid group member with a non-blank leaf, verifies
+  the FramedContent signature against the sender's signature key, and
+  verifies the membership tag. Previously proposals were cached without
+  any cryptographic verification, allowing forged proposals to be
+  injected.
 - **Welcome path_secret in inviteMember** -- `buildInviteResult` now
   passes path secrets, filtered direct path nodes, and the new member's
   leaf index through to `buildWelcome` per RFC 9420 §12.4.3.1.
