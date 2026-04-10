@@ -2456,3 +2456,174 @@ test "Client: credential validator rejects joinGroup" {
         }),
     );
 }
+
+test "Client: PSK proposal flow through Client API" {
+    const gpa = testing.allocator;
+    const io = testIo();
+
+    // Shared PSK secret known to both Alice and Bob.
+    const psk_secret = [_]u8{0xAA} ** 32;
+    const psk_id = "test-external-psk";
+
+    // Alice's PSK store.
+    var alice_psk_store = zmls.InMemoryPskStore.init();
+    defer alice_psk_store.deinit();
+    _ = alice_psk_store.addPsk(psk_id, &psk_secret);
+
+    // Bob's PSK store.
+    var bob_psk_store = zmls.InMemoryPskStore.init();
+    defer bob_psk_store.deinit();
+    _ = bob_psk_store.addPsk(psk_id, &psk_secret);
+
+    // Create Alice with PSK support.
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(TestP, 8).init();
+    defer alice_ks.deinit();
+
+    var alice = try Client(TestP).init(
+        gpa,
+        "alice",
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &[_]u8{0x42} ** 32,
+        .{
+            .group_store = alice_gs.groupStore(),
+            .key_store = alice_ks.keyStore(),
+            .credential_validator = zmls
+                .credential_validator
+                .AcceptAllValidator.validator(),
+            .psk_lookup = alice_psk_store.lookup(),
+        },
+    );
+    defer alice.deinit();
+
+    // Create Bob with PSK support.
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(TestP, 8).init();
+    defer bob_ks.deinit();
+
+    var bob = try Client(TestP).init(
+        gpa,
+        "bob",
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &[_]u8{0x99} ** 32,
+        .{
+            .group_store = bob_gs.groupStore(),
+            .key_store = bob_ks.keyStore(),
+            .credential_validator = zmls
+                .credential_validator
+                .AcceptAllValidator.validator(),
+            .psk_lookup = bob_psk_store.lookup(),
+        },
+    );
+    defer bob.deinit();
+
+    // Alice creates a group and invites Bob.
+    const group_id = try alice.createGroup(io);
+    defer gpa.free(group_id);
+
+    const bob_kp = try bob.freshKeyPackage(gpa, io);
+    defer gpa.free(bob_kp.data);
+
+    var invite = try alice.inviteMember(
+        gpa,
+        io,
+        group_id,
+        bob_kp.data,
+    );
+    defer invite.deinit();
+
+    var alice_bundle = try alice.loadBundle(
+        io,
+        group_id,
+    );
+    defer alice_bundle.deinit(gpa);
+    var tree_copy = try alice_bundle.group_state.tree
+        .clone();
+    defer tree_copy.deinit();
+
+    var join = try bob.joinGroup(
+        gpa,
+        io,
+        invite.welcome,
+        .{
+            .ratchet_tree = tree_copy,
+            .signer_verify_key = &alice
+                .signing_public_key,
+        },
+    );
+    defer join.deinit();
+
+    // Both at epoch 1.
+    try testing.expectEqual(
+        @as(u64, 1),
+        try alice.groupEpoch(io, group_id),
+    );
+    try testing.expectEqual(
+        @as(u64, 1),
+        try bob.groupEpoch(io, group_id),
+    );
+
+    // Alice proposes an external PSK.
+    // PSK nonce must be nh bytes (32 for SHA-256 suites).
+    const psk_nonce = [_]u8{0xBB} ** TestP.nh;
+    const proposal_bytes = try alice.proposeExternalPsk(
+        gpa,
+        io,
+        group_id,
+        psk_id,
+        &psk_nonce,
+    );
+    defer gpa.free(proposal_bytes);
+
+    try testing.expect(proposal_bytes.len > 0);
+
+    // Verify it's a valid MLSMessage.
+    const msg = zmls.mls_message.MLSMessage
+        .decodeExact(proposal_bytes) catch
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(
+        zmls.types.WireFormat.mls_public_message,
+        msg.wire_format,
+    );
+
+    // Alice commits the pending PSK proposal.
+    const commit_bytes = try alice.commitPending(
+        gpa,
+        io,
+        group_id,
+    );
+    defer gpa.free(commit_bytes);
+
+    // Alice advanced to epoch 2.
+    try testing.expectEqual(
+        @as(u64, 2),
+        try alice.groupEpoch(io, group_id),
+    );
+
+    // Bob processes the commit (needs his PSK store to
+    // resolve the external PSK secret).
+    const result = try bob.processIncoming(
+        gpa,
+        io,
+        group_id,
+        commit_bytes,
+    );
+
+    switch (result) {
+        .commit_applied => |applied| {
+            try testing.expectEqual(
+                @as(u64, 2),
+                applied.new_epoch,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Bob now at epoch 2 as well.
+    try testing.expectEqual(
+        @as(u64, 2),
+        try bob.groupEpoch(io, group_id),
+    );
+}

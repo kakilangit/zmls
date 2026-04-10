@@ -66,6 +66,7 @@ pub fn CommitProcess(comptime P: type) type {
             wire_bytes: []const u8,
             receiver_encryption_key: *const [P.nsk]u8,
             receiver_public_key: *const [P.npk]u8,
+            psk_resolver: ?zmls.PskResolver(P),
         ) ProcessError!CommitResult {
             // Decode MLSMessage envelope.
             const message = zmls.mls_message.MLSMessage
@@ -90,6 +91,7 @@ pub fn CommitProcess(comptime P: type) type {
                 &public_message,
                 receiver_encryption_key,
                 receiver_public_key,
+                psk_resolver,
             );
         }
 
@@ -101,6 +103,7 @@ pub fn CommitProcess(comptime P: type) type {
             public_message: *const PublicMsg,
             receiver_encryption_key: *const [P.nsk]u8,
             receiver_public_key: *const [P.npk]u8,
+            psk_resolver: ?zmls.PskResolver(P),
         ) ProcessError!CommitResult {
             const framed_content = &public_message.content;
 
@@ -127,6 +130,7 @@ pub fn CommitProcess(comptime P: type) type {
                 &commit.value,
                 receiver_encryption_key,
                 receiver_public_key,
+                psk_resolver,
             );
         }
 
@@ -138,6 +142,7 @@ pub fn CommitProcess(comptime P: type) type {
             commit: *const zmls.Commit,
             receiver_encryption_key: *const [P.nsk]u8,
             receiver_public_key: *const [P.npk]u8,
+            psk_resolver: ?zmls.PskResolver(P),
         ) ProcessError!CommitResult {
             // Resolve proposals (inline + by-reference).
             const max = zmls.proposal_cache.max_pending;
@@ -189,6 +194,7 @@ pub fn CommitProcess(comptime P: type) type {
                         .receiver_sk = receiver_encryption_key,
                         .receiver_pk = receiver_public_key,
                     },
+                    .psk_resolver = psk_resolver,
                     .membership_key = &group_state
                         .epoch_secrets.membership_key,
                     .membership_tag = if (public_message

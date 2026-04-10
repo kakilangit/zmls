@@ -175,6 +175,7 @@ pub fn Client(comptime P: type) type {
         credential_validator: zmls.credential_validator
             .CredentialValidator,
         transport: ?Transport,
+        psk_lookup: ?zmls.PskLookup,
 
         // ── Configuration ──────────────────────────────
         padding_block: u32,
@@ -205,6 +206,7 @@ pub fn Client(comptime P: type) type {
             credential_validator: zmls.credential_validator
                 .CredentialValidator,
             transport: ?Transport = null,
+            psk_lookup: ?zmls.PskLookup = null,
             padding_block: u32 = 32,
             wire_format_policy: WireFormatPolicy =
                 .encrypt_application_only,
@@ -373,6 +375,7 @@ pub fn Client(comptime P: type) type {
                 .credential_validator = options
                     .credential_validator,
                 .transport = options.transport,
+                .psk_lookup = options.psk_lookup,
                 .padding_block = options.padding_block,
                 .wire_format_policy = options
                     .wire_format_policy,
@@ -730,6 +733,9 @@ pub fn Client(comptime P: type) type {
                         } },
                     }},
                     .sign_key = &self.signing_secret_key,
+                    .psk_resolver = self.buildPskResolver(
+                        &bundle.group_state,
+                    ),
                 },
             ) catch return error.CommitFailed;
             defer commit_output.deinit();
@@ -1665,6 +1671,43 @@ pub fn Client(comptime P: type) type {
             );
         }
 
+        /// Propose injecting an external PSK (standalone
+        /// proposal). Returns wire-encoded proposal bytes.
+        ///
+        /// `external_psk_id` identifies the PSK in the
+        /// application's PskLookup. `psk_nonce` is a fresh
+        /// random nonce for this proposal (RFC 9420 Sec 8.4).
+        pub fn proposeExternalPsk(
+            self: *Self,
+            allocator: Allocator,
+            io: Io,
+            group_id: []const u8,
+            external_psk_id: []const u8,
+            psk_nonce: []const u8,
+        ) ProposeError![]u8 {
+            if (self.closed) return error.ClientClosed;
+
+            const proposal = zmls.Proposal{
+                .tag = .psk,
+                .payload = .{ .psk = .{
+                    .psk = .{
+                        .psk_type = .external,
+                        .external_psk_id = external_psk_id,
+                        .resumption_usage = .reserved,
+                        .resumption_group_id = "",
+                        .resumption_epoch = 0,
+                        .psk_nonce = psk_nonce,
+                    },
+                } },
+            };
+            return self.encodeAndCacheProposal(
+                allocator,
+                io,
+                group_id,
+                &proposal,
+            );
+        }
+
         /// Commit all pending (cached) proposals.
         /// Returns wire-encoded commit bytes.
         pub fn commitPending(
@@ -1812,6 +1855,9 @@ pub fn Client(comptime P: type) type {
                 .{
                     .proposals = proposals,
                     .sign_key = &self.signing_secret_key,
+                    .psk_resolver = self.buildPskResolver(
+                        &bundle.group_state,
+                    ),
                 },
             ) catch return error.CommitFailed;
             errdefer commit_output.deinit();
@@ -1901,6 +1947,22 @@ pub fn Client(comptime P: type) type {
             return encoded.wire_bytes;
         }
 
+        /// Build a PskResolver from the client's optional
+        /// PskLookup and the group state's resumption ring.
+        /// Returns null when no PskLookup is configured.
+        fn buildPskResolver(
+            self: *const Self,
+            group_state: *const GS,
+        ) ?zmls.PskResolver(P) {
+            const lookup = self.psk_lookup orelse
+                return null;
+            return .{
+                .external = lookup,
+                .resumption = &group_state
+                    .resumption_psk_ring,
+            };
+        }
+
         /// Shared commit-and-persist for removeMember.
         fn commitWithProposals(
             self: *Self,
@@ -1920,6 +1982,9 @@ pub fn Client(comptime P: type) type {
                 .{
                     .proposals = proposals,
                     .sign_key = &self.signing_secret_key,
+                    .psk_resolver = self.buildPskResolver(
+                        &bundle.group_state,
+                    ),
                 },
             ) catch return error.CommitFailed;
             defer commit_output.deinit();
@@ -1994,6 +2059,9 @@ pub fn Client(comptime P: type) type {
                 .{
                     .proposals = proposals,
                     .sign_key = &self.signing_secret_key,
+                    .psk_resolver = self.buildPskResolver(
+                        &bundle.group_state,
+                    ),
                     .path_params = .{
                         .allocator = allocator,
                         .new_leaf = new_leaf,
@@ -2298,6 +2366,9 @@ pub fn Client(comptime P: type) type {
                 wire_bytes,
                 &receiver_secret_key,
                 &receiver_public_key,
+                self.buildPskResolver(
+                    &bundle.group_state,
+                ),
             );
 
             return self.finalizeCommitResult(

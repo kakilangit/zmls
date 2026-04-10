@@ -27,6 +27,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Client PSK support** -- `Client` now accepts an optional
+  `psk_lookup` in `Options` for external PSK resolution. Added
+  `proposeExternalPsk` method for standalone PSK proposals.
+  `PskResolver` is threaded through all commit paths
+  (`commitWithProposals`, `commitWithPath`, `stageCommit`,
+  `inviteMember`) and incoming commit processing
+  (`processPublicCommit`).
 - **Crypto fuzz targets** -- 6 new fuzz targets in `tests/fuzz_crypto.zig`
   for HPKE seal/open, sign/verify, DeriveKeyPair, and tree hash.
 - **Commit fuzz targets** -- 2 new fuzz targets in `tests/fuzz_commit.zig`
