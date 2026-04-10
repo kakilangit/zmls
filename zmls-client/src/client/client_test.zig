@@ -2729,3 +2729,147 @@ test "BlobCache: LRU eviction preserves insertion order" {
         cache.get(&ids[overflow_idx2]) != null,
     );
 }
+
+test "Client: processIncoming rejects forged proposal signature" {
+    const io = testIo();
+
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(TestP, 8).init();
+    defer alice_ks.deinit();
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(TestP, 8).init();
+    defer bob_ks.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_gs,
+        &alice_ks,
+        &bob_gs,
+        &bob_ks,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    // Alice creates a valid proposal.
+    const proposal_bytes = try alice.proposeRemove(
+        testing.allocator,
+        io,
+        group_id,
+        1,
+    );
+    defer testing.allocator.free(proposal_bytes);
+
+    // Corrupt the signature by flipping a byte near
+    // the end of the message (signature region).
+    var corrupted = try testing.allocator.dupe(
+        u8,
+        proposal_bytes,
+    );
+    defer testing.allocator.free(corrupted);
+    corrupted[corrupted.len - 3] ^= 0xff;
+
+    // Bob should reject the forged proposal.
+    const result = bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        corrupted,
+    );
+    try testing.expectError(
+        error.WireDecodeFailed,
+        result,
+    );
+
+    // Proposal store should remain empty.
+    try testing.expectEqual(
+        @as(u32, 0),
+        bob.proposal_store.count,
+    );
+}
+
+test "Client: processIncoming rejects proposal from non-member" {
+    const io = testIo();
+
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(TestP, 8).init();
+    defer alice_ks.deinit();
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(TestP, 8).init();
+    defer bob_ks.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_gs,
+        &alice_ks,
+        &bob_gs,
+        &bob_ks,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    // Alice creates a valid proposal.
+    const proposal_bytes = try alice.proposeRemove(
+        testing.allocator,
+        io,
+        group_id,
+        1,
+    );
+    defer testing.allocator.free(proposal_bytes);
+
+    // Find the sender leaf_index in the wire bytes.
+    // MLSMessage: version(2) + wire_format(2) = 4 bytes header
+    // PublicMessage body starts at byte 4:
+    //   group_id: varint(1 byte for len<64) + bytes
+    //   epoch: 8 bytes
+    //   sender_type: 1 byte
+    //   leaf_index: 4 bytes (big-endian u32)
+    var patched = try testing.allocator.dupe(
+        u8,
+        proposal_bytes,
+    );
+    defer testing.allocator.free(patched);
+
+    // Varint for group_id length is at byte 4.
+    const gid_len: usize = @intCast(patched[4]);
+    // sender_type follows group_id + epoch.
+    const sender_type_off = 4 + 1 + gid_len + 8;
+    try testing.expectEqual(
+        @as(u8, 0x01),
+        patched[sender_type_off],
+    );
+    // Patch leaf_index to 5 (non-existent in 2-member group).
+    patched[sender_type_off + 1] = 0;
+    patched[sender_type_off + 2] = 0;
+    patched[sender_type_off + 3] = 0;
+    patched[sender_type_off + 4] = 5;
+
+    // Bob should reject the non-member proposal.
+    const result = bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        patched,
+    );
+    try testing.expectError(
+        error.WireDecodeFailed,
+        result,
+    );
+
+    // Proposal store should remain empty.
+    try testing.expectEqual(
+        @as(u32, 0),
+        bob.proposal_store.count,
+    );
+}
