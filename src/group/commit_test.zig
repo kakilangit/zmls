@@ -1347,39 +1347,33 @@ test "createCommit add-only does not include path" {
 
 test "isPathRequired returns correct values" {
     // Empty commit → path required.
-    var v: ValidatedProposals = undefined;
-    v.gce = null;
-    v.reinit = null;
-    v.external_init = null;
-    v.updates_len = 0;
-    v.removes_len = 0;
-    v.adds_len = 0;
-    v.psk_ids_len = 0;
-    try testing.expect(isPathRequired(&v));
+    const v = try ValidatedProposals.create(testing.allocator);
+    defer v.destroy(testing.allocator);
+    try testing.expect(isPathRequired(v));
 
     // Add-only → no path required.
     v.adds_len = 1;
-    try testing.expect(!isPathRequired(&v));
+    try testing.expect(!isPathRequired(v));
 
     // Update → path required.
     v.adds_len = 0;
     v.updates_len = 1;
-    try testing.expect(isPathRequired(&v));
+    try testing.expect(isPathRequired(v));
 
     // Remove → path required.
     v.updates_len = 0;
     v.removes_len = 1;
-    try testing.expect(isPathRequired(&v));
+    try testing.expect(isPathRequired(v));
 
     // PSK-only → no path required.
     v.removes_len = 0;
     v.psk_ids_len = 1;
-    try testing.expect(!isPathRequired(&v));
+    try testing.expect(!isPathRequired(v));
 
     // GCE → path required.
     v.psk_ids_len = 0;
     v.gce = .{ .extensions = &.{} };
-    try testing.expect(isPathRequired(&v));
+    try testing.expect(isPathRequired(v));
 }
 
 test "processCommit with path decryption round-trip" {

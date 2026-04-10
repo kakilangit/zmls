@@ -16,6 +16,15 @@ All notable changes to this project will be documented in this file.
   enabling interoperability with other MLS implementations that use
   DER encoding for P-256/P-384 signatures.
 
+### Changed
+
+- **Heap-allocate ValidatedProposals** -- `ValidatedProposals` (~120 KiB)
+  is now heap-allocated instead of stack-allocated.
+  `validateProposalList` takes an allocator parameter and returns
+  `*ValidatedProposals`; callers use `defer validated.destroy(allocator)`
+  for cleanup. Eliminates ~120 KiB of stack pressure per commit
+  operation.
+
 ### Added
 
 - **Crypto fuzz targets** -- 6 new fuzz targets in `tests/fuzz_crypto.zig`

@@ -96,10 +96,12 @@ test "validateProposalList accepts valid Add" {
 
     const proposals = [_]Proposal{ add1, add2 };
     const result = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer result.destroy(testing.allocator);
 
     try testing.expectEqual(@as(u32, 2), result.adds_len);
     try testing.expectEqual(@as(u32, 0), result.updates_len);
@@ -128,6 +130,7 @@ test "validate rejects duplicate Update for same leaf" {
 
     const proposals = [_]Proposal{ update1, update2 };
     const result = validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
@@ -147,6 +150,7 @@ test "validate rejects duplicate Remove for same leaf" {
 
     const proposals = [_]Proposal{ r1, r2 };
     const result = validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
@@ -177,6 +181,7 @@ test "validate rejects ReInit combined with other proposals" {
 
     const proposals = [_]Proposal{ reinit_prop, add_prop };
     const result = validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
@@ -195,6 +200,7 @@ test "validate rejects self-remove" {
 
     const proposals = [_]Proposal{rm};
     const result = validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
@@ -221,6 +227,7 @@ test "validate rejects update+remove same leaf" {
 
     const proposals = [_]Proposal{ up, rm };
     const result = validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(1),
         null,
@@ -246,10 +253,12 @@ test "validate accepts standalone ReInit" {
 
     const proposals = [_]Proposal{reinit_prop};
     const result = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer result.destroy(testing.allocator);
 
     try testing.expect(result.reinit != null);
     try testing.expectEqual(@as(u32, 0), result.adds_len);
@@ -272,12 +281,14 @@ test "validateReInitVersion rejects version downgrade" {
 
     const proposals = [_]Proposal{reinit_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
     const result = validateReInitVersion(
-        &validated,
+        validated,
         .mls10,
     );
     try testing.expectError(error.VersionMismatch, result);
@@ -298,11 +309,13 @@ test "validateReInitVersion accepts equal version" {
 
     const proposals = [_]Proposal{reinit_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
-    try validateReInitVersion(&validated, .mls10);
+    defer validated.destroy(testing.allocator);
+    try validateReInitVersion(validated, .mls10);
 }
 
 test "applyProposals adds members to tree" {
@@ -326,13 +339,15 @@ test "applyProposals adds members to tree" {
 
     const proposals = [_]Proposal{add_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     const result = try applyProposals(
-        &validated,
+        validated,
         &tree,
     );
 
@@ -372,13 +387,15 @@ test "applyProposals removes members from tree" {
 
     const proposals = [_]Proposal{rm_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     const result = try applyProposals(
-        &validated,
+        validated,
         &tree,
     );
 
@@ -417,12 +434,14 @@ test "applyProposals updates sender leaf" {
 
     const proposals = [_]Proposal{up_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
-    _ = try applyProposals(&validated, &tree);
+    _ = try applyProposals(validated, &tree);
 
     const leaf0 = try tree.getLeaf(LeafIndex.fromU32(0));
     try testing.expect(leaf0 != null);
@@ -473,10 +492,12 @@ test "validate accepts mixed Add Remove PSK" {
     };
 
     const result = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer result.destroy(testing.allocator);
 
     try testing.expectEqual(@as(u32, 1), result.adds_len);
     try testing.expectEqual(@as(u32, 1), result.removes_len);
@@ -509,13 +530,15 @@ test "validateAddsAgainstTree rejects duplicate encryption key" {
 
     const proposals = [_]Proposal{add_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     const result = validateAddsAgainstTree(
-        &validated,
+        validated,
         &tree,
         .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
     );
@@ -547,13 +570,15 @@ test "validateAddsAgainstTree rejects duplicate init key among adds" {
     };
 
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     const result = validateAddsAgainstTree(
-        &validated,
+        validated,
         &tree,
         .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
     );
@@ -578,13 +603,15 @@ test "validateAddsAgainstTree rejects cipher suite mismatch" {
     };
 
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     const result = validateAddsAgainstTree(
-        &validated,
+        validated,
         &tree,
         .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
     );
@@ -613,13 +640,15 @@ test "validateAddsAgainstTree accepts valid adds" {
     };
 
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     try validateAddsAgainstTree(
-        &validated,
+        validated,
         &tree,
         .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
     );
@@ -656,14 +685,16 @@ test "validateAddsAgainstTree allows re-add when member removed" {
     };
 
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     // Should succeed because bob is being removed.
     try validateAddsAgainstTree(
-        &validated,
+        validated,
         &tree,
         .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
     );
@@ -695,13 +726,15 @@ test "validateUpdatesAgainstTree rejects committer self-update" {
     const proposals = [_]Proposal{up_prop};
     // Sender is leaf 0, so this Update targets the committer.
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     const result = validateUpdatesAgainstTree(
-        &validated,
+        validated,
         &tree,
         makeCommitSender(0),
     );
@@ -736,14 +769,16 @@ test "validateUpdatesAgainstTree rejects wrong source" {
 
     const proposals = [_]Proposal{up_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(1),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     // Alice (leaf 0) is the committer; bob (leaf 1) sent Update.
     const result = validateUpdatesAgainstTree(
-        &validated,
+        validated,
         &tree,
         makeCommitSender(0),
     );
@@ -778,13 +813,15 @@ test "validateUpdatesAgainstTree rejects duplicate encryption key" {
 
     const proposals = [_]Proposal{up_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(1),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     const result = validateUpdatesAgainstTree(
-        &validated,
+        validated,
         &tree,
         makeCommitSender(0),
     );
@@ -814,14 +851,16 @@ test "validateUpdatesAgainstTree accepts valid update" {
 
     const proposals = [_]Proposal{up_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(1),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     // Alice (leaf 0) is the committer.
     try validateUpdatesAgainstTree(
-        &validated,
+        validated,
         &tree,
         makeCommitSender(0),
     );
@@ -853,12 +892,14 @@ test "validatePskProposals rejects duplicate PSK IDs" {
     };
 
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
-    const result = validatePskProposals(&validated, 32);
+    const result = validatePskProposals(validated, 32);
     try testing.expectError(
         error.InvalidProposalList,
         result,
@@ -873,13 +914,15 @@ test "validatePskProposals rejects wrong nonce length" {
     };
 
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     // nh=32 but nonce is 5 bytes.
-    const result = validatePskProposals(&validated, 32);
+    const result = validatePskProposals(validated, 32);
     try testing.expectError(
         error.InvalidProposalList,
         result,
@@ -902,12 +945,14 @@ test "validatePskProposals rejects non-application resumption" {
     };
 
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
-    const result = validatePskProposals(&validated, 32);
+    const result = validatePskProposals(validated, 32);
     try testing.expectError(
         error.InvalidProposalList,
         result,
@@ -923,12 +968,14 @@ test "validatePskProposals accepts valid PSK" {
     };
 
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
-    try validatePskProposals(&validated, 32);
+    try validatePskProposals(validated, 32);
 }
 
 // -- Phase 14.4: GCE validation tests ----------------------------------------
@@ -990,12 +1037,14 @@ test "validateGceAgainstTree rejects unsupported extension" {
 
     const proposals = [_]Proposal{gce_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
-    const result = validateGceAgainstTree(&validated, &tree);
+    const result = validateGceAgainstTree(validated, &tree);
     try testing.expectError(
         error.UnsupportedCapability,
         result,
@@ -1035,24 +1084,28 @@ test "validateGceAgainstTree accepts when all support extension" {
 
     const proposals = [_]Proposal{gce_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
-    try validateGceAgainstTree(&validated, &tree);
+    try validateGceAgainstTree(validated, &tree);
 }
 
 test "validateGceAgainstTree no-op when no GCE" {
     const proposals = [_]Proposal{};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     // No GCE → should succeed trivially.
-    try validateGceAgainstTree(&validated, &undefined_tree());
+    try validateGceAgainstTree(validated, &undefined_tree());
 }
 
 fn undefined_tree() RatchetTree {
@@ -1180,13 +1233,15 @@ test "validateAddsRequiredCapabilities rejects non-compliant add" {
     };
     const proposals = [_]Proposal{add_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     const result = validateAddsRequiredCapabilities(
-        &validated,
+        validated,
         &group_exts,
     );
     try testing.expectError(
@@ -1218,13 +1273,15 @@ test "validateAddsRequiredCapabilities accepts compliant add" {
     };
     const proposals = [_]Proposal{add_prop};
     const validated = try validateProposalList(
+        testing.allocator,
         &proposals,
         makeCommitSender(0),
         null,
     );
+    defer validated.destroy(testing.allocator);
 
     try validateAddsRequiredCapabilities(
-        &validated,
+        validated,
         &group_exts,
     );
 }
@@ -1354,7 +1411,8 @@ test "Update and Remove for high leaf indices succeed" {
         },
     };
     const up = [_]Proposal{update};
-    const result = try validateProposalList(&up, sender, null);
+    const result = try validateProposalList(testing.allocator, &up, sender, null);
+    defer result.destroy(testing.allocator);
     try testing.expectEqual(@as(u32, 1), result.updates_len);
     try testing.expectEqual(
         @as(u32, 512),
@@ -1367,7 +1425,8 @@ test "Update and Remove for high leaf indices succeed" {
         .payload = .{ .remove = .{ .removed = 1000 } },
     };
     const rm = [_]Proposal{remove};
-    const r2 = try validateProposalList(&rm, sender, null);
+    const r2 = try validateProposalList(testing.allocator, &rm, sender, null);
+    defer r2.destroy(testing.allocator);
     try testing.expectEqual(@as(u32, 1), r2.removes_len);
     try testing.expectEqual(@as(u32, 1000), r2.removes[0]);
 }

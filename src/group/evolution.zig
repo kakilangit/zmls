@@ -89,12 +89,8 @@ pub const UpdateEntry = struct {
 /// Result of validateProposalList — categorized proposals
 /// ready for ordered application.
 ///
-/// All arrays are owned inline (fixed-size) so the struct can
-/// be safely returned by value without dangling pointers.
-///
-/// Stack usage: ~100 KiB due to inline arrays of up to 256
-/// entries for updates, removes, and adds. Callers should
-/// ensure sufficient stack space.
+/// Heap-allocated (~120 KiB) to avoid stack overflow. Use
+/// `create` / `destroy` for lifecycle management.
 pub const ValidatedProposals = struct {
     /// GroupContextExtensions proposal (at most one).
     gce: ?GroupContextExtensions,
@@ -114,6 +110,36 @@ pub const ValidatedProposals = struct {
     reinit: ?ReInit,
     /// ExternalInit proposal (at most one).
     external_init: ?ExternalInit,
+
+    /// Heap-allocate a new ValidatedProposals with all
+    /// fields zeroed.
+    pub fn create(
+        allocator: std.mem.Allocator,
+    ) error{OutOfMemory}!*ValidatedProposals {
+        const vp = try allocator.create(ValidatedProposals);
+        vp.* = .{
+            .gce = null,
+            .updates = undefined,
+            .updates_len = 0,
+            .removes = undefined,
+            .removes_len = 0,
+            .adds = undefined,
+            .adds_len = 0,
+            .psk_ids = undefined,
+            .psk_ids_len = 0,
+            .reinit = null,
+            .external_init = null,
+        };
+        return vp;
+    }
+
+    /// Free a heap-allocated ValidatedProposals.
+    pub fn destroy(
+        self: *ValidatedProposals,
+        allocator: std.mem.Allocator,
+    ) void {
+        allocator.destroy(self);
+    }
 };
 
 // -- validateProposalList ----------------------------------------------------
@@ -130,26 +156,22 @@ pub const ValidatedProposals = struct {
 ///   - A leaf cannot be both Updated and Removed.
 ///   - The committer cannot remove themselves.
 ///
-/// Returns a ValidatedProposals struct with categorized
-/// proposals ready for applyProposals.
+/// Returns a heap-allocated ValidatedProposals with
+/// categorized proposals ready for applyProposals. The
+/// caller must call `destroy` when done.
 ///
 /// `proposal_senders` is optional. When non-null, it provides
 /// per-proposal sender information (for by-reference proposals
 /// whose sender differs from the commit sender). When null,
 /// the commit `sender` is used for all proposals.
 pub fn validateProposalList(
+    allocator: std.mem.Allocator,
     proposals: []const Proposal,
     sender: CommitSender,
     proposal_senders: ?[]const Sender,
-) ValidationError!ValidatedProposals {
-    var result: ValidatedProposals = undefined;
-    result.gce = null;
-    result.reinit = null;
-    result.external_init = null;
-    result.updates_len = 0;
-    result.removes_len = 0;
-    result.adds_len = 0;
-    result.psk_ids_len = 0;
+) (ValidationError || error{OutOfMemory})!*ValidatedProposals {
+    const result = try ValidatedProposals.create(allocator);
+    errdefer result.destroy(allocator);
 
     for (proposals, 0..) |*prop, pi| {
         // Check sender type is allowed for this proposal type
@@ -166,7 +188,7 @@ pub fn validateProposalList(
         }
 
         try categorizeProposal(
-            &result,
+            result,
             prop,
             sender,
             proposal_senders,
@@ -174,7 +196,7 @@ pub fn validateProposalList(
         );
     }
 
-    try validateReInitExclusivity(&result);
+    try validateReInitExclusivity(result);
     return result;
 }
 

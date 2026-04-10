@@ -418,17 +418,19 @@ pub fn createCommit(
     assert(my_leaf.toNodeIndex().toUsize() < tree.nodes.len);
     const validated = try validateCommitProposals(
         P,
+        allocator,
         proposals,
         my_leaf,
         group_context,
         tree,
     );
+    defer validated.destroy(allocator);
 
     // Apply proposals to a copy of the tree.
     var new_tree = try tree.clone();
     errdefer new_tree.deinit();
     const apply_result = try evolution.applyProposals(
-        &validated,
+        validated,
         &new_tree,
     );
     const new_extensions = resolveExtensions(
@@ -448,7 +450,7 @@ pub fn createCommit(
         group_context,
         sign_key,
         path_params,
-        isPathRequired(&validated),
+        isPathRequired(validated),
         new_extensions,
         apply_result.added_leaves[0..apply_result.added_count],
         &leaf_sig,
@@ -468,7 +470,7 @@ pub fn createCommit(
         sign_key,
         interim_transcript_hash,
         init_secret,
-        &validated,
+        validated,
         psk_resolver,
         new_extensions,
         &path_out,
@@ -587,21 +589,23 @@ pub fn processCommit(
     const sender_leaf = LeafIndex.fromU32(opts.fc.sender.leaf_index);
     const validated = try validateProcessProposals(
         P,
+        allocator,
         opts.proposals,
         sender_leaf,
         opts.proposal_senders,
         group_context,
         tree,
     );
+    defer validated.destroy(allocator);
     // 6. Apply proposals to a copy of the tree.
     var new_tree = try tree.clone();
     errdefer new_tree.deinit();
     const apply_result = try evolution.applyProposals(
-        &validated,
+        validated,
         &new_tree,
     );
     // 7. Check path presence (single-leaf is vacuously ok).
-    if (isPathRequired(&validated) and opts.update_path == null and
+    if (isPathRequired(validated) and opts.update_path == null and
         new_tree.leaf_count > 1) return error.MissingPath;
     // 8. Process UpdatePath if present.
     const new_ext = resolveExtensions(&apply_result, group_context);
@@ -626,7 +630,7 @@ pub fn processCommit(
         opts.confirmation_tag,
         group_context,
         &new_tree,
-        &validated,
+        validated,
         new_ext,
         interim_transcript_hash,
         init_secret,
@@ -703,12 +707,13 @@ fn verifyCommitPreconditions(
 /// Step 5: Validate proposals for a received commit.
 fn validateProcessProposals(
     comptime P: type,
+    allocator: std.mem.Allocator,
     proposals: []const Proposal,
     sender_leaf: LeafIndex,
     proposal_senders: ?[]const Sender,
     group_context: *const context_mod.GroupContext(P.nh),
     tree: *const RatchetTree,
-) CommitError!ValidatedProposals {
+) CommitError!*ValidatedProposals {
     assert(sender_leaf.toNodeIndex().toUsize() < tree.nodes.len);
     if (proposal_senders) |ps| {
         assert(ps.len == proposals.len);
@@ -718,45 +723,47 @@ fn validateProcessProposals(
         .leaf_index = sender_leaf,
     };
     const validated = try evolution.validateProposalList(
+        allocator,
         proposals,
         sender,
         proposal_senders,
     );
+    errdefer validated.destroy(allocator);
     // RFC 9420 S12.2: ExternalInit is only valid in external
     // commits, never in regular member commits.
     if (validated.external_init != null)
         return error.InvalidProposalList;
     try evolution.validateReInitVersion(
-        &validated,
+        validated,
         group_context.version,
     );
     try evolution.validateAddKeyPackages(
         P,
-        &validated,
+        validated,
         group_context.cipher_suite,
     );
     try evolution.validateUpdateLeafNodes(
         P,
-        &validated,
+        validated,
         group_context.group_id,
         group_context.cipher_suite,
     );
     try evolution.validateAddsAgainstTree(
-        &validated,
+        validated,
         tree,
         group_context.cipher_suite,
     );
     try evolution.validateUpdatesAgainstTree(
-        &validated,
+        validated,
         tree,
         sender,
     );
     try evolution.validateRemovesAgainstTree(
-        &validated,
+        validated,
         tree,
     );
     evolution.validateAddsRequiredCapabilities(
-        &validated,
+        validated,
         group_context.extensions,
     ) catch |e| switch (e) {
         error.InvalidLeafNode => return error.InvalidLeafNode,
@@ -765,7 +772,7 @@ fn validateProcessProposals(
         else => return error.InvalidProposalList,
     };
     evolution.validateUpdatesRequiredCapabilities(
-        &validated,
+        validated,
         group_context.extensions,
     ) catch |e| switch (e) {
         error.InvalidLeafNode => return error.InvalidLeafNode,
@@ -773,8 +780,8 @@ fn validateProcessProposals(
         => return error.UnsupportedCapability,
         else => return error.InvalidProposalList,
     };
-    try evolution.validatePskProposals(&validated, P.nh);
-    try evolution.validateGceAgainstTree(&validated, tree);
+    try evolution.validatePskProposals(validated, P.nh);
+    try evolution.validateGceAgainstTree(validated, tree);
     try evolution.validateNonDefaultProposalCaps(
         proposals,
         tree,
@@ -1208,11 +1215,12 @@ fn resolveExtensions(
 /// Step 1: Validate proposals for a locally-created commit.
 fn validateCommitProposals(
     comptime P: type,
+    allocator: std.mem.Allocator,
     proposals: []const Proposal,
     my_leaf: LeafIndex,
     group_context: *const context_mod.GroupContext(P.nh),
     tree: *const RatchetTree,
-) CommitError!ValidatedProposals {
+) CommitError!*ValidatedProposals {
     assert(tree.leaf_count > 0);
     assert(my_leaf.toNodeIndex().toUsize() < tree.nodes.len);
     const sender = CommitSender{
@@ -1220,45 +1228,47 @@ fn validateCommitProposals(
         .leaf_index = my_leaf,
     };
     const validated = try evolution.validateProposalList(
+        allocator,
         proposals,
         sender,
         null,
     );
+    errdefer validated.destroy(allocator);
     // RFC 9420 S12.2: ExternalInit is only valid in external
     // commits, never in regular member commits.
     if (validated.external_init != null)
         return error.InvalidProposalList;
     try evolution.validateReInitVersion(
-        &validated,
+        validated,
         group_context.version,
     );
     try evolution.validateAddKeyPackages(
         P,
-        &validated,
+        validated,
         group_context.cipher_suite,
     );
     try evolution.validateUpdateLeafNodes(
         P,
-        &validated,
+        validated,
         group_context.group_id,
         group_context.cipher_suite,
     );
     try evolution.validateAddsAgainstTree(
-        &validated,
+        validated,
         tree,
         group_context.cipher_suite,
     );
     try evolution.validateUpdatesAgainstTree(
-        &validated,
+        validated,
         tree,
         sender,
     );
     try evolution.validateRemovesAgainstTree(
-        &validated,
+        validated,
         tree,
     );
     evolution.validateAddsRequiredCapabilities(
-        &validated,
+        validated,
         group_context.extensions,
     ) catch |e| switch (e) {
         error.InvalidLeafNode => return error.InvalidLeafNode,
@@ -1267,7 +1277,7 @@ fn validateCommitProposals(
         else => return error.InvalidProposalList,
     };
     evolution.validateUpdatesRequiredCapabilities(
-        &validated,
+        validated,
         group_context.extensions,
     ) catch |e| switch (e) {
         error.InvalidLeafNode => return error.InvalidLeafNode,
@@ -1275,8 +1285,8 @@ fn validateCommitProposals(
         => return error.UnsupportedCapability,
         else => return error.InvalidProposalList,
     };
-    try evolution.validatePskProposals(&validated, P.nh);
-    try evolution.validateGceAgainstTree(&validated, tree);
+    try evolution.validatePskProposals(validated, P.nh);
+    try evolution.validateGceAgainstTree(validated, tree);
     try evolution.validateNonDefaultProposalCaps(
         proposals,
         tree,

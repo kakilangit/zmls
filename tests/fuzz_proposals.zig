@@ -202,11 +202,13 @@ fn fuzzValidateProposals(
     };
 
     // Must not panic, even if it returns an error.
-    _ = evolution.validateProposalList(
+    const validated = evolution.validateProposalList(
+        testing.allocator,
         proposals[0..len],
         sender,
         null,
     ) catch return;
+    validated.destroy(testing.allocator);
 }
 
 test "fuzz: validate proposal list" {
