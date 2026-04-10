@@ -213,7 +213,7 @@ pub fn GroupState(comptime P: type) type {
         pub fn joinViaWelcome(
             allocator: std.mem.Allocator,
             opts: welcome_mod.ProcessWelcomeOpts(P),
-        ) welcome_mod.WelcomeError!Self {
+        ) welcome_mod.WelcomeError!welcome_mod.WelcomeJoinResult(P) {
             return welcome_mod.processWelcome(
                 P,
                 allocator,

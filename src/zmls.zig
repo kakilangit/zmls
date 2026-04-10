@@ -502,6 +502,10 @@ pub const ProcessCommitOpts = group_commit.ProcessCommitOpts;
 pub const ProcessWelcomeOpts =
     group_welcome.ProcessWelcomeOpts;
 
+/// Result of processWelcome (GroupState + path keys).
+pub const WelcomeJoinResult =
+    group_welcome.WelcomeJoinResult;
+
 /// Options struct for buildWelcome.
 pub const BuildWelcomeOpts = group_welcome.BuildWelcomeOpts;
 

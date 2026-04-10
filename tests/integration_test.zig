@@ -253,7 +253,7 @@ test "full lifecycle: create → add → welcome → join" {
     defer wr.deinit(alloc);
 
     // 4. Bob processes the Welcome.
-    var bob_gs = try mls.processWelcome(
+    var bob_join = try mls.processWelcome(
         Default,
         alloc,
         &wr.welcome,
@@ -265,32 +265,32 @@ test "full lifecycle: create → add → welcome → join" {
         LeafIndex.fromU32(1),
         null,
     );
-    defer bob_gs.deinit();
+    defer bob_join.deinit();
 
     // 5. Verify agreement.
-    try testing.expectEqual(@as(u64, 1), bob_gs.epoch());
-    try testing.expectEqual(@as(u32, 2), bob_gs.leafCount());
+    try testing.expectEqual(@as(u64, 1), bob_join.group_state.epoch());
+    try testing.expectEqual(@as(u32, 2), bob_join.group_state.leafCount());
 
     // Epoch secrets match.
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.epoch_secret,
-        &bob_gs.epoch_secrets.epoch_secret,
+        &bob_join.group_state.epoch_secrets.epoch_secret,
     );
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.init_secret,
-        &bob_gs.epoch_secrets.init_secret,
+        &bob_join.group_state.epoch_secrets.init_secret,
     );
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.confirmation_key,
-        &bob_gs.epoch_secrets.confirmation_key,
+        &bob_join.group_state.epoch_secrets.confirmation_key,
     );
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.encryption_secret,
-        &bob_gs.epoch_secrets.encryption_secret,
+        &bob_join.group_state.epoch_secrets.encryption_secret,
     );
 }
 
@@ -1167,7 +1167,7 @@ test "method API: createCommit + joinViaWelcome" {
 
     // 5. Bob joins via Welcome using method API.
     const GS = mls.GroupState(Default);
-    var bob_gs = try GS.joinViaWelcome(alloc, .{
+    var bob_join = try GS.joinViaWelcome(alloc, .{
         .welcome = &wr.welcome,
         .kp_ref = &kp_ref,
         .init_sk = &bob_tkp.init_sk,
@@ -1176,17 +1176,17 @@ test "method API: createCommit + joinViaWelcome" {
         .tree_data = .{ .prebuilt = cr.tree },
         .my_leaf_index = LeafIndex.fromU32(1),
     });
-    defer bob_gs.deinit();
+    defer bob_join.deinit();
 
     // 6. Verify agreement.
-    try testing.expectEqual(@as(u64, 1), bob_gs.epoch());
-    try testing.expectEqual(@as(u32, 2), bob_gs.leafCount());
+    try testing.expectEqual(@as(u64, 1), bob_join.group_state.epoch());
+    try testing.expectEqual(@as(u32, 2), bob_join.group_state.leafCount());
     // Compare post-commit epoch authenticator (from the
     // CommitResult) with Bob's epoch authenticator.
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.epoch_authenticator,
-        bob_gs.epochAuthenticator(),
+        bob_join.group_state.epochAuthenticator(),
     );
 }
 
@@ -2130,7 +2130,7 @@ test "unified API: commit + applyCommit + joinViaWelcome" {
     defer wr.deinit(alloc);
 
     // 5. Bob joins via Welcome.
-    var bob_gs = try GS.joinViaWelcome(alloc, .{
+    var bob_join = try GS.joinViaWelcome(alloc, .{
         .welcome = &wr.welcome,
         .kp_ref = &kp_ref,
         .init_sk = &bob_tkp.init_sk,
@@ -2141,14 +2141,14 @@ test "unified API: commit + applyCommit + joinViaWelcome" {
         },
         .my_leaf_index = LeafIndex.fromU32(1),
     });
-    defer bob_gs.deinit();
+    defer bob_join.deinit();
 
     // 6. Verify epoch agreement.
-    try testing.expectEqual(@as(u64, 1), bob_gs.epoch());
+    try testing.expectEqual(@as(u64, 1), bob_join.group_state.epoch());
     try testing.expectEqualSlices(
         u8,
         output.group_state.epochAuthenticator(),
-        bob_gs.epochAuthenticator(),
+        bob_join.group_state.epochAuthenticator(),
     );
 }
 

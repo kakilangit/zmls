@@ -420,7 +420,7 @@ test "processWelcome: full create-commit-welcome-join flow" {
     defer tw.deinit(alloc);
 
     // --- Bob processes the Welcome ---
-    var bob_gs = try processWelcome(
+    var bob_join = try processWelcome(
         Default,
         alloc,
         &tw.welcome,
@@ -432,29 +432,29 @@ test "processWelcome: full create-commit-welcome-join flow" {
         LeafIndex.fromU32(1), // Bob is leaf 1
         null,
     );
-    defer bob_gs.deinit();
+    defer bob_join.deinit();
 
     // --- Verify Bob's state matches Alice's ---
     // Same epoch.
-    try testing.expectEqual(cr.new_epoch, bob_gs.epoch());
+    try testing.expectEqual(cr.new_epoch, bob_join.group_state.epoch());
 
     // Same epoch secrets.
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.epoch_secret,
-        &bob_gs.epoch_secrets.epoch_secret,
+        &bob_join.group_state.epoch_secrets.epoch_secret,
     );
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.init_secret,
-        &bob_gs.epoch_secrets.init_secret,
+        &bob_join.group_state.epoch_secrets.init_secret,
     );
 
     // Same confirmation key.
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.confirmation_key,
-        &bob_gs.epoch_secrets.confirmation_key,
+        &bob_join.group_state.epoch_secrets.confirmation_key,
     );
 }
 
@@ -819,7 +819,7 @@ test "processWelcome: epoch secrets enable next commit" {
     );
     defer tw.deinit(alloc);
 
-    var bob_gs = try processWelcome(
+    var bob_join = try processWelcome(
         Default,
         alloc,
         &tw.welcome,
@@ -831,13 +831,13 @@ test "processWelcome: epoch secrets enable next commit" {
         LeafIndex.fromU32(1),
         null,
     );
-    defer bob_gs.deinit();
+    defer bob_join.deinit();
 
     // Bob's init_secret should match Alice's.
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.init_secret,
-        &bob_gs.epoch_secrets.init_secret,
+        &bob_join.group_state.epoch_secrets.init_secret,
     );
 
     // Both can derive the same next-epoch secrets.
@@ -853,7 +853,7 @@ test "processWelcome: epoch secrets enable next commit" {
     );
     const bob_next = schedule.deriveEpochSecrets(
         Default,
-        &bob_gs.epoch_secrets.init_secret,
+        &bob_join.group_state.epoch_secrets.init_secret,
         &zero_commit,
         &zero_psk,
         gc_bytes,
@@ -1155,7 +1155,7 @@ test "buildWelcome round-trip with processWelcome" {
     defer wr.deinit(alloc);
 
     // Bob processes the Welcome.
-    var bob_gs = try processWelcome(
+    var bob_join = try processWelcome(
         Default,
         alloc,
         &wr.welcome,
@@ -1167,30 +1167,30 @@ test "buildWelcome round-trip with processWelcome" {
         LeafIndex.fromU32(1),
         null,
     );
-    defer bob_gs.deinit();
+    defer bob_join.deinit();
 
     // Verify: same epoch.
-    try testing.expectEqual(cr.new_epoch, bob_gs.epoch());
+    try testing.expectEqual(cr.new_epoch, bob_join.group_state.epoch());
 
     // Verify: same epoch secrets.
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.epoch_secret,
-        &bob_gs.epoch_secrets.epoch_secret,
+        &bob_join.group_state.epoch_secrets.epoch_secret,
     );
 
     // Verify: same confirmation key.
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.confirmation_key,
-        &bob_gs.epoch_secrets.confirmation_key,
+        &bob_join.group_state.epoch_secrets.confirmation_key,
     );
 
     // Verify: same init secret (for next epoch).
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.init_secret,
-        &bob_gs.epoch_secrets.init_secret,
+        &bob_join.group_state.epoch_secrets.init_secret,
     );
 }
 
@@ -1319,7 +1319,7 @@ test "Welcome with external PSK decrypts correctly" {
     defer wr.deinit(alloc);
 
     // Bob processes Welcome with same PSK store.
-    var bob_gs = try processWelcome(
+    var bob_join = try processWelcome(
         Default,
         alloc,
         &wr.welcome,
@@ -1331,23 +1331,23 @@ test "Welcome with external PSK decrypts correctly" {
         LeafIndex.fromU32(1),
         resolver,
     );
-    defer bob_gs.deinit();
+    defer bob_join.deinit();
 
     // Both sides agree on epoch.
-    try testing.expectEqual(cr.new_epoch, bob_gs.epoch());
+    try testing.expectEqual(cr.new_epoch, bob_join.group_state.epoch());
 
     // Both sides agree on epoch secrets.
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.epoch_secret,
-        &bob_gs.epoch_secrets.epoch_secret,
+        &bob_join.group_state.epoch_secrets.epoch_secret,
     );
 
     // Both sides agree on confirmation key.
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.confirmation_key,
-        &bob_gs.epoch_secrets.confirmation_key,
+        &bob_join.group_state.epoch_secrets.confirmation_key,
     );
 }
 

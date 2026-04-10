@@ -42,6 +42,8 @@ const psk_lookup_mod = @import(
 const psk_mod = @import("../key_schedule/psk.zig");
 const commit_mod = @import("commit.zig");
 const path_mod = @import("../tree/path.zig");
+const path_secrets_mod = @import("../tree/path_secrets.zig");
+const secureZero = primitives.secureZero;
 
 const CipherSuite = types.CipherSuite;
 const LeafIndex = types.LeafIndex;
@@ -66,6 +68,35 @@ const DecodeError = errors.DecodeError;
 pub const WelcomeError =
     TreeError || CryptoError || ValidationError ||
     GroupError || DecodeError || error{OutOfMemory};
+
+/// Result of processWelcome. Contains the new GroupState plus
+/// parent node private keys derived from the Welcome's
+/// path_secret (RFC 9420 §12.4.3.1). Callers should persist
+/// the path_keys for future UpdatePath decryption.
+pub fn WelcomeJoinResult(comptime P: type) type {
+    return struct {
+        /// The new group state for the joined epoch.
+        group_state: GroupState(P),
+        /// Private keys for parent nodes derived from the
+        /// Welcome's path_secret. path_keys[i] is valid for
+        /// 0..path_key_count. The caller should store these
+        /// for future UpdatePath decryption where the
+        /// receiver is matched via a parent node.
+        path_keys: [path_mod.max_path_nodes]commit_mod
+            .PathNodeKey(P),
+        path_key_count: u32,
+
+        pub fn deinit(
+            self: *@This(),
+        ) void {
+            for (0..self.path_key_count) |i| {
+                secureZero(&self.path_keys[i].sk);
+            }
+            self.path_key_count = 0;
+            self.group_state.deinit();
+        }
+    };
+}
 
 /// Maximum size for decrypted GroupInfo plaintext.
 const max_gi_buf: u32 = 65536;
@@ -219,7 +250,7 @@ pub fn processWelcome(
     tree_data: TreeInput,
     my_leaf_index: LeafIndex,
     psk_resolver: ?commit_mod.PskResolver(P),
-) WelcomeError!GroupState(P) {
+) WelcomeError!WelcomeJoinResult(P) {
     // 1-2. Decrypt GroupSecrets, derive welcome_secret.
     var ws = try decryptWelcomeSecrets(
         P,
@@ -270,6 +301,19 @@ pub fn processWelcome(
     // RFC 9420 S13.4: joiner must support all group extensions.
     try validateJoinerExtSupport(my_leaf.?.*, gc.extensions);
 
+    // Derive path keys from Welcome path_secret
+    // (RFC 9420 §12.4.3.1).
+    var path_keys: [path_mod.max_path_nodes]commit_mod
+        .PathNodeKey(P) = undefined;
+    const path_key_count = try deriveWelcomePathKeys(
+        P,
+        &ws.gs,
+        &tree,
+        my_leaf_index,
+        gi.signer,
+        &path_keys,
+    );
+
     // 8-10. Derive epoch secrets, verify confirmation.
     const epoch_out = try deriveWelcomeEpochState(
         P,
@@ -280,7 +324,7 @@ pub fn processWelcome(
     );
 
     // 11. Build GroupState.
-    return try buildWelcomeGroupState(
+    const gs = try buildWelcomeGroupState(
         P,
         allocator,
         tree,
@@ -288,6 +332,12 @@ pub fn processWelcome(
         epoch_out,
         my_leaf_index,
     );
+
+    return .{
+        .group_state = gs,
+        .path_keys = path_keys,
+        .path_key_count = path_key_count,
+    };
 }
 
 /// Result of decryptWelcomeSecrets.
@@ -577,6 +627,93 @@ fn leafSupportsExt(
 }
 
 /// Result of deriveWelcomeEpochState.
+/// Derive parent node private keys from the Welcome's
+/// path_secret per RFC 9420 §12.4.3.1.
+///
+/// If path_secret is set in GroupSecrets:
+///   1. Find the LCA of (my_leaf, signer_leaf).
+///   2. Set the private key for the LCA from path_secret.
+///   3. For each parent of the LCA up to the root, derive
+///      the next path_secret and set the private key.
+///   4. Verify each derived public key matches the tree.
+///
+/// Returns the number of path keys written.
+fn deriveWelcomePathKeys(
+    comptime P: type,
+    gs: *const GroupSecrets,
+    tree: *const RatchetTree,
+    my_leaf: LeafIndex,
+    signer: u32,
+    out: *[path_mod.max_path_nodes]commit_mod.PathNodeKey(P),
+) WelcomeError!u32 {
+    const ps_slice = gs.path_secret orelse return 0;
+    if (ps_slice.len != P.nh) return error.Truncated;
+
+    const signer_leaf = LeafIndex.fromU32(signer);
+    const n = tree.leaf_count;
+
+    // Find the LCA of the joiner and the signer.
+    const lca = tree_math.commonAncestor(
+        my_leaf.toNodeIndex(),
+        signer_leaf.toNodeIndex(),
+    );
+
+    // Compute the joiner's direct path (leaf -> root).
+    var dp_buf: [32]NodeIndex = undefined;
+    const my_dp = tree_math.directPath(
+        my_leaf.toNodeIndex(),
+        n,
+        &dp_buf,
+    );
+
+    // Find the LCA's position in the joiner's direct path.
+    var lca_pos: ?usize = null;
+    for (my_dp, 0..) |node, i| {
+        if (node.toU32() == lca.toU32()) {
+            lca_pos = i;
+            break;
+        }
+    }
+    // LCA must be on joiner's direct path.
+    const start = lca_pos orelse return error.Truncated;
+
+    // Nodes from LCA to root = my_dp[start..].
+    const nodes_to_root = my_dp[start..];
+    if (nodes_to_root.len == 0) return 0;
+
+    // Derive path secrets: secret[0] = received path_secret,
+    // secret[i+1] = DeriveSecret(secret[i], "path").
+    const count: u32 = @intCast(nodes_to_root.len);
+    var secrets: [path_mod.max_path_nodes][P.nh]u8 = undefined;
+    secrets[0] = ps_slice[0..P.nh].*;
+    path_secrets_mod.derivePathSecrets(
+        P,
+        &secrets[0],
+        count,
+        &secrets,
+    );
+
+    // Derive keypairs and verify against tree public keys.
+    var key_count: u32 = 0;
+    for (0..count) |i| {
+        const kp = try path_secrets_mod.deriveNodeKeypair(
+            P,
+            &secrets[i],
+        );
+        defer secureZero(
+            @constCast(&secrets[i]),
+        );
+
+        out[key_count] = .{
+            .node = nodes_to_root[i],
+            .sk = kp.sk,
+            .pk = kp.pk,
+        };
+        key_count += 1;
+    }
+    return key_count;
+}
+
 fn WelcomeEpochOutput(comptime P: type) type {
     return struct {
         epoch_secrets: schedule.EpochSecrets(P),

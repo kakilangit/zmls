@@ -1532,7 +1532,7 @@ fn benchProcessWelcome() void {
     };
 
     // Measure: Bob processes Welcome.
-    var bob_gs = mls.processWelcome(
+    var bob_join = mls.processWelcome(
         Default,
         alloc,
         &wr.welcome,
@@ -1549,7 +1549,7 @@ fn benchProcessWelcome() void {
         gs.deinit();
         return;
     };
-    bob_gs.deinit();
+    bob_join.deinit();
     wr.deinit(alloc);
     cr.deinit(alloc);
     gs.deinit();

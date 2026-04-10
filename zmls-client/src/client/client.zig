@@ -980,7 +980,7 @@ pub fn Client(comptime P: type) type {
                 &self.signing_public_key,
             ) orelse return error.WelcomeProcessingFailed;
 
-            var group_state = GS.joinViaWelcome(
+            var join_result = GS.joinViaWelcome(
                 allocator,
                 .{
                     .welcome = welcome,
@@ -999,13 +999,14 @@ pub fn Client(comptime P: type) type {
             // Validate all leaves' credentials.
             validateTreeCredentials(
                 self,
-                &group_state.tree,
+                &join_result.group_state.tree,
             ) catch {
-                group_state.deinit();
+                join_result.deinit();
                 return error.CredentialValidationFailed;
             };
 
-            const group_id = group_state.groupId();
+            const group_id = join_result.group_state
+                .groupId();
             const owned_group_id = try allocator.dupe(
                 u8,
                 group_id,
@@ -1014,9 +1015,9 @@ pub fn Client(comptime P: type) type {
 
             var bundle = Bundle.initFromGroupState(
                 allocator,
-                &group_state,
+                &join_result.group_state,
             ) catch |err| {
-                group_state.deinit();
+                join_result.deinit();
                 return err;
             };
             defer bundle.deinit(allocator);

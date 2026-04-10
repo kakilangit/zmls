@@ -554,7 +554,7 @@ test "suite 0x0003 full group lifecycle" {
     defer wr.deinit(alloc);
 
     // 4. Bob processes the Welcome.
-    var bob_gs = try welcome_mod.processWelcome(
+    var bob_join = try welcome_mod.processWelcome(
         P,
         alloc,
         &wr.welcome,
@@ -566,30 +566,30 @@ test "suite 0x0003 full group lifecycle" {
         LeafIndex.fromU32(1),
         null,
     );
-    defer bob_gs.deinit();
+    defer bob_join.deinit();
 
     // 5. Verify agreement.
-    try testing.expectEqual(@as(u64, 1), bob_gs.epoch());
-    try testing.expectEqual(@as(u32, 2), bob_gs.leafCount());
+    try testing.expectEqual(@as(u64, 1), bob_join.group_state.epoch());
+    try testing.expectEqual(@as(u32, 2), bob_join.group_state.leafCount());
 
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.epoch_secret,
-        &bob_gs.epoch_secrets.epoch_secret,
+        &bob_join.group_state.epoch_secrets.epoch_secret,
     );
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.init_secret,
-        &bob_gs.epoch_secrets.init_secret,
+        &bob_join.group_state.epoch_secrets.init_secret,
     );
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.confirmation_key,
-        &bob_gs.epoch_secrets.confirmation_key,
+        &bob_join.group_state.epoch_secrets.confirmation_key,
     );
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.encryption_secret,
-        &bob_gs.epoch_secrets.encryption_secret,
+        &bob_join.group_state.epoch_secrets.encryption_secret,
     );
 }

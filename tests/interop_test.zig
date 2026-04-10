@@ -3687,7 +3687,7 @@ fn verifyPassiveWelcome(entry: PassiveWelcomeEntry) !void {
     );
 
     // 10. Call processWelcome.
-    var gs = try zmls.processWelcome(
+    var join_result = try zmls.processWelcome(
         P,
         allocator,
         &w_r.value,
@@ -3699,7 +3699,7 @@ fn verifyPassiveWelcome(entry: PassiveWelcomeEntry) !void {
         my_leaf,
         resolver,
     );
-    defer gs.deinit();
+    defer join_result.deinit();
 
     // 11. Verify epoch_authenticator.
     const expected_ea = try hexDecode(
@@ -3709,7 +3709,7 @@ fn verifyPassiveWelcome(entry: PassiveWelcomeEntry) !void {
     try testing.expectEqualSlices(
         u8,
         &expected_ea,
-        &gs.epoch_secrets.epoch_authenticator,
+        &join_result.group_state.epoch_secrets.epoch_authenticator,
     );
 }
 
@@ -4105,7 +4105,7 @@ fn verifyPassiveHandlingCommit(
     );
 
     // 8. processWelcome.
-    var gs = try zmls.processWelcome(
+    var join_result = try zmls.processWelcome(
         P,
         allocator,
         &w_r.value,
@@ -4117,17 +4117,17 @@ fn verifyPassiveHandlingCommit(
         my_leaf,
         resolver,
     );
-    defer gs.deinit();
+    defer join_result.deinit();
 
     // Free the tree we passed to processWelcome (it was cloned).
     tree.deinit();
 
     // Set up resumption PSK ring with non-zero capacity and
     // store the initial epoch's resumption PSK.
-    gs.resumption_psk_ring = zmls.ResumptionPskRing(P).init(16);
-    gs.resumption_psk_ring.retain(
-        gs.group_context.epoch,
-        &gs.epoch_secrets.resumption_psk,
+    join_result.group_state.resumption_psk_ring = zmls.ResumptionPskRing(P).init(16);
+    join_result.group_state.resumption_psk_ring.retain(
+        join_result.group_state.group_context.epoch,
+        &join_result.group_state.epoch_secrets.resumption_psk,
     );
 
     // 9. Verify initial_epoch_authenticator.
@@ -4138,7 +4138,7 @@ fn verifyPassiveHandlingCommit(
     try testing.expectEqualSlices(
         u8,
         &expected_init_ea,
-        &gs.epoch_secrets.epoch_authenticator,
+        &join_result.group_state.epoch_secrets.epoch_authenticator,
     );
 
     // -- Process epochs --
@@ -4150,14 +4150,14 @@ fn verifyPassiveHandlingCommit(
         try processEpoch(
             allocator,
             epoch,
-            &gs.tree,
-            &gs.group_context,
-            &gs.interim_transcript_hash,
-            &gs.epoch_secrets.init_secret,
-            gs.my_leaf_index,
+            &join_result.group_state.tree,
+            &join_result.group_state.group_context,
+            &join_result.group_state.interim_transcript_hash,
+            &join_result.group_state.epoch_secrets.init_secret,
+            join_result.group_state.my_leaf_index,
             &enc_sk,
             &psk_store,
-            &gs.resumption_psk_ring,
+            &join_result.group_state.resumption_psk_ring,
             &pk_buf,
             &pk_count,
         );

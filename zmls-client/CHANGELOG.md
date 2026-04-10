@@ -9,6 +9,9 @@ All notable changes to this project will be documented in this file.
 - **Welcome path_secret in inviteMember** -- `buildInviteResult` now
   passes path secrets, filtered direct path nodes, and the new member's
   leaf index through to `buildWelcome` per RFC 9420 §12.4.3.1.
+- **joinGroup adapts to WelcomeJoinResult** -- `joinGroup` now handles
+  the `WelcomeJoinResult` return type from `joinViaWelcome`, extracting
+  the group state from the result.
 
 ## [0.1.1] - 2026-04-10
 

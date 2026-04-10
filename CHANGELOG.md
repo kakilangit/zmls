@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
   Previously hardcoded to `null`, new members can now receive the path
   secret for the lowest node in the committer's filtered direct path
   that is also in the new member's direct path.
+- **processWelcome derives path keys from path_secret** --
+  `processWelcome` now returns `WelcomeJoinResult` containing the
+  `GroupState` plus derived parent node private keys from the Welcome's
+  `path_secret`. The joiner can use these keys for future UpdatePath
+  decryption where they are matched via a parent node.
 
 ## [0.1.2] - 2026-04-10
 
