@@ -21,6 +21,11 @@ All notable changes to this project will be documented in this file.
   `signer_verify_key` matches the `signature_key` of the leaf at
   `GroupInfo.signer` in the ratchet tree (constant-time compare).
   Previously the key was trusted entirely from caller input.
+- **HPKE public key validation for encryption_key** --
+  `LeafNode.validateEncryptionKey(P)` validates that `encryption_key`
+  is a valid HPKE public key via `P.validateDhPublicKey`. Called from
+  `KeyPackage.validate`, Update leaf validation, and Welcome tree
+  validation per RFC 9420 §7.3.
 
 ## [0.1.2] - 2026-04-10
 

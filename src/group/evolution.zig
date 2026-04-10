@@ -463,6 +463,8 @@ pub fn validateUpdateLeafNodes(
             return error.SignatureVerifyFailed;
         };
         try entry.leaf_node.validate(expected_suite, null);
+        // RFC 9420 §7.3: encryption_key MUST be valid HPKE key.
+        try entry.leaf_node.validateEncryptionKey(P);
     }
 }
 

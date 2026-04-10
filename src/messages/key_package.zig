@@ -264,6 +264,10 @@ pub const KeyPackage = struct {
 
         // 6. Validate LeafNode (RFC 9420 Section 7.3).
         try self.leaf_node.validate(expected_suite, current_time);
+
+        // 7. encryption_key MUST be a valid HPKE public key
+        //    (RFC 9420 §7.3).
+        try self.leaf_node.validateEncryptionKey(P);
     }
 
     // -- KeyPackageRef ----------------------------------------------------

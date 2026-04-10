@@ -294,7 +294,7 @@ pub fn processWelcome(
         return error.CipherSuiteMismatch;
 
     // Validate tree leaf nodes and structural invariants.
-    try validateWelcomeTree(&tree, gc.cipher_suite);
+    try validateWelcomeTree(P, &tree, gc.cipher_suite);
 
     // RFC 9420 §12.4.3.1: verify that the caller-provided
     // signer_verify_key matches the signer's leaf in the
@@ -521,19 +521,22 @@ fn verifyTreeAndDecodeContext(
 /// Welcome. Checks leaf node validity, encryption key uniqueness,
 /// and unmerged_leaves structural invariants.
 fn validateWelcomeTree(
+    comptime P: type,
     tree: *const RatchetTree,
     suite: CipherSuite,
 ) WelcomeError!void {
     // 1. Validate each non-blank leaf.
-    try validateTreeLeaves(tree, suite);
+    try validateTreeLeaves(P, tree, suite);
     // 2. Check encryption key uniqueness across all nodes.
     try validateKeyUniqueness(tree);
     // 3. Validate unmerged_leaves in parent nodes.
     try validateUnmergedLeaves(tree);
 }
 
-/// Validate every non-blank leaf with LeafNode.validate().
+/// Validate every non-blank leaf with LeafNode.validate()
+/// and check encryption_key is a valid HPKE public key.
 pub fn validateTreeLeaves(
+    comptime P: type,
     tree: *const RatchetTree,
     suite: CipherSuite,
 ) WelcomeError!void {
@@ -545,6 +548,11 @@ pub fn validateTreeLeaves(
                     suite,
                     null,
                 ) catch return error.InvalidLeafNode;
+                // RFC 9420 §7.3: encryption_key MUST be a
+                // valid HPKE public key.
+                node.payload.leaf.validateEncryptionKey(
+                    P,
+                ) catch return error.InvalidPublicKey;
             }
         }
     }

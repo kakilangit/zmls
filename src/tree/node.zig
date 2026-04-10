@@ -579,6 +579,20 @@ pub const LeafNode = struct {
         try self.validateSelfRequiredCaps();
     }
 
+    /// Validate that encryption_key is a valid HPKE public
+    /// key for the cipher suite per RFC 9420 §7.3. Requires
+    /// crypto provider access.
+    pub fn validateEncryptionKey(
+        self: *const LeafNode,
+        comptime P: type,
+    ) (ValidationError || CryptoError)!void {
+        if (self.encryption_key.len != P.npk)
+            return error.InvalidPublicKey;
+        P.validateDhPublicKey(
+            self.encryption_key[0..P.npk],
+        ) catch return error.InvalidPublicKey;
+    }
+
     /// Check that any required_capabilities extension on this leaf
     /// is satisfied by the leaf's own capabilities.
     fn validateSelfRequiredCaps(

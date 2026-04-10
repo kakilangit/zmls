@@ -1475,6 +1475,7 @@ test "validateTreeLeaves rejects invalid leaf" {
     try tree.setLeaf(LeafIndex.fromU32(1), bad_leaf);
 
     const result = validateTreeLeaves(
+        Default,
         &tree,
         .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
     );
