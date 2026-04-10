@@ -34,6 +34,10 @@ All notable changes to this project will be documented in this file.
   post-proposal tree has only one non-blank leaf (e.g. after removing
   all other members), the function returns an empty path result instead
   of propagating `EmptyTree` from `derivePathKeys`.
+- **encodeVarPrefixedList enforces max_vec_length** --
+  `encodeVarPrefixedList` now checks the total serialized inner length
+  against `max_vec_length` (1 MiB), returning `error.VectorTooLarge`
+  if exceeded. Previously only the decoder enforced this limit.
 - **Welcome path_secret per RFC 9420 §12.4.3.1** -- `buildWelcome` now
   computes and includes the per-member `path_secret` in GroupSecrets.
   Previously hardcoded to `null`, new members can now receive the path
