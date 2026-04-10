@@ -29,11 +29,16 @@ All notable changes to this project will be documented in this file.
 
 - **Crypto fuzz targets** -- 6 new fuzz targets in `tests/fuzz_crypto.zig`
   for HPKE seal/open, sign/verify, DeriveKeyPair, and tree hash.
+- **Commit fuzz targets** -- 2 new fuzz targets in `tests/fuzz_commit.zig`
+  for `processCommit` with random proposals and PrivateMessage
+  encrypt/decrypt round-trip with corruption testing.
 - **Add proposal fuzzing** -- `tests/fuzz_proposals.zig` now includes
   Add proposals with KeyPackage in both codec and validation fuzzing.
-- **Integration tests** -- 4 new end-to-end tests: PSK through commit
+- **Integration tests** -- 7 new end-to-end tests: PSK through commit
   pipeline, mixed Add+Remove in same commit, concurrent commit
-  rejection, and GroupContextExtensions proposal.
+  rejection, GroupContextExtensions proposal, ReInit proposal
+  end-to-end, out-of-order stale-epoch rejection, and group with
+  257 members (>256 leaf tree).
 - **Multi-suite interop tests** -- PSK, Welcome, and tree-validation
   test vectors now verified for suites 2 (P-256) and 7 (P-384) in
   addition to suites 1 and 3.

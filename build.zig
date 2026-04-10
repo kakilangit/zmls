@@ -49,13 +49,14 @@ pub fn build(b: *std.Build) void {
     });
     const run_interop_tests = b.addRunArtifact(interop_tests);
 
-    // Fuzz targets: codec, tree, proposals, messages, crypto.
+    // Fuzz targets: codec, tree, proposals, messages, crypto, commit.
     const fuzz_names = [_][]const u8{
         "tests/fuzz_codec.zig",
         "tests/fuzz_tree.zig",
         "tests/fuzz_proposals.zig",
         "tests/fuzz_messages.zig",
         "tests/fuzz_crypto.zig",
+        "tests/fuzz_commit.zig",
     };
 
     const test_step = b.step("test", "Run all tests");
