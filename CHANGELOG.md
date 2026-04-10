@@ -12,6 +12,12 @@ All notable changes to this project will be documented in this file.
   using constant-time comparison. Returns `error.PathSecretMismatch` if
   any derived key disagrees with the tree. Previously the comment stated
   "verify against tree public keys" but no verification occurred.
+- **LeafNode.encodeTbs rejects key_package without Lifetime** --
+  `encodeTbs` now returns `error.MissingLifetime` when `source` is
+  `.key_package` and `lifetime` is null. RFC §7.2 defines Lifetime as
+  structurally required for key_package source; the decoder always reads
+  it. Previously the encoder silently skipped it, creating encode/decode
+  asymmetry.
 - **Welcome path_secret per RFC 9420 §12.4.3.1** -- `buildWelcome` now
   computes and includes the per-member `path_secret` in GroupSecrets.
   Previously hardcoded to `null`, new members can now receive the path

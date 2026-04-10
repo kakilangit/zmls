@@ -538,6 +538,28 @@ test "encodeSignContent no context for key_package" {
     );
 }
 
+test "encodeTbs rejects key_package with null lifetime" {
+    // RFC §7.2: Lifetime is structurally required for
+    // key_package source. Encoding without it must fail.
+    const enc_kp = try Default.dhKeypairFromSeed(
+        &([_]u8{0xF3} ** 32),
+    );
+    const sign_kp = try Default.signKeypairFromSeed(
+        &([_]u8{0xF4} ** 32),
+    );
+
+    var leaf = testLeaf(
+        .key_package,
+        &enc_kp.pk,
+        &sign_kp.pk,
+    );
+    leaf.lifetime = null;
+
+    var buf: [max_leaf_encode]u8 = undefined;
+    const result = leaf.encodeTbs(&buf, 0);
+    try testing.expectError(error.MissingLifetime, result);
+}
+
 test "decodeExtensionList rejects duplicate extension types" {
     const alloc = testing.allocator;
 

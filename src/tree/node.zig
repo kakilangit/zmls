@@ -396,9 +396,12 @@ pub const LeafNode = struct {
         );
         // source-specific fields.
         if (self.source == .key_package) {
-            if (self.lifetime) |lt| {
-                p = try lt.encode(buf, p);
-            }
+            // RFC §7.2: Lifetime is structurally required for
+            // key_package source. The decoder always reads it,
+            // so the encoder must always write it.
+            const lt = self.lifetime orelse
+                return error.MissingLifetime;
+            p = try lt.encode(buf, p);
         } else if (self.source == .commit) {
             // parent_hash<V> per RFC 9420 Section 7.2.
             const ph = self.parent_hash orelse &.{};

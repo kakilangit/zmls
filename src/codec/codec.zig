@@ -17,7 +17,7 @@ const errors = @import("../common/errors.zig");
 const DecodeError = errors.DecodeError;
 const max_vec_length = @import("../common/types.zig").max_vec_length;
 
-pub const EncodeError = error{ BufferTooSmall, MissingConfirmationTag, VectorTooLarge };
+pub const EncodeError = error{ BufferTooSmall, MissingConfirmationTag, MissingLifetime, VectorTooLarge };
 
 // -- Encoding ----------------------------------------------------------------
 

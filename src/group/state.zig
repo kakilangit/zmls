@@ -854,7 +854,10 @@ test "epochAuthenticator is non-zero after createGroup" {
             .credentials = &.{.basic},
         },
         .source = .key_package,
-        .lifetime = null,
+        .lifetime = .{
+            .not_before = 0,
+            .not_after = 0xFFFFFFFFFFFFFFFF,
+        },
         .parent_hash = null,
         .extensions = &.{},
         .signature = &.{},
