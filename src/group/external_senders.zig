@@ -8,9 +8,9 @@
 // (type 5) carries a list of ExternalSender entries, each
 // containing a signature public key and a credential.
 //
-// External senders may only send: Add, Remove, PSK, and ReInit
-// proposals. They MUST NOT send: Update, GroupContextExtensions,
-// or ExternalInit proposals.
+// External senders may only send: Add, Remove, PSK, ReInit,
+// and GroupContextExtensions proposals. They MUST NOT send:
+// Update or ExternalInit proposals.
 //
 // This module provides:
 //   - ExternalSender struct with encode/decode.
