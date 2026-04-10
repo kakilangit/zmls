@@ -268,6 +268,40 @@ pub const KeyPackage = struct {
         // 7. encryption_key MUST be a valid HPKE public key
         //    (RFC 9420 §7.3).
         try self.leaf_node.validateEncryptionKey(P);
+
+        // 8. init_key MUST be a valid HPKE public key
+        //    (RFC 9420 §10.1).
+        if (self.init_key.len != P.npk)
+            return error.InvalidKeyPackage;
+        P.validateDhPublicKey(
+            self.init_key[0..P.npk],
+        ) catch return error.InvalidKeyPackage;
+
+        // 9. KeyPackage extensions MUST all be listed in
+        //    leaf_node.capabilities.extensions (RFC 9420
+        //    §10.1). Default extension types (1-5) are
+        //    implicitly supported per §7.2.
+        for (self.extensions) |ext| {
+            const v = @intFromEnum(ext.extension_type);
+            if (v >= 1 and v <= 5) continue;
+            if (!capsContains(
+                types.ExtensionType,
+                self.leaf_node.capabilities.extensions,
+                ext.extension_type,
+            )) {
+                return error.InvalidKeyPackage;
+            }
+        }
+
+        // 10. capabilities.versions MUST include mls10
+        //     (RFC 9420 §10.1 + §7.2).
+        if (!capsContains(
+            ProtocolVersion,
+            self.leaf_node.capabilities.versions,
+            .mls10,
+        )) {
+            return error.InvalidKeyPackage;
+        }
     }
 
     // -- KeyPackageRef ----------------------------------------------------
@@ -418,6 +452,20 @@ fn decodeExtensionList(
     ) catch return error.OutOfMemory;
     @memcpy(exts, temp[0..count]);
     return .{ .value = exts, .pos = p };
+}
+
+// -- Helpers -----------------------------------------------------------------
+
+/// Check whether `needle` appears in `list`.
+fn capsContains(
+    comptime T: type,
+    list: []const T,
+    needle: T,
+) bool {
+    for (list) |v| {
+        if (v == needle) return true;
+    }
+    return false;
 }
 
 // -- Tests ---------------------------------------------------------------

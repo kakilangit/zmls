@@ -45,6 +45,17 @@ All notable changes to this project will be documented in this file.
   `encodeVarVector` now returns `error.VectorTooLarge` when
   `data.len > max_vec_length` instead of using a debug-only
   `assert`. Prevents silent corrupt wire data in release builds.
+- **KeyPackage init_key HPKE validation** --
+  `KeyPackage.validate` now verifies that `init_key` is a valid
+  HPKE public key for the cipher suite per RFC 9420 §10.1.
+- **KeyPackage extensions validated against capabilities** --
+  `KeyPackage.validate` now checks that all non-default
+  KeyPackage-level extensions are listed in the leaf node's
+  `capabilities.extensions` per RFC 9420 §10.1.
+- **KeyPackage capabilities.versions must include mls10** --
+  `KeyPackage.validate` now checks that the leaf node's
+  `capabilities.versions` contains `mls10` per RFC 9420
+  §10.1 and §7.2.
 
 ## [0.1.2] - 2026-04-10
 
