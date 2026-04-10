@@ -223,7 +223,7 @@ pub fn GroupContext(comptime nh: u32) type {
             new_tree_hash: [nh]u8,
             new_confirmed_th: [nh]u8,
             new_extensions: []const Extension,
-        ) error{OutOfMemory}!Self {
+        ) (error{OutOfMemory} || errors.GroupError)!Self {
             const gid = try allocator.dupe(u8, self.group_id);
             errdefer allocator.free(gid);
             const exts = try node_mod.cloneExtensions(
@@ -235,7 +235,7 @@ pub fn GroupContext(comptime nh: u32) type {
                 .cipher_suite = self.cipher_suite,
                 .group_id = gid,
                 .epoch = std.math.add(u64, self.epoch, 1) catch
-                    @panic("epoch overflow"),
+                    return error.EpochOverflow,
                 .tree_hash = new_tree_hash,
                 .confirmed_transcript_hash = new_confirmed_th,
                 .extensions = exts,
@@ -263,33 +263,12 @@ fn encodeExtensionList(
     pos: u32,
     items: []const Extension,
 ) EncodeError!u32 {
-    const gap: u32 = 4;
-    const start = pos + gap;
-    var p = start;
-
-    for (items) |*ext| {
-        p = try ext.encode(buf, p);
-    }
-
-    const inner_len: u32 = p - start;
-    var len_buf: [4]u8 = undefined;
-    const len_end = try varint.encode(
-        &len_buf,
-        0,
-        inner_len,
+    return codec.encodeVarPrefixedList(
+        Extension,
+        buf,
+        pos,
+        items,
     );
-
-    const dest_start = pos + len_end;
-    if (dest_start != start) {
-        std.mem.copyForwards(
-            u8,
-            buf[dest_start..][0..inner_len],
-            buf[start..][0..inner_len],
-        );
-    }
-    @memcpy(buf[pos..][0..len_end], len_buf[0..len_end]);
-
-    return dest_start + inner_len;
 }
 
 /// Free extension data slices allocated during decode.

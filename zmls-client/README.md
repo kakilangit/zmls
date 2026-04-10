@@ -40,35 +40,116 @@ make all           # fmt + check + build + test
 
 ## Quick Start
 
+The `Client(P)` API handles key management, state persistence, and wire encoding.
+For a full working CLI example, see
+[`examples/cli/main.zig`](examples/cli/main.zig).
+
 ```zig
-const zmls_client = @import("zmls-client");
 const zmls = @import("zmls");
+const zmls_client = @import("zmls-client");
+
 const P = zmls.DefaultCryptoProvider;
+const Client = zmls_client.Client(P);
 
-// Set up in-memory adapters.
-var gs = zmls_client.MemoryGroupStore(8).init();
-defer gs.deinit();
-var ks = zmls_client.MemoryKeyStore(P, 8).init();
-defer ks.deinit();
+// Create a client with in-memory stores.
+var group_store = zmls_client.MemoryGroupStore(8).init();
+var key_store = zmls_client.MemoryKeyStore(P, 8).init();
+defer group_store.deinit();
+defer key_store.deinit();
 
-const seed: [32]u8 = .{0x42} ** 32;
-var client = try zmls_client.Client(P).init(
-    allocator,
-    "alice",
+var alice = try Client.init(allocator, "alice",
     .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-    &seed,
-    .{
-        .group_store = gs.groupStore(),
-        .key_store = ks.keyStore(),
-        .credential_validator = zmls.credential_validator
-            .AcceptAllValidator.validator(),
-    },
-);
-defer client.deinit();
+    &signing_seed, .{
+        .group_store = group_store.groupStore(),
+        .key_store = key_store.keyStore(),
+        .credential_validator =
+            zmls.credential_validator.AcceptAllValidator.validator(),
+    });
+defer alice.deinit();
 
-const group_id = try client.createGroup(io);
-defer allocator.free(group_id);
+// Create a group — returns the group_id.
+const group_id = try alice.createGroup(io);
+
+// Generate a key package for another member.
+const kp = try bob.freshKeyPackage(allocator, io);
+
+// Add Bob — produces commit + welcome bytes.
+var invite = try alice.inviteMember(
+    allocator, io, group_id, kp.data,
+);
+defer invite.deinit();
+// invite.commit  — send to existing members
+// invite.welcome — send to the new member
+
+// Bob joins via Welcome.
+const join = try bob.joinGroup(
+    allocator, io, invite.welcome, join_opts,
+);
+defer join.deinit();
+
+// Send an encrypted application message.
+const ct = try alice.sendMessage(
+    allocator, io, group_id, "hello",
+);
+defer allocator.free(ct);
+
+// Receive and decrypt.
+var msg = try bob.receiveMessage(
+    allocator, io, join.group_id, ct,
+);
+defer msg.deinit();
+// msg.data contains "hello"
 ```
+
+### Group Lifecycle
+
+```zig
+// Key update (self-update with new leaf keys).
+const commit = try alice.selfUpdate(
+    allocator, io, group_id,
+);
+
+// Remove a member by leaf index.
+const remove = try alice.removeMember(
+    allocator, io, group_id, 1,
+);
+
+// External join via GroupInfo.
+const gi_bytes = try alice.groupInfo(allocator, io, group_id);
+var ej = try carol.externalJoin(allocator, io, gi_bytes.data);
+// ej.commit — existing members must process this
+// ej.group_id — Carol's new group membership
+
+// Process incoming commit/proposal/message.
+var result = try bob.processIncoming(
+    allocator, io, group_id, incoming_data,
+);
+// result is a tagged union: .commit_applied, .application,
+// or .proposal_cached
+```
+
+### Custom Cipher Suite
+
+The `P` parameter is a comptime struct satisfying the
+`CryptoProvider` interface. Switch cipher suites by
+changing the type:
+
+```zig
+// P-256 / AES-128-GCM (suite 0x0002)
+const P256 = zmls.P256CryptoProvider;
+var client = try zmls_client.Client(P256).init(...);
+
+// X25519 / ChaCha20-Poly1305 (suite 0x0003)
+const ChaCha = zmls.ChaCha20CryptoProvider;
+var client = try zmls_client.Client(ChaCha).init(...);
+```
+
+To implement a custom provider, define a struct with the
+required comptime fields (`nh`, `nsk`, `npk`, `sign_sk_len`,
+`sign_pk_len`) and functions (`dhKeypairFromSeed`, `hkdfExtract`,
+`hkdfExpand`, `aeadSeal`, `aeadOpen`, `hpkeEncrypt`,
+`hpkeDecrypt`, `sign`, `verify`). See the zmls core library's
+`src/crypto/provider.zig` for the full interface contract.
 
 ## Client(P) API
 
@@ -124,6 +205,35 @@ Parameterized over `CryptoProvider` at comptime.
 
 ## Architecture
 
+Hexagonal (ports and adapters) architecture. The client layer orchestrates
+the core zmls protocol library with I/O, state management, and application
+integration.
+
+```
+                    +---------------------------+
+                    |       Application         |
+                    +---------------------------+
+                             |
+                    +---------------------------+
+                    |   zmls-client: Client(P)  |
+                    |  (orchestrator + state)   |
+                    +---------------------------+
+                      |          |            |
+               +------+---+ +----+------+  +--+--------+
+               |GroupStore| |KeyStore(P)|  | Transport |  <- ports
+               +------+---+ +----+------+  +--+--------+
+                      |          |            |
+                    +---------------------------+
+                    |     zmls: core library    |
+                    |  (pure computation, no IO)|
+                    +---------------------------+
+                    |              |            |
+               +----+-----+   +----+-----+  +---+-------+
+               |CryptoP   |   |Credential|  |KeySchedule|
+               |(comptime)|   |Validator |  |SecretTree |
+               +----------+   +----------+  +-----------+
+```
+
 ### Ports (interfaces)
 
 | Port | Generic | Purpose |
@@ -165,15 +275,6 @@ method that performs I/O takes `io: std.Io` by value.
 `wire.writeEnvelope` / `wire.readEnvelope` provide versioned binary
 framing for messages on the wire.
 
-### Test Coverage
-
-| Category | Count |
-|----------|------:|
-| Client unit tests | 37 |
-| Adapter/port/wire unit tests | 44 |
-| Integration tests | 12 |
-| CLI end-to-end tests | 18 |
-
 ## CLI
 
 A fully working CLI at `examples/cli/main.zig` demonstrating the
@@ -197,16 +298,6 @@ A fully working CLI at `examples/cli/main.zig` demonstrating the
 | `external-join <gi> <identity>` | Join via external commit |
 | `process <state> <msg-file>` | Process incoming commit |
 
-### End-to-End Tests
-
-`examples/cli/test_e2e.sh` runs 18 tests covering:
-- Group creation, info, key-package generation
-- Add member, join via Welcome
-- Send and receive encrypted messages
-- MLS exporter
-- GroupInfo export and external join
-- Key update then message exchange
-- Member removal and message isolation
 
 ## Source Layout
 

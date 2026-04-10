@@ -1,5 +1,20 @@
 //! Content authentication (signing/verification of FramedContent)
 //! and confirmation tag computation per RFC 9420 Section 6.1.
+//!
+//! ## Security contract
+//!
+//! `verifyFramedContent` **must** be called on every incoming
+//! `FramedContent` before the content is applied to group
+//! state. The core commit processing pipeline (`processCommit`
+//! in commit.zig and external.zig) enforces this invariant
+//! internally — callers that go through `GroupState.processCommit`
+//! or `processExternalCommit` do not need to verify separately.
+//!
+//! If you process `FramedContent` through any other path (e.g.,
+//! decoding a PublicMessage and inspecting its payload directly),
+//! you **must** call `verifyFramedContent` yourself before
+//! acting on the content. Failure to do so allows signature
+//! forgery attacks.
 // Content authentication per RFC 9420 Section 6.1.
 //
 // Provides signing and verification of FramedContent, plus
@@ -205,7 +220,7 @@ pub fn verifyFramedContent(
         verify_key,
         "FramedContentTBS",
         tbs_buf[0..tbs_len],
-        &auth.signature,
+        auth.signature[0..],
     );
 }
 

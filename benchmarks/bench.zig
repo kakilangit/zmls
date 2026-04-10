@@ -618,7 +618,7 @@ fn benchTreeHash256() void {
 fn benchVerifyParentHashes16() void {
     var tree = buildTree(16) orelse return;
     defer tree.deinit();
-    mls.tree_hashes.verifyParentHashes(
+    _ = mls.tree_hashes.verifyParentHashes(
         Default,
         alloc,
         &tree,
@@ -1356,22 +1356,18 @@ fn benchProcessCommit() void {
     var pr = mls.processCommit(
         Default,
         alloc,
-        &fc,
-        &cr.signature,
-        &cr.confirmation_tag,
-        &proposals,
-        null,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &a_sign.pk,
+            .wire_format = .mls_public_message,
+        },
         &gs.group_context,
         &gs.tree,
-        &a_sign.pk,
         &gs.interim_transcript_hash,
         &gs.epoch_secrets.init_secret,
-        null,
-        null,
-        null,
-        null,
-        null,
-        .mls_public_message,
     ) catch {
         gs.deinit();
         return;
@@ -1506,10 +1502,11 @@ fn benchProcessWelcome() void {
     );
 
     var eph_seed: [32]u8 = [_]u8{0xE1} ** 32;
-    const nm = [_]mls.group_welcome.NewMemberEntry{.{
+    const nm = [_]mls.group_welcome.NewMemberEntry(Default){.{
         .kp_ref = &kp_ref,
         .init_pk = bob_kp.kp.init_key,
         .eph_seed = &eph_seed,
+        .leaf_index = mls.LeafIndex.fromU32(1),
     }};
 
     var wr = mls.buildWelcome(
@@ -1524,6 +1521,10 @@ fn benchProcessWelcome() void {
         .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
         &nm,
         &.{},
+        null,
+        0,
+        null,
+        0,
     ) catch {
         cr.deinit(alloc);
         gs.deinit();
@@ -1531,7 +1532,7 @@ fn benchProcessWelcome() void {
     };
 
     // Measure: Bob processes Welcome.
-    var bob_gs = mls.processWelcome(
+    var bob_join = mls.processWelcome(
         Default,
         alloc,
         &wr.welcome,
@@ -1548,7 +1549,7 @@ fn benchProcessWelcome() void {
         gs.deinit();
         return;
     };
-    bob_gs.deinit();
+    bob_join.deinit();
     wr.deinit(alloc);
     cr.deinit(alloc);
     gs.deinit();
@@ -1963,8 +1964,8 @@ const P256 = mls.P256CryptoProvider;
 const P384 = mls.P384CryptoProvider;
 
 fn suiteCreateGroup(comptime P: type, cs: mls.CipherSuite) void {
-    const seed_s = [_]u8{0x01} ** 32;
-    const seed_e = [_]u8{0x02} ** 32;
+    const seed_s = [_]u8{0x01} ** P.seed_len;
+    const seed_e = [_]u8{0x02} ** P.seed_len;
     const kp = P.signKeypairFromSeed(
         &seed_s,
     ) catch return;
@@ -2005,8 +2006,8 @@ fn suiteCreateGroup(comptime P: type, cs: mls.CipherSuite) void {
 }
 
 fn suiteDh(comptime P: type) void {
-    const sa = [_]u8{0x01} ** 32;
-    const sb = [_]u8{0x02} ** 32;
+    const sa = [_]u8{0x01} ** P.seed_len;
+    const sb = [_]u8{0x02} ** P.seed_len;
     const a = P.dhKeypairFromSeed(&sa) catch return;
     const b = P.dhKeypairFromSeed(&sb) catch return;
     const ss = P.dh(&a.sk, &b.pk) catch return;
@@ -2014,7 +2015,7 @@ fn suiteDh(comptime P: type) void {
 }
 
 fn suiteSign(comptime P: type) void {
-    const seed = [_]u8{0x42} ** 32;
+    const seed = [_]u8{0x42} ** P.seed_len;
     const kp = P.signKeypairFromSeed(&seed) catch return;
     const msg = [_]u8{0xAB} ** 256;
     const sig = P.sign(&kp.sk, &msg) catch return;

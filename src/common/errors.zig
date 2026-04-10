@@ -27,6 +27,10 @@ pub const DecodeError = error{
     DuplicateExtensionType,
     /// Deserialized state contains invalid/degenerate values.
     CorruptState,
+    /// A membership tag has the wrong length for the cipher suite.
+    InvalidMembershipTagLength,
+    /// The protocol version is not supported (must be mls10).
+    UnsupportedProtocolVersion,
 };
 
 /// Errors from cryptographic operations.
@@ -131,4 +135,6 @@ pub const GroupError = error{
     PskNotFound,
     /// Forward ratchet distance exceeds max_forward_ratchet.
     GenerationTooFar,
+    /// The epoch counter reached u64 maximum and would overflow.
+    EpochOverflow,
 };

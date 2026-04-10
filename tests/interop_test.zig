@@ -4,8 +4,10 @@
 //   https://github.com/mlswg/mls-implementations/tree/main/test-vectors
 //
 // All tests load JSON at runtime via @embedFile + std.json.
-// Only cipher suite 1 (MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519)
-// is tested, matching our default CryptoProvider.
+// Cipher suites tested: 1 (X25519/AES-128/Ed25519),
+// 2 (P-256/AES-128/P-256), 3 (X25519/ChaCha20/Ed25519),
+// and 7 (P-384/AES-256/P-384). Suites 4-6 (X448/Ed448, P-521)
+// are not implemented.
 
 const std = @import("std");
 const testing = std.testing;
@@ -1707,6 +1709,28 @@ test "psk secret: cipher suite 3 (all counts)" {
     try testing.expect(count > 0);
 }
 
+test "psk secret: cipher suite 7 (all counts)" {
+    const parsed = try std.json.parseFromSlice(
+        []const PskSecretEntry,
+        testing.allocator,
+        psk_secret_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 7) {
+            try verifyPskSecret(
+                zmls.P384CryptoProvider,
+                entry,
+            );
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
 // =====================================================================
 // 9. Welcome — loaded from welcome.json
 // =====================================================================
@@ -1859,6 +1883,72 @@ test "welcome: cipher suite 1 — decrypt and verify" {
     for (parsed.value) |entry| {
         if (entry.cipher_suite == 1) {
             try verifyWelcome(P, entry);
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "welcome: cipher suite 2 — decrypt and verify" {
+    const parsed = try std.json.parseFromSlice(
+        []const WelcomeEntry,
+        testing.allocator,
+        welcome_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 2) {
+            try verifyWelcome(
+                zmls.P256CryptoProvider,
+                entry,
+            );
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "welcome: cipher suite 3 — decrypt and verify" {
+    const parsed = try std.json.parseFromSlice(
+        []const WelcomeEntry,
+        testing.allocator,
+        welcome_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 3) {
+            try verifyWelcome(
+                zmls.ChaCha20CryptoProvider,
+                entry,
+            );
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "welcome: cipher suite 7 — decrypt and verify" {
+    const parsed = try std.json.parseFromSlice(
+        []const WelcomeEntry,
+        testing.allocator,
+        welcome_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 7) {
+            try verifyWelcome(
+                zmls.P384CryptoProvider,
+                entry,
+            );
             count += 1;
         }
     }
@@ -2226,7 +2316,7 @@ fn verifyTreeValidation(
     }
 
     // 4. Verify parent hashes (whole-tree, bottom-up per 7.9.2).
-    try tree_hashes_mod.verifyParentHashes(Prov, allocator, &tree);
+    _ = try tree_hashes_mod.verifyParentHashes(Prov, allocator, &tree);
 
     // 5. Verify leaf signatures.
     const group_id = try hexDecodeAlloc(
@@ -2262,6 +2352,72 @@ test "tree-validation: cipher suite 1 — resolution, hashes, parent hash, signa
     for (parsed.value) |entry| {
         if (entry.cipher_suite == 1) {
             try verifyTreeValidation(P, entry);
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "tree-validation: cipher suite 2" {
+    const parsed = try std.json.parseFromSlice(
+        []const TreeValidationEntry,
+        testing.allocator,
+        tree_validation_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 2) {
+            try verifyTreeValidation(
+                zmls.P256CryptoProvider,
+                entry,
+            );
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "tree-validation: cipher suite 3" {
+    const parsed = try std.json.parseFromSlice(
+        []const TreeValidationEntry,
+        testing.allocator,
+        tree_validation_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 3) {
+            try verifyTreeValidation(
+                zmls.ChaCha20CryptoProvider,
+                entry,
+            );
+            count += 1;
+        }
+    }
+    try testing.expect(count > 0);
+}
+
+test "tree-validation: cipher suite 7" {
+    const parsed = try std.json.parseFromSlice(
+        []const TreeValidationEntry,
+        testing.allocator,
+        tree_validation_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var count: u32 = 0;
+    for (parsed.value) |entry| {
+        if (entry.cipher_suite == 7) {
+            try verifyTreeValidation(
+                zmls.P384CryptoProvider,
+                entry,
+            );
             count += 1;
         }
     }
@@ -3531,7 +3687,7 @@ fn verifyPassiveWelcome(entry: PassiveWelcomeEntry) !void {
     );
 
     // 10. Call processWelcome.
-    var gs = try zmls.processWelcome(
+    var join_result = try zmls.processWelcome(
         P,
         allocator,
         &w_r.value,
@@ -3543,7 +3699,7 @@ fn verifyPassiveWelcome(entry: PassiveWelcomeEntry) !void {
         my_leaf,
         resolver,
     );
-    defer gs.deinit();
+    defer join_result.deinit();
 
     // 11. Verify epoch_authenticator.
     const expected_ea = try hexDecode(
@@ -3553,7 +3709,7 @@ fn verifyPassiveWelcome(entry: PassiveWelcomeEntry) !void {
     try testing.expectEqualSlices(
         u8,
         &expected_ea,
-        &gs.epoch_secrets.epoch_authenticator,
+        &join_result.group_state.epoch_secrets.epoch_authenticator,
     );
 }
 
@@ -3770,26 +3926,25 @@ fn processEpoch(
     var result = zmls.processCommit(
         P,
         allocator,
-        &cm.fc,
-        &cm.auth.signature,
-        &(cm.auth.confirmation_tag orelse
-            return error.MissingConfirmationTag),
-        resolved,
-        if (commit_r.value.path) |*p_val|
-            @as(?*const zmls.UpdatePath, p_val)
-        else
-            null,
+        .{
+            .fc = &cm.fc,
+            .signature = &cm.auth.signature,
+            .confirmation_tag = &(cm.auth.confirmation_tag orelse
+                return error.MissingConfirmationTag),
+            .proposals = resolved,
+            .update_path = if (commit_r.value.path) |*p_val|
+                @as(?*const zmls.UpdatePath, p_val)
+            else
+                null,
+            .sender_verify_key = &sender_pk,
+            .receiver_params = rp,
+            .psk_resolver = resolver,
+            .proposal_senders = resolved_senders,
+        },
         group_context,
         tree,
-        &sender_pk,
         interim_th,
         init_secret,
-        rp,
-        resolver,
-        resolved_senders,
-        null,
-        null,
-        .mls_public_message,
     ) catch |err| return err;
 
     // 9. Free old tree, adopt new one.
@@ -3950,7 +4105,7 @@ fn verifyPassiveHandlingCommit(
     );
 
     // 8. processWelcome.
-    var gs = try zmls.processWelcome(
+    var join_result = try zmls.processWelcome(
         P,
         allocator,
         &w_r.value,
@@ -3962,17 +4117,17 @@ fn verifyPassiveHandlingCommit(
         my_leaf,
         resolver,
     );
-    defer gs.deinit();
+    defer join_result.deinit();
 
     // Free the tree we passed to processWelcome (it was cloned).
     tree.deinit();
 
     // Set up resumption PSK ring with non-zero capacity and
     // store the initial epoch's resumption PSK.
-    gs.resumption_psk_ring = zmls.ResumptionPskRing(P).init(16);
-    gs.resumption_psk_ring.retain(
-        gs.group_context.epoch,
-        &gs.epoch_secrets.resumption_psk,
+    join_result.group_state.resumption_psk_ring = zmls.ResumptionPskRing(P).init(16);
+    join_result.group_state.resumption_psk_ring.retain(
+        join_result.group_state.group_context.epoch,
+        &join_result.group_state.epoch_secrets.resumption_psk,
     );
 
     // 9. Verify initial_epoch_authenticator.
@@ -3983,7 +4138,7 @@ fn verifyPassiveHandlingCommit(
     try testing.expectEqualSlices(
         u8,
         &expected_init_ea,
-        &gs.epoch_secrets.epoch_authenticator,
+        &join_result.group_state.epoch_secrets.epoch_authenticator,
     );
 
     // -- Process epochs --
@@ -3995,14 +4150,14 @@ fn verifyPassiveHandlingCommit(
         try processEpoch(
             allocator,
             epoch,
-            &gs.tree,
-            &gs.group_context,
-            &gs.interim_transcript_hash,
-            &gs.epoch_secrets.init_secret,
-            gs.my_leaf_index,
+            &join_result.group_state.tree,
+            &join_result.group_state.group_context,
+            &join_result.group_state.interim_transcript_hash,
+            &join_result.group_state.epoch_secrets.init_secret,
+            join_result.group_state.my_leaf_index,
             &enc_sk,
             &psk_store,
-            &gs.resumption_psk_ring,
+            &join_result.group_state.resumption_psk_ring,
             &pk_buf,
             &pk_count,
         );

@@ -21,7 +21,6 @@
 // For now, those variants store the inner bytes opaquely.
 
 const std = @import("std");
-const assert = std.debug.assert;
 const codec = @import("../codec/codec.zig");
 const types = @import("../common/types.zig");
 const errors = @import("../common/errors.zig");
@@ -65,8 +64,10 @@ pub const MLSMessage = struct {
         self: *const MLSMessage,
         buf: []u8,
         pos: u32,
-    ) EncodeError!u32 {
-        assert(self.version == .mls10);
+    ) (EncodeError || DecodeError)!u32 {
+        if (self.version != .mls10) {
+            return error.UnsupportedProtocolVersion;
+        }
         var p = pos;
 
         // ProtocolVersion (u16)
@@ -125,6 +126,9 @@ pub const MLSMessage = struct {
         p = wf_raw.pos;
 
         const version: ProtocolVersion = @enumFromInt(ver.value);
+        if (version != .mls10) {
+            return error.UnsupportedProtocolVersion;
+        }
         const wf: WireFormat = @enumFromInt(wf_raw.value);
 
         switch (wf) {
@@ -366,4 +370,33 @@ test "decodeExact rejects trailing bytes" {
     buf[end] = 0xFF;
     const bad = MLSMessage.decodeExact(buf[0 .. end + 1]);
     try testing.expectError(error.TrailingData, bad);
+}
+
+test "MLSMessage decode rejects unsupported version" {
+    // Version 0xFFFF, WireFormat mls_public_message (0x0001),
+    // followed by some body bytes.
+    const buf = [_]u8{
+        0xFF, 0xFF, // version = 0xFFFF
+        0x00, 0x01, // wire_format = mls_public_message
+        0x00, // body byte
+    };
+    const result = MLSMessage.decode(&buf, 0);
+    try testing.expectError(
+        error.UnsupportedProtocolVersion,
+        result,
+    );
+}
+
+test "MLSMessage encode rejects unsupported version" {
+    const msg = MLSMessage{
+        .version = @enumFromInt(0xFFFF),
+        .wire_format = .mls_public_message,
+        .body = .{ .public_message = "data" },
+    };
+    var buf: [64]u8 = undefined;
+    const result = msg.encode(&buf, 0);
+    try testing.expectError(
+        error.UnsupportedProtocolVersion,
+        result,
+    );
 }

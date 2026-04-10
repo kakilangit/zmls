@@ -51,6 +51,13 @@ fn hpkeSuiteId(
 /// so the buffer must accommodate the largest context plus
 /// overhead. 68 KB covers the 65536-byte max_gi_buf + tag +
 /// HPKE framing.
+///
+/// NOTE: Each call to hpkeLabeledExtract/hpkeLabeledExpand
+/// places this buffer on the stack. Peak transient stack usage
+/// during keyScheduleBase is ~68 KB (one buffer per call, not
+/// concurrent). To reduce this, kdfExtract/kdfExpand would need
+/// incremental update support, requiring changes to all crypto
+/// provider backends.
 const max_labeled_buf: u32 = 68 * 1024;
 
 /// HPKE base mode bound to a specific CryptoProvider.
@@ -68,7 +75,12 @@ pub fn Hpke(comptime P: type) type {
         const kdf_id: u16 = P.kdf_id;
         const aead_id: u16 = P.aead_id;
 
-        /// KEM shared secret length (Nsecret = Nh for X25519).
+        /// KEM shared secret length. For DHKEM suites (X25519, P-256,
+        /// P-384), Nsecret equals Nh (hash output length). This is a
+        /// coincidence of the suites we support — RFC 9180 Table 2
+        /// defines them independently. If a future suite has
+        /// Nsecret != Nh, this must become a separate provider
+        /// constant.
         const n_secret: u32 = P.nh;
         /// Encapsulated key length (Nenc = Npk for DHKEM).
         const n_enc: u32 = P.npk;
@@ -201,7 +213,7 @@ pub fn Hpke(comptime P: type) type {
                     &sk,
                 );
                 defer secureZero(&sk);
-                const seed: *const [32]u8 = sk[0..32];
+                const seed: *const [P.seed_len]u8 = sk[0..P.seed_len];
                 const kp = try P.dhKeypairFromSeed(seed);
                 return .{ .sk = kp.sk, .pk = kp.pk };
             } else if (kem_id == 0x0010 or
@@ -279,9 +291,16 @@ pub fn Hpke(comptime P: type) type {
 
         /// Encap(pkR) — deterministic variant that takes
         /// an ephemeral seed (for testability).
+        ///
+        /// WARNING: The `eph_seed` MUST be unique per call.
+        /// Reusing the same seed with different recipients
+        /// breaks IND-CCA2 security (reveals relationships
+        /// between ciphertexts). Only use a fixed seed in
+        /// tests; production callers must supply fresh
+        /// randomness each time.
         pub fn encapDeterministic(
             pk_r: *const [P.npk]u8,
-            eph_seed: *const [32]u8,
+            eph_seed: *const [P.seed_len]u8,
         ) CryptoError!struct {
             shared_secret: [n_secret]u8,
             enc: [n_enc]u8,
@@ -413,7 +432,7 @@ pub fn Hpke(comptime P: type) type {
             info: []const u8,
             aad: []const u8,
             plaintext: []const u8,
-            eph_seed: *const [32]u8,
+            eph_seed: *const [P.seed_len]u8,
             ct_out: []u8,
             tag_out: *[P.nt]u8,
         ) CryptoError![n_enc]u8 {
@@ -429,6 +448,7 @@ pub fn Hpke(comptime P: type) type {
             );
             defer secureZero(&context.key);
             defer secureZero(&context.base_nonce);
+            defer secureZero(&context.exporter_secret);
 
             // Seal with seq = 0 → nonce = base_nonce.
             P.aeadSeal(
@@ -463,6 +483,7 @@ pub fn Hpke(comptime P: type) type {
             );
             defer secureZero(&context.key);
             defer secureZero(&context.base_nonce);
+            defer secureZero(&context.exporter_secret);
 
             try P.aeadOpen(
                 &context.key,

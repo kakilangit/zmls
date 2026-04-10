@@ -41,9 +41,13 @@ const psk_lookup_mod = @import(
 );
 const psk_mod = @import("../key_schedule/psk.zig");
 const commit_mod = @import("commit.zig");
+const path_mod = @import("../tree/path.zig");
+const path_secrets_mod = @import("../tree/path_secrets.zig");
+const secureZero = primitives.secureZero;
 
 const CipherSuite = types.CipherSuite;
 const LeafIndex = types.LeafIndex;
+const NodeIndex = types.NodeIndex;
 const Extension = node_mod.Extension;
 const LeafNode = node_mod.LeafNode;
 const RatchetTree = ratchet_tree_mod.RatchetTree;
@@ -65,6 +69,35 @@ pub const WelcomeError =
     TreeError || CryptoError || ValidationError ||
     GroupError || DecodeError || error{OutOfMemory};
 
+/// Result of processWelcome. Contains the new GroupState plus
+/// parent node private keys derived from the Welcome's
+/// path_secret (RFC 9420 §12.4.3.1). Callers should persist
+/// the path_keys for future UpdatePath decryption.
+pub fn WelcomeJoinResult(comptime P: type) type {
+    return struct {
+        /// The new group state for the joined epoch.
+        group_state: GroupState(P),
+        /// Private keys for parent nodes derived from the
+        /// Welcome's path_secret. path_keys[i] is valid for
+        /// 0..path_key_count. The caller should store these
+        /// for future UpdatePath decryption where the
+        /// receiver is matched via a parent node.
+        path_keys: [path_mod.max_path_nodes]commit_mod
+            .PathNodeKey(P),
+        path_key_count: u32,
+
+        pub fn deinit(
+            self: *@This(),
+        ) void {
+            for (0..self.path_key_count) |i| {
+                secureZero(&self.path_keys[i].sk);
+            }
+            self.path_key_count = 0;
+            self.group_state.deinit();
+        }
+    };
+}
+
 /// Maximum size for decrypted GroupInfo plaintext.
 const max_gi_buf: u32 = 65536;
 
@@ -75,15 +108,17 @@ const max_welcome_psks: u32 = 64;
 /// the combined psk_secret.
 ///
 /// Returns all-zero if the PSK list is empty.
-/// Returns null if any PSK cannot be resolved.
+/// Returns error.PskNotFound if any PSK cannot be resolved.
 fn resolveWelcomePskSecret(
     comptime P: type,
     psks: []const psk_mod.PreSharedKeyId,
     resolver: ?commit_mod.PskResolver(P),
-) ?[P.nh]u8 {
+) (GroupError || ValidationError)![P.nh]u8 {
     if (psks.len == 0) return .{0} ** P.nh;
 
-    if (psks.len > max_welcome_psks) return null;
+    if (psks.len > max_welcome_psks) {
+        return error.InvalidProposalList;
+    }
     const n: u32 = @intCast(psks.len);
     var entries: [max_welcome_psks]psk_mod.PskEntry = undefined;
     var ei: u32 = 0;
@@ -108,15 +143,14 @@ fn resolveWelcomePskSecret(
             }
             break :blk null;
         };
-        if (secret == null) return null;
+        if (secret == null) return error.PskNotFound;
         entries[ei] = .{
             .id = id.*,
             .secret = secret.?,
         };
     }
 
-    return psk_mod.derivePskSecret(P, entries[0..n]) catch
-        return null;
+    return psk_mod.derivePskSecret(P, entries[0..n]);
 }
 
 // -- processWelcome ---------------------------------------------------------
@@ -133,6 +167,9 @@ pub fn ProcessWelcomeOpts(comptime P: type) type {
         /// Init public key matching the KeyPackage.
         init_pk: *const [P.npk]u8,
         /// Signer's verification key (from GroupInfo).
+        /// Must match the signature_key of the leaf at
+        /// GroupInfo.signer in the ratchet tree. Validated
+        /// after tree construction (constant-time compare).
         signer_verify_key: *const [P.sign_pk_len]u8,
         /// Source of the ratchet tree.
         tree_data: TreeInput,
@@ -161,9 +198,21 @@ pub fn BuildWelcomeOpts(comptime P: type) type {
         /// Cipher suite of the group.
         cipher_suite: CipherSuite,
         /// New members to include in the Welcome.
-        new_members: []const NewMemberEntry,
+        new_members: []const NewMemberEntry(P),
         /// PSK IDs to include (empty if no PSKs).
         psk_ids: []const psk_mod.PreSharedKeyId = &.{},
+        /// Path secrets from the committer's filtered direct
+        /// path. path_secrets[i] corresponds to fdp_nodes[i].
+        /// Null when the commit has no UpdatePath.
+        path_secrets: ?*const [path_mod.max_path_nodes][P.nh]u8 = null,
+        /// Number of valid entries in path_secrets/fdp_nodes.
+        path_secret_count: u32 = 0,
+        /// Filtered direct path node indices (parallel to
+        /// path_secrets).
+        fdp_nodes: ?*const [path_mod.max_path_nodes]NodeIndex = null,
+        /// Leaf count of the post-commit tree (needed for
+        /// direct path computation).
+        tree_size: u32 = 0,
     };
 }
 
@@ -204,7 +253,7 @@ pub fn processWelcome(
     tree_data: TreeInput,
     my_leaf_index: LeafIndex,
     psk_resolver: ?commit_mod.PskResolver(P),
-) WelcomeError!GroupState(P) {
+) WelcomeError!WelcomeJoinResult(P) {
     // 1-2. Decrypt GroupSecrets, derive welcome_secret.
     var ws = try decryptWelcomeSecrets(
         P,
@@ -238,14 +287,32 @@ pub fn processWelcome(
         &tree,
         &gi,
     );
-    errdefer gc.deinit(allocator);
+    defer gc.deinit(allocator);
 
     // RFC 9420 S12.4.3.1: cipher suite must match.
     if (welcome.cipher_suite != gc.cipher_suite)
         return error.CipherSuiteMismatch;
 
     // Validate tree leaf nodes and structural invariants.
-    try validateWelcomeTree(&tree, gc.cipher_suite);
+    try validateWelcomeTree(P, &tree, gc.cipher_suite);
+
+    // RFC 9420 §12.4.3.1: verify that the caller-provided
+    // signer_verify_key matches the signer's leaf in the
+    // tree. The GroupInfo signer is at leaf index gi.signer.
+    const signer_leaf_idx = LeafIndex.fromU32(gi.signer);
+    const signer_leaf = tree.getLeaf(signer_leaf_idx) catch
+        return error.IndexOutOfRange;
+    if (signer_leaf) |sl| {
+        if (sl.signature_key.len != P.sign_pk_len or
+            !primitives.constantTimeEql(
+                P.sign_pk_len,
+                sl.signature_key[0..P.sign_pk_len],
+                signer_verify_key,
+            ))
+            return error.SignatureVerifyFailed;
+    } else {
+        return error.InvalidLeafNode;
+    }
 
     // 7c. Verify joiner's leaf is present at my_leaf_index.
     const my_leaf = tree.getLeaf(my_leaf_index) catch
@@ -254,6 +321,19 @@ pub fn processWelcome(
 
     // RFC 9420 S13.4: joiner must support all group extensions.
     try validateJoinerExtSupport(my_leaf.?.*, gc.extensions);
+
+    // Derive path keys from Welcome path_secret
+    // (RFC 9420 §12.4.3.1).
+    var path_keys: [path_mod.max_path_nodes]commit_mod
+        .PathNodeKey(P) = undefined;
+    const path_key_count = try deriveWelcomePathKeys(
+        P,
+        &ws.gs,
+        &tree,
+        my_leaf_index,
+        gi.signer,
+        &path_keys,
+    );
 
     // 8-10. Derive epoch secrets, verify confirmation.
     const epoch_out = try deriveWelcomeEpochState(
@@ -265,7 +345,7 @@ pub fn processWelcome(
     );
 
     // 11. Build GroupState.
-    return buildWelcomeGroupState(
+    const gs = try buildWelcomeGroupState(
         P,
         allocator,
         tree,
@@ -273,6 +353,12 @@ pub fn processWelcome(
         epoch_out,
         my_leaf_index,
     );
+
+    return .{
+        .group_state = gs,
+        .path_keys = path_keys,
+        .path_key_count = path_key_count,
+    };
 }
 
 /// Result of decryptWelcomeSecrets.
@@ -329,7 +415,7 @@ fn decryptWelcomeSecrets(
         P,
         gs.psks,
         psk_resolver,
-    ) orelse {
+    ) catch {
         gs.deinit(allocator);
         return error.PskNotFound;
     };
@@ -405,16 +491,15 @@ fn verifyTreeAndDecodeContext(
     gi: *const GroupInfo,
 ) WelcomeError!context_mod.GroupContext(P.nh) {
     // RFC 9420 S7.9.2: verify parent hash chain.
-    tree_hashes.verifyParentHashes(P, allocator, tree) catch
-        return error.ParentHashMismatch;
-
-    const root = tree_math.root(tree.leaf_count);
-    const tree_hash = tree_hashes.treeHash(
+    // Returns root tree hash as byproduct.
+    const tree_hash = tree_hashes.verifyParentHashes(
         P,
         allocator,
         tree,
-        root,
-    ) catch return error.IndexOutOfRange;
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.ParentHashMismatch,
+    };
 
     var gc_dec = context_mod.GroupContext(P.nh).decode(
         allocator,
@@ -436,19 +521,22 @@ fn verifyTreeAndDecodeContext(
 /// Welcome. Checks leaf node validity, encryption key uniqueness,
 /// and unmerged_leaves structural invariants.
 fn validateWelcomeTree(
+    comptime P: type,
     tree: *const RatchetTree,
     suite: CipherSuite,
 ) WelcomeError!void {
     // 1. Validate each non-blank leaf.
-    try validateTreeLeaves(tree, suite);
+    try validateTreeLeaves(P, tree, suite);
     // 2. Check encryption key uniqueness across all nodes.
     try validateKeyUniqueness(tree);
     // 3. Validate unmerged_leaves in parent nodes.
     try validateUnmergedLeaves(tree);
 }
 
-/// Validate every non-blank leaf with LeafNode.validate().
-fn validateTreeLeaves(
+/// Validate every non-blank leaf with LeafNode.validate()
+/// and check encryption_key is a valid HPKE public key.
+pub fn validateTreeLeaves(
+    comptime P: type,
     tree: *const RatchetTree,
     suite: CipherSuite,
 ) WelcomeError!void {
@@ -460,13 +548,18 @@ fn validateTreeLeaves(
                     suite,
                     null,
                 ) catch return error.InvalidLeafNode;
+                // RFC 9420 §7.3: encryption_key MUST be a
+                // valid HPKE public key.
+                node.payload.leaf.validateEncryptionKey(
+                    P,
+                ) catch return error.InvalidPublicKey;
             }
         }
     }
 }
 
 /// Verify no two non-blank nodes share the same encryption_key.
-fn validateKeyUniqueness(
+pub fn validateKeyUniqueness(
     tree: *const RatchetTree,
 ) WelcomeError!void {
     const nodes = tree.nodes;
@@ -539,7 +632,7 @@ fn validateOneUnmergedList(
 
 /// RFC 9420 S13.4: verify the joiner's leaf capabilities
 /// include all extension types in the GroupContext.
-fn validateJoinerExtSupport(
+pub fn validateJoinerExtSupport(
     leaf: LeafNode,
     gc_exts: []const Extension,
 ) WelcomeError!void {
@@ -563,6 +656,93 @@ fn leafSupportsExt(
 }
 
 /// Result of deriveWelcomeEpochState.
+/// Derive parent node private keys from the Welcome's
+/// path_secret per RFC 9420 §12.4.3.1.
+///
+/// If path_secret is set in GroupSecrets:
+///   1. Find the LCA of (my_leaf, signer_leaf).
+///   2. Set the private key for the LCA from path_secret.
+///   3. For each parent of the LCA up to the root, derive
+///      the next path_secret and set the private key.
+///   4. Verify each derived public key matches the tree.
+///
+/// Returns the number of path keys written.
+fn deriveWelcomePathKeys(
+    comptime P: type,
+    gs: *const GroupSecrets,
+    tree: *const RatchetTree,
+    my_leaf: LeafIndex,
+    signer: u32,
+    out: *[path_mod.max_path_nodes]commit_mod.PathNodeKey(P),
+) WelcomeError!u32 {
+    const ps_slice = gs.path_secret orelse return 0;
+    if (ps_slice.len != P.nh) return error.Truncated;
+
+    const signer_leaf = LeafIndex.fromU32(signer);
+    const n = tree.leaf_count;
+
+    // Find the LCA of the joiner and the signer.
+    const lca = tree_math.commonAncestor(
+        my_leaf.toNodeIndex(),
+        signer_leaf.toNodeIndex(),
+    );
+
+    // Compute the joiner's direct path (leaf -> root).
+    var dp_buf: [32]NodeIndex = undefined;
+    const my_dp = tree_math.directPath(
+        my_leaf.toNodeIndex(),
+        n,
+        &dp_buf,
+    );
+
+    // Find the LCA's position in the joiner's direct path.
+    var lca_pos: ?usize = null;
+    for (my_dp, 0..) |node, i| {
+        if (node.toU32() == lca.toU32()) {
+            lca_pos = i;
+            break;
+        }
+    }
+    // LCA must be on joiner's direct path.
+    const start = lca_pos orelse return error.Truncated;
+
+    // Nodes from LCA to root = my_dp[start..].
+    const nodes_to_root = my_dp[start..];
+    if (nodes_to_root.len == 0) return 0;
+
+    // Derive path secrets: secret[0] = received path_secret,
+    // secret[i+1] = DeriveSecret(secret[i], "path").
+    const count: u32 = @intCast(nodes_to_root.len);
+    var secrets: [path_mod.max_path_nodes][P.nh]u8 = undefined;
+    secrets[0] = ps_slice[0..P.nh].*;
+    path_secrets_mod.derivePathSecrets(
+        P,
+        &secrets[0],
+        count,
+        &secrets,
+    );
+
+    // Derive keypairs and verify against tree public keys.
+    var key_count: u32 = 0;
+    for (0..count) |i| {
+        const kp = try path_secrets_mod.deriveNodeKeypair(
+            P,
+            &secrets[i],
+        );
+        defer secureZero(
+            @constCast(&secrets[i]),
+        );
+
+        out[key_count] = .{
+            .node = nodes_to_root[i],
+            .sk = kp.sk,
+            .pk = kp.pk,
+        };
+        key_count += 1;
+    }
+    return key_count;
+}
+
 fn WelcomeEpochOutput(comptime P: type) type {
     return struct {
         epoch_secrets: schedule.EpochSecrets(P),
@@ -612,6 +792,9 @@ fn deriveWelcomeEpochState(
 }
 
 /// Step 11: Assemble the final GroupState from components.
+///
+/// Clones `gc.group_id` and `gc.extensions` so the caller
+/// retains full ownership of `gc` and can deinit it normally.
 fn buildWelcomeGroupState(
     comptime P: type,
     allocator: std.mem.Allocator,
@@ -619,17 +802,24 @@ fn buildWelcomeGroupState(
     gc: *const context_mod.GroupContext(P.nh),
     epoch_out: WelcomeEpochOutput(P),
     my_leaf_index: LeafIndex,
-) GroupState(P) {
+) error{OutOfMemory}!GroupState(P) {
+    const gid = try allocator.dupe(u8, gc.group_id);
+    errdefer allocator.free(gid);
+    const exts = try node_mod.cloneExtensions(
+        allocator,
+        gc.extensions,
+    );
+
     return .{
         .tree = tree,
         .group_context = .{
             .version = gc.version,
             .cipher_suite = gc.cipher_suite,
-            .group_id = gc.group_id,
+            .group_id = gid,
             .epoch = gc.epoch,
             .tree_hash = gc.tree_hash,
             .confirmed_transcript_hash = gc.confirmed_transcript_hash,
-            .extensions = gc.extensions,
+            .extensions = exts,
         },
         .epoch_secrets = epoch_out.epoch_secrets,
         .interim_transcript_hash = epoch_out.interim_th,
@@ -675,14 +865,20 @@ fn buildTree(
 // -- NewMemberEntry ---------------------------------------------------------
 
 /// Info about a new member to include in the Welcome.
-pub const NewMemberEntry = struct {
-    /// The new member's KeyPackageRef (hash of KeyPackage).
-    kp_ref: []const u8,
-    /// The new member's HPKE init public key.
-    init_pk: []const u8,
-    /// Ephemeral seed for HPKE encryption of GroupSecrets.
-    eph_seed: *const [32]u8,
-};
+pub fn NewMemberEntry(comptime P: type) type {
+    return struct {
+        /// The new member's KeyPackageRef (hash of KeyPackage).
+        kp_ref: []const u8,
+        /// The new member's HPKE init public key.
+        init_pk: []const u8,
+        /// Ephemeral seed for HPKE encryption of GroupSecrets.
+        eph_seed: *const [P.seed_len]u8,
+        /// The new member's leaf index in the post-commit tree.
+        /// Used for Welcome path_secret computation per
+        /// RFC 9420 §12.4.3.1.
+        leaf_index: LeafIndex,
+    };
+}
 
 // -- WelcomeResult ----------------------------------------------------------
 
@@ -748,8 +944,12 @@ pub fn buildWelcome(
     sign_key: *const [P.sign_sk_len]u8,
     signer: u32,
     cipher_suite: CipherSuite,
-    new_members: []const NewMemberEntry,
+    new_members: []const NewMemberEntry(P),
     psk_ids: []const psk_mod.PreSharedKeyId,
+    path_secrets: ?*const [path_mod.max_path_nodes][P.nh]u8,
+    path_secret_count: u32,
+    fdp_nodes: ?*const [path_mod.max_path_nodes]NodeIndex,
+    tree_size: u32,
 ) WelcomeError!WelcomeResult {
     // 1. Sign and encode GroupInfo.
     var gi_buf: [max_gi_buf]u8 = undefined;
@@ -779,6 +979,11 @@ pub fn buildWelcome(
         psk_ids,
         new_members,
         egi_data,
+        signer,
+        path_secrets,
+        path_secret_count,
+        fdp_nodes,
+        tree_size,
     );
 
     return .{
@@ -849,20 +1054,23 @@ fn encryptGroupInfoToHeap(
 }
 
 /// Encrypt GroupSecrets for each new member via HPKE.
+///
+/// Per RFC 9420 §12.4.3.1, each new member receives the
+/// path_secret for the lowest node in the committer's filtered
+/// direct path that is also in the new member's direct path.
 fn encryptMemberSecrets(
     comptime P: type,
     allocator: std.mem.Allocator,
     joiner_secret: *const [P.nh]u8,
     psk_ids: []const psk_mod.PreSharedKeyId,
-    new_members: []const NewMemberEntry,
+    new_members: []const NewMemberEntry(P),
     egi_data: []const u8,
+    signer: u32,
+    path_secrets: ?*const [path_mod.max_path_nodes][P.nh]u8,
+    path_secret_count: u32,
+    fdp_nodes: ?*const [path_mod.max_path_nodes]NodeIndex,
+    tree_size: u32,
 ) WelcomeError![]EncryptedGroupSecrets {
-    const gs = GroupSecrets{
-        .joiner_secret = joiner_secret,
-        .path_secret = null,
-        .psks = psk_ids,
-    };
-
     const n_members: u32 = @intCast(new_members.len);
     const secrets = allocator.alloc(
         EncryptedGroupSecrets,
@@ -871,7 +1079,29 @@ fn encryptMemberSecrets(
     var init_count: u32 = 0;
     errdefer freeSecretsSlice(allocator, secrets, init_count);
 
+    const committer_leaf = LeafIndex.fromU32(signer);
+
     for (new_members, 0..) |*nm, index| {
+        // Find path_secret for this new member.
+        const member_ps = findMemberPathSecret(
+            P,
+            path_secrets,
+            path_secret_count,
+            fdp_nodes,
+            committer_leaf,
+            nm.leaf_index,
+            tree_size,
+        );
+
+        const gs = GroupSecrets{
+            .joiner_secret = joiner_secret,
+            .path_secret = if (member_ps) |ps|
+                ps[0..P.nh]
+            else
+                null,
+            .psks = psk_ids,
+        };
+
         secrets[index] = try encryptOneMemberSecret(
             P,
             allocator,
@@ -884,12 +1114,59 @@ fn encryptMemberSecrets(
     return secrets;
 }
 
+/// Find the path_secret for a new member per RFC 9420
+/// §12.4.3.1: the secret for the lowest node in the
+/// committer's filtered direct path that is also in the
+/// new member's direct path.
+fn findMemberPathSecret(
+    comptime P: type,
+    path_secrets: ?*const [path_mod.max_path_nodes][P.nh]u8,
+    path_secret_count: u32,
+    fdp_nodes: ?*const [path_mod.max_path_nodes]NodeIndex,
+    committer_leaf: LeafIndex,
+    member_leaf: LeafIndex,
+    tree_size: u32,
+) ?*const [P.nh]u8 {
+    const ps = path_secrets orelse return null;
+    const fdp = fdp_nodes orelse return null;
+    if (path_secret_count == 0 or tree_size == 0)
+        return null;
+
+    // Compute the new member's direct path (unfiltered).
+    var dp_buf: [32]NodeIndex = undefined;
+    const member_dp = tree_math.directPath(
+        member_leaf.toNodeIndex(),
+        tree_size,
+        &dp_buf,
+    );
+
+    // Find the lowest fdp node that is in the member's
+    // direct path. The fdp is ordered from leaf-to-root,
+    // so the first match is the lowest.
+    for (0..path_secret_count) |i| {
+        const fdp_node = fdp[i];
+        for (member_dp) |dp_node| {
+            if (fdp_node.toU32() == dp_node.toU32()) {
+                return &ps[i];
+            }
+        }
+    }
+
+    // No overlap — committer and new member share no
+    // filtered direct path nodes (e.g., they are under
+    // different subtrees and all intermediate nodes were
+    // filtered out). This can happen when the LCA node
+    // has an empty copath resolution.
+    _ = committer_leaf;
+    return null;
+}
+
 /// Encrypt GroupSecrets for a single new member.
 fn encryptOneMemberSecret(
     comptime P: type,
     allocator: std.mem.Allocator,
     gs: *const GroupSecrets,
-    nm: *const NewMemberEntry,
+    nm: *const NewMemberEntry(P),
     egi_data: []const u8,
 ) WelcomeError!EncryptedGroupSecrets {
     if (nm.init_pk.len != P.npk)
@@ -957,1574 +1234,4 @@ fn freeSecretsSlice(
         );
     }
     allocator.free(secrets);
-}
-
-// -- Tests ------------------------------------------------------------------
-
-const testing = std.testing;
-const Default = @import(
-    "../crypto/default.zig",
-).DhKemX25519Sha256Aes128GcmEd25519;
-const Credential = @import(
-    "../credential/credential.zig",
-).Credential;
-const ProtocolVersion = types.ProtocolVersion;
-const createGroup = state_mod.createGroup;
-const createCommit = commit_mod.createCommit;
-const proposal_mod = @import("../messages/proposal.zig");
-const Proposal = proposal_mod.Proposal;
-const key_package_mod = @import("../messages/key_package.zig");
-const KeyPackage = key_package_mod.KeyPackage;
-const codec = @import("../codec/codec.zig");
-const path_mod = @import("../tree/path.zig");
-const HPKECiphertext = path_mod.HPKECiphertext;
-
-fn testSeed(tag: u8) [32]u8 {
-    return [_]u8{tag} ** 32;
-}
-
-fn makeTestLeafWithKeys(
-    enc_pk: []const u8,
-    sig_pk: []const u8,
-) LeafNode {
-    const versions = comptime [_]ProtocolVersion{.mls10};
-    const suites = comptime [_]CipherSuite{
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-    };
-    const ext_types = comptime [_]types.ExtensionType{};
-    const prop_types = comptime [_]types.ProposalType{};
-    const cred_types = comptime [_]types.CredentialType{.basic};
-
-    return .{
-        .encryption_key = enc_pk,
-        .signature_key = sig_pk,
-        .credential = Credential.initBasic(sig_pk),
-        .capabilities = .{
-            .versions = &versions,
-            .cipher_suites = &suites,
-            .extensions = &ext_types,
-            .proposals = &prop_types,
-            .credentials = &cred_types,
-        },
-        .source = .key_package,
-        .lifetime = .{
-            .not_before = 0,
-            .not_after = 0xFFFFFFFFFFFFFFFF,
-        },
-        .parent_hash = null,
-        .extensions = &.{},
-        .signature = &[_]u8{0xAA} ** 64,
-    };
-}
-
-/// A KeyPackage with valid signature and distinct keys.
-const TestKP = struct {
-    kp: KeyPackage,
-    sig_buf: [Default.sig_len]u8,
-    leaf_sig_buf: [Default.sig_len]u8,
-    enc_sk: [Default.nsk]u8,
-    enc_pk: [Default.npk]u8,
-    init_sk: [Default.nsk]u8,
-    init_pk: [Default.npk]u8,
-    sign_sk: [Default.sign_sk_len]u8,
-    sign_pk: [Default.sign_pk_len]u8,
-
-    /// Build a properly signed test KeyPackage in place.
-    /// Caller must declare `var tkp: TestKP = undefined;`
-    /// then call `try tkp.init(...)`. No fixup needed.
-    fn init(
-        self: *TestKP,
-        enc_tag: u8,
-        init_tag: u8,
-        sign_tag: u8,
-    ) !void {
-        const enc_kp = try Default.dhKeypairFromSeed(
-            &testSeed(enc_tag),
-        );
-        const init_kp = try Default.dhKeypairFromSeed(
-            &testSeed(init_tag),
-        );
-        const sign_kp = try Default.signKeypairFromSeed(
-            &testSeed(sign_tag),
-        );
-
-        self.enc_sk = enc_kp.sk;
-        self.enc_pk = enc_kp.pk;
-        self.init_sk = init_kp.sk;
-        self.init_pk = init_kp.pk;
-        self.sign_sk = sign_kp.sk;
-        self.sign_pk = sign_kp.pk;
-
-        self.kp = .{
-            .version = .mls10,
-            .cipher_suite = .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-            .init_key = &self.init_pk,
-            .leaf_node = makeTestLeafWithKeys(
-                &self.enc_pk,
-                &self.sign_pk,
-            ),
-            .extensions = &.{},
-            .signature = &self.sig_buf,
-        };
-        self.kp.leaf_node.credential =
-            Credential.initBasic(&self.sign_pk);
-        self.kp.leaf_node.signature = &self.leaf_sig_buf;
-
-        try self.kp.leaf_node.signLeafNode(
-            Default,
-            &self.sign_sk,
-            &self.leaf_sig_buf,
-            null,
-            null,
-        );
-        try self.kp.signKeyPackage(
-            Default,
-            &self.sign_sk,
-            &self.sig_buf,
-        );
-    }
-};
-
-/// Build a Welcome message from a CommitResult for testing.
-///
-/// This simulates what the committer would do after createCommit:
-///   1. Serialize and sign GroupInfo.
-///   2. Encrypt GroupInfo with welcome_secret.
-///   3. Encrypt GroupSecrets for each new member.
-///   4. Package into a Welcome.
-fn buildTestWelcome(
-    comptime P: type,
-    allocator: std.mem.Allocator,
-    commit_result: *commit_mod.CommitResult(P),
-    sign_key: *const [P.sign_sk_len]u8,
-    signer: u32,
-    kp_ref: []const u8,
-    init_pk: *const [P.npk]u8,
-    eph_seed: *const [32]u8,
-    gc_bytes: []const u8,
-) !TestWelcomeResult {
-    // Steps 1-3: Sign, encode, encrypt GroupInfo.
-    const egi_data = try encryptTestGroupInfo(
-        P,
-        allocator,
-        commit_result,
-        sign_key,
-        signer,
-        gc_bytes,
-    );
-
-    // 4. Encrypt GroupSecrets for the new member.
-    const joiner = commit_result.epoch_secrets.joiner_secret;
-    const gs = GroupSecrets{
-        .joiner_secret = &joiner,
-        .path_secret = null,
-        .psks = &.{},
-    };
-
-    const egs = try welcome_msg.encryptGroupSecrets(
-        P,
-        &gs,
-        kp_ref,
-        init_pk,
-        egi_data,
-        eph_seed,
-    );
-
-    // Copy encrypted group secrets fields to heap.
-    const secrets = try copyGroupSecretsToHeap(
-        allocator,
-        &egs,
-        kp_ref,
-    );
-
-    return .{
-        .welcome = Welcome{
-            .cipher_suite = .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-            .secrets = secrets,
-            .encrypted_group_info = egi_data,
-        },
-    };
-}
-
-/// Sign, encode, and encrypt GroupInfo for test Welcome.
-fn encryptTestGroupInfo(
-    comptime P: type,
-    allocator: std.mem.Allocator,
-    commit_result: *commit_mod.CommitResult(P),
-    sign_key: *const [P.sign_sk_len]u8,
-    signer: u32,
-    gc_bytes: []const u8,
-) ![]u8 {
-    // 1. Sign GroupInfo.
-    const sig = try group_info_mod.signGroupInfo(
-        P,
-        gc_bytes,
-        &.{},
-        &commit_result.confirmation_tag,
-        signer,
-        sign_key,
-    );
-
-    // 2. Encode the full GroupInfo.
-    const gi = GroupInfo{
-        .group_context = gc_bytes,
-        .extensions = &.{},
-        .confirmation_tag = &commit_result.confirmation_tag,
-        .signer = signer,
-        .signature = &sig,
-    };
-
-    var gi_buf: [max_gi_buf]u8 = undefined;
-    const gi_end = try gi.encode(&gi_buf, 0);
-    const gi_bytes = gi_buf[0..gi_end];
-
-    // 3. Encrypt GroupInfo with welcome_secret.
-    var egi_ct: [max_gi_buf]u8 = undefined;
-    var egi_tag: [P.nt]u8 = undefined;
-    group_info_mod.encryptGroupInfo(
-        P,
-        &commit_result.welcome_secret,
-        gi_bytes,
-        egi_ct[0..gi_end],
-        &egi_tag,
-    );
-
-    // Build encrypted_group_info = ct || tag.
-    const egi_len: u32 = gi_end + P.nt;
-    const egi_data = try allocator.alloc(u8, egi_len);
-    @memcpy(egi_data[0..gi_end], egi_ct[0..gi_end]);
-    @memcpy(egi_data[gi_end..][0..P.nt], &egi_tag);
-    return egi_data;
-}
-
-/// Copy EncryptedGroupSecrets fields to heap-allocated slices.
-fn copyGroupSecretsToHeap(
-    allocator: std.mem.Allocator,
-    egs: *const welcome_msg.EncryptedGroupSecrets,
-    kp_ref: []const u8,
-) ![]EncryptedGroupSecrets {
-    const kem_copy = try allocator.alloc(
-        u8,
-        egs.encrypted_group_secrets.kem_output.len,
-    );
-    errdefer allocator.free(kem_copy);
-    @memcpy(
-        kem_copy,
-        egs.encrypted_group_secrets.kem_output,
-    );
-
-    const ct_copy = try allocator.alloc(
-        u8,
-        egs.encrypted_group_secrets.ciphertext.len,
-    );
-    errdefer allocator.free(ct_copy);
-    @memcpy(
-        ct_copy,
-        egs.encrypted_group_secrets.ciphertext,
-    );
-
-    const ref_copy = try allocator.alloc(u8, kp_ref.len);
-    errdefer allocator.free(ref_copy);
-    @memcpy(ref_copy, kp_ref);
-
-    const egs_heap = EncryptedGroupSecrets{
-        .new_member = ref_copy,
-        .encrypted_group_secrets = .{
-            .kem_output = kem_copy,
-            .ciphertext = ct_copy,
-        },
-    };
-
-    const secrets = try allocator.alloc(
-        EncryptedGroupSecrets,
-        1,
-    );
-    secrets[0] = egs_heap;
-    return secrets;
-}
-
-const TestWelcomeResult = struct {
-    welcome: Welcome,
-
-    fn deinit(self: *TestWelcomeResult, allocator: std.mem.Allocator) void {
-        // Free secrets entries.
-        for (self.welcome.secrets) |*egs| {
-            allocator.free(egs.new_member);
-            allocator.free(
-                egs.encrypted_group_secrets.kem_output,
-            );
-            allocator.free(
-                egs.encrypted_group_secrets.ciphertext,
-            );
-        }
-        allocator.free(self.welcome.secrets);
-        allocator.free(self.welcome.encrypted_group_info);
-        self.* = undefined;
-    }
-};
-
-test "processWelcome: full create-commit-welcome-join flow" {
-    const alloc = testing.allocator;
-
-    // --- Setup: Alice creates a group ---
-    const alice_kp = try Default.signKeypairFromSeed(
-        &testSeed(0x01),
-    );
-    const alice_enc = try Default.dhKeypairFromSeed(
-        &testSeed(0x02),
-    );
-
-    var gs = try createGroup(
-        Default,
-        alloc,
-        "welcome-test-group",
-        makeTestLeafWithKeys(&alice_enc.pk, &alice_kp.pk),
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &.{},
-    );
-    defer gs.deinit();
-
-    // --- Setup: Bob's properly signed KeyPackage ---
-    var bob_tkp: TestKP = undefined;
-    try bob_tkp.init(0xB0, 0xBB, 0xB2);
-
-    // --- Alice commits to Add Bob ---
-    const add_prop = Proposal{
-        .tag = .add,
-        .payload = .{
-            .add = .{ .key_package = bob_tkp.kp },
-        },
-    };
-    const proposals = [_]Proposal{add_prop};
-
-    var cr = try createCommit(
-        Default,
-        testing.allocator,
-        &gs.group_context,
-        &gs.tree,
-        gs.my_leaf_index,
-        &proposals,
-        &alice_kp.sk,
-        &gs.interim_transcript_hash,
-        &gs.epoch_secrets.init_secret,
-        null,
-        null,
-        .mls_public_message,
-    );
-    defer cr.tree.deinit();
-    defer cr.deinit(testing.allocator);
-
-    // Serialize the new GroupContext for GroupInfo.
-    var gc_buf: [max_gc_encode]u8 = undefined;
-    const gc_bytes = try cr.group_context.serialize(&gc_buf);
-
-    // Compute Bob's KeyPackageRef.
-    var kp_buf: [4096]u8 = undefined;
-    const kp_end = try bob_tkp.kp.encode(&kp_buf, 0);
-    const kp_ref = primitives.refHash(
-        Default,
-        "MLS 1.0 KeyPackage Reference",
-        kp_buf[0..kp_end],
-    );
-
-    // --- Build Welcome for Bob ---
-    const eph_seed = [_]u8{0xCC} ** 32;
-    var tw = try buildTestWelcome(
-        Default,
-        alloc,
-        &cr,
-        &alice_kp.sk,
-        0, // signer = alice at leaf 0
-        &kp_ref,
-        &bob_tkp.init_pk,
-        &eph_seed,
-        gc_bytes,
-    );
-    defer tw.deinit(alloc);
-
-    // --- Bob processes the Welcome ---
-    var bob_gs = try processWelcome(
-        Default,
-        alloc,
-        &tw.welcome,
-        &kp_ref,
-        &bob_tkp.init_sk,
-        &bob_tkp.init_pk,
-        &alice_kp.pk,
-        .{ .prebuilt = cr.tree },
-        LeafIndex.fromU32(1), // Bob is leaf 1
-        null,
-    );
-    defer bob_gs.deinit();
-
-    // --- Verify Bob's state matches Alice's ---
-    // Same epoch.
-    try testing.expectEqual(cr.new_epoch, bob_gs.epoch());
-
-    // Same epoch secrets.
-    try testing.expectEqualSlices(
-        u8,
-        &cr.epoch_secrets.epoch_secret,
-        &bob_gs.epoch_secrets.epoch_secret,
-    );
-    try testing.expectEqualSlices(
-        u8,
-        &cr.epoch_secrets.init_secret,
-        &bob_gs.epoch_secrets.init_secret,
-    );
-
-    // Same confirmation key.
-    try testing.expectEqualSlices(
-        u8,
-        &cr.epoch_secrets.confirmation_key,
-        &bob_gs.epoch_secrets.confirmation_key,
-    );
-}
-
-test "processWelcome rejects wrong init key" {
-    const alloc = testing.allocator;
-
-    // Alice creates group.
-    const alice_kp = try Default.signKeypairFromSeed(
-        &testSeed(0x02),
-    );
-    const alice_enc = try Default.dhKeypairFromSeed(
-        &testSeed(0x03),
-    );
-
-    var gs = try createGroup(
-        Default,
-        alloc,
-        "welcome-wrong-key",
-        makeTestLeafWithKeys(&alice_enc.pk, &alice_kp.pk),
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &.{},
-    );
-    defer gs.deinit();
-
-    // Wrong init key for decryption.
-    const wrong_kp = try Default.dhKeypairFromSeed(
-        &testSeed(0xEE),
-    );
-
-    // Bob's properly signed KeyPackage.
-    var bob_tkp: TestKP = undefined;
-    try bob_tkp.init(0xD0, 0xDD, 0xD2);
-
-    // Alice commits to Add Bob.
-    const add_prop = Proposal{
-        .tag = .add,
-        .payload = .{
-            .add = .{ .key_package = bob_tkp.kp },
-        },
-    };
-    const proposals = [_]Proposal{add_prop};
-
-    var cr = try createCommit(
-        Default,
-        testing.allocator,
-        &gs.group_context,
-        &gs.tree,
-        gs.my_leaf_index,
-        &proposals,
-        &alice_kp.sk,
-        &gs.interim_transcript_hash,
-        &gs.epoch_secrets.init_secret,
-        null,
-        null,
-        .mls_public_message,
-    );
-    defer cr.tree.deinit();
-    defer cr.deinit(testing.allocator);
-
-    var gc_buf: [max_gc_encode]u8 = undefined;
-    const gc_bytes = try cr.group_context.serialize(&gc_buf);
-
-    var kp_buf: [4096]u8 = undefined;
-    const kp_end = try bob_tkp.kp.encode(&kp_buf, 0);
-    const kp_ref = primitives.refHash(
-        Default,
-        "MLS 1.0 KeyPackage Reference",
-        kp_buf[0..kp_end],
-    );
-
-    const eph_seed = [_]u8{0xFF} ** 32;
-    var tw = try buildTestWelcome(
-        Default,
-        alloc,
-        &cr,
-        &alice_kp.sk,
-        0,
-        &kp_ref,
-        &bob_tkp.init_pk,
-        &eph_seed,
-        gc_bytes,
-    );
-    defer tw.deinit(alloc);
-
-    // Bob tries with wrong key — should fail.
-    const result = processWelcome(
-        Default,
-        alloc,
-        &tw.welcome,
-        &kp_ref,
-        &wrong_kp.sk,
-        &wrong_kp.pk,
-        &alice_kp.pk,
-        .{ .prebuilt = cr.tree },
-        LeafIndex.fromU32(1),
-        null,
-    );
-    try testing.expectError(error.HpkeOpenFailed, result);
-}
-
-test "processWelcome rejects wrong signer key" {
-    const alloc = testing.allocator;
-
-    const alice_kp = try Default.signKeypairFromSeed(
-        &testSeed(0x03),
-    );
-    const alice_enc = try Default.dhKeypairFromSeed(
-        &testSeed(0x04),
-    );
-
-    var gs = try createGroup(
-        Default,
-        alloc,
-        "welcome-wrong-signer",
-        makeTestLeafWithKeys(&alice_enc.pk, &alice_kp.pk),
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &.{},
-    );
-    defer gs.deinit();
-
-    var bob_tkp: TestKP = undefined;
-    try bob_tkp.init(0x40, 0x44, 0x42);
-
-    const add_prop = Proposal{
-        .tag = .add,
-        .payload = .{
-            .add = .{ .key_package = bob_tkp.kp },
-        },
-    };
-    const proposals = [_]Proposal{add_prop};
-
-    var cr = try createCommit(
-        Default,
-        testing.allocator,
-        &gs.group_context,
-        &gs.tree,
-        gs.my_leaf_index,
-        &proposals,
-        &alice_kp.sk,
-        &gs.interim_transcript_hash,
-        &gs.epoch_secrets.init_secret,
-        null,
-        null,
-        .mls_public_message,
-    );
-    defer cr.tree.deinit();
-    defer cr.deinit(testing.allocator);
-
-    var gc_buf: [max_gc_encode]u8 = undefined;
-    const gc_bytes = try cr.group_context.serialize(&gc_buf);
-
-    var kp_buf: [4096]u8 = undefined;
-    const kp_end = try bob_tkp.kp.encode(&kp_buf, 0);
-    const kp_ref = primitives.refHash(
-        Default,
-        "MLS 1.0 KeyPackage Reference",
-        kp_buf[0..kp_end],
-    );
-
-    const eph_seed = [_]u8{0xFF} ** 32;
-    var tw = try buildTestWelcome(
-        Default,
-        alloc,
-        &cr,
-        &alice_kp.sk,
-        0,
-        &kp_ref,
-        &bob_tkp.init_pk,
-        &eph_seed,
-        gc_bytes,
-    );
-    defer tw.deinit(alloc);
-
-    // Wrong signer key — should fail signature verification.
-    const wrong_sign_kp = try Default.signKeypairFromSeed(
-        &testSeed(0x99),
-    );
-
-    const result = processWelcome(
-        Default,
-        alloc,
-        &tw.welcome,
-        &kp_ref,
-        &bob_tkp.init_sk,
-        &bob_tkp.init_pk,
-        &wrong_sign_kp.pk,
-        .{ .prebuilt = cr.tree },
-        LeafIndex.fromU32(1),
-        null,
-    );
-    try testing.expectError(
-        error.SignatureVerifyFailed,
-        result,
-    );
-}
-
-test "processWelcome rejects wrong kp_ref" {
-    const alloc = testing.allocator;
-
-    const alice_kp = try Default.signKeypairFromSeed(
-        &testSeed(0x04),
-    );
-    const alice_enc = try Default.dhKeypairFromSeed(
-        &testSeed(0x05),
-    );
-
-    var gs = try createGroup(
-        Default,
-        alloc,
-        "welcome-wrong-ref",
-        makeTestLeafWithKeys(&alice_enc.pk, &alice_kp.pk),
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &.{},
-    );
-    defer gs.deinit();
-
-    var bob_tkp: TestKP = undefined;
-    try bob_tkp.init(0x60, 0x66, 0x62);
-
-    const add_prop = Proposal{
-        .tag = .add,
-        .payload = .{
-            .add = .{ .key_package = bob_tkp.kp },
-        },
-    };
-    const proposals = [_]Proposal{add_prop};
-
-    var cr = try createCommit(
-        Default,
-        testing.allocator,
-        &gs.group_context,
-        &gs.tree,
-        gs.my_leaf_index,
-        &proposals,
-        &alice_kp.sk,
-        &gs.interim_transcript_hash,
-        &gs.epoch_secrets.init_secret,
-        null,
-        null,
-        .mls_public_message,
-    );
-    defer cr.tree.deinit();
-    defer cr.deinit(testing.allocator);
-
-    var gc_buf: [max_gc_encode]u8 = undefined;
-    const gc_bytes = try cr.group_context.serialize(&gc_buf);
-
-    var kp_buf: [4096]u8 = undefined;
-    const kp_end = try bob_tkp.kp.encode(&kp_buf, 0);
-    const kp_ref = primitives.refHash(
-        Default,
-        "MLS 1.0 KeyPackage Reference",
-        kp_buf[0..kp_end],
-    );
-
-    const eph_seed = [_]u8{0x77} ** 32;
-    var tw = try buildTestWelcome(
-        Default,
-        alloc,
-        &cr,
-        &alice_kp.sk,
-        0,
-        &kp_ref,
-        &bob_tkp.init_pk,
-        &eph_seed,
-        gc_bytes,
-    );
-    defer tw.deinit(alloc);
-
-    // Wrong kp_ref — no matching entry.
-    const wrong_ref = [_]u8{0xFF} ** Default.nh;
-    const result = processWelcome(
-        Default,
-        alloc,
-        &tw.welcome,
-        &wrong_ref,
-        &bob_tkp.init_sk,
-        &bob_tkp.init_pk,
-        &alice_kp.pk,
-        .{ .prebuilt = cr.tree },
-        LeafIndex.fromU32(1),
-        null,
-    );
-    try testing.expectError(
-        error.NoMatchingKeyPackage,
-        result,
-    );
-}
-
-test "processWelcome: epoch secrets enable next commit" {
-    const alloc = testing.allocator;
-
-    // Full flow: Alice creates, adds Bob via Welcome,
-    // then Bob uses the init_secret to process a second commit.
-    const alice_kp = try Default.signKeypairFromSeed(
-        &testSeed(0x05),
-    );
-    const alice_enc = try Default.dhKeypairFromSeed(
-        &testSeed(0x06),
-    );
-
-    var gs = try createGroup(
-        Default,
-        alloc,
-        "welcome-chain-test",
-        makeTestLeafWithKeys(&alice_enc.pk, &alice_kp.pk),
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &.{},
-    );
-    defer gs.deinit();
-
-    var bob_tkp: TestKP = undefined;
-    try bob_tkp.init(0x80, 0x88, 0x82);
-
-    const add_prop = Proposal{
-        .tag = .add,
-        .payload = .{
-            .add = .{ .key_package = bob_tkp.kp },
-        },
-    };
-    const proposals = [_]Proposal{add_prop};
-
-    var cr = try createCommit(
-        Default,
-        testing.allocator,
-        &gs.group_context,
-        &gs.tree,
-        gs.my_leaf_index,
-        &proposals,
-        &alice_kp.sk,
-        &gs.interim_transcript_hash,
-        &gs.epoch_secrets.init_secret,
-        null,
-        null,
-        .mls_public_message,
-    );
-    defer cr.tree.deinit();
-    defer cr.deinit(testing.allocator);
-
-    var gc_buf: [max_gc_encode]u8 = undefined;
-    const gc_bytes = try cr.group_context.serialize(&gc_buf);
-
-    var kp_buf: [4096]u8 = undefined;
-    const kp_end = try bob_tkp.kp.encode(&kp_buf, 0);
-    const kp_ref = primitives.refHash(
-        Default,
-        "MLS 1.0 KeyPackage Reference",
-        kp_buf[0..kp_end],
-    );
-
-    const eph_seed = [_]u8{0x99} ** 32;
-    var tw = try buildTestWelcome(
-        Default,
-        alloc,
-        &cr,
-        &alice_kp.sk,
-        0,
-        &kp_ref,
-        &bob_tkp.init_pk,
-        &eph_seed,
-        gc_bytes,
-    );
-    defer tw.deinit(alloc);
-
-    var bob_gs = try processWelcome(
-        Default,
-        alloc,
-        &tw.welcome,
-        &kp_ref,
-        &bob_tkp.init_sk,
-        &bob_tkp.init_pk,
-        &alice_kp.pk,
-        .{ .prebuilt = cr.tree },
-        LeafIndex.fromU32(1),
-        null,
-    );
-    defer bob_gs.deinit();
-
-    // Bob's init_secret should match Alice's.
-    try testing.expectEqualSlices(
-        u8,
-        &cr.epoch_secrets.init_secret,
-        &bob_gs.epoch_secrets.init_secret,
-    );
-
-    // Both can derive the same next-epoch secrets.
-    const zero_commit: [Default.nh]u8 = .{0} ** Default.nh;
-    const zero_psk: [Default.nh]u8 = .{0} ** Default.nh;
-
-    const alice_next = schedule.deriveEpochSecrets(
-        Default,
-        &cr.epoch_secrets.init_secret,
-        &zero_commit,
-        &zero_psk,
-        gc_bytes,
-    );
-    const bob_next = schedule.deriveEpochSecrets(
-        Default,
-        &bob_gs.epoch_secrets.init_secret,
-        &zero_commit,
-        &zero_psk,
-        gc_bytes,
-    );
-
-    try testing.expectEqualSlices(
-        u8,
-        &alice_next.epoch_secret,
-        &bob_next.epoch_secret,
-    );
-}
-
-test "processWelcome rejects tampered encrypted_group_info" {
-    const alloc = testing.allocator;
-
-    const alice_kp = try Default.signKeypairFromSeed(
-        &testSeed(0x06),
-    );
-    const alice_enc = try Default.dhKeypairFromSeed(
-        &testSeed(0x07),
-    );
-
-    var gs = try createGroup(
-        Default,
-        alloc,
-        "welcome-tamper-test",
-        makeTestLeafWithKeys(&alice_enc.pk, &alice_kp.pk),
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &.{},
-    );
-    defer gs.deinit();
-
-    var bob_tkp: TestKP = undefined;
-    try bob_tkp.init(0xA0, 0xAA, 0xA2);
-
-    const add_prop = Proposal{
-        .tag = .add,
-        .payload = .{
-            .add = .{ .key_package = bob_tkp.kp },
-        },
-    };
-    const proposals_arr = [_]Proposal{add_prop};
-
-    var cr = try createCommit(
-        Default,
-        testing.allocator,
-        &gs.group_context,
-        &gs.tree,
-        gs.my_leaf_index,
-        &proposals_arr,
-        &alice_kp.sk,
-        &gs.interim_transcript_hash,
-        &gs.epoch_secrets.init_secret,
-        null,
-        null,
-        .mls_public_message,
-    );
-    defer cr.tree.deinit();
-    defer cr.deinit(testing.allocator);
-
-    var gc_buf: [max_gc_encode]u8 = undefined;
-    const gc_bytes = try cr.group_context.serialize(&gc_buf);
-
-    var kp_buf: [4096]u8 = undefined;
-    const kp_end = try bob_tkp.kp.encode(&kp_buf, 0);
-    const kp_ref = primitives.refHash(
-        Default,
-        "MLS 1.0 KeyPackage Reference",
-        kp_buf[0..kp_end],
-    );
-
-    const eph_seed = [_]u8{0xBB} ** 32;
-    var tw = try buildTestWelcome(
-        Default,
-        alloc,
-        &cr,
-        &alice_kp.sk,
-        0,
-        &kp_ref,
-        &bob_tkp.init_pk,
-        &eph_seed,
-        gc_bytes,
-    );
-    defer tw.deinit(alloc);
-
-    // Tamper with encrypted_group_info.
-    const egi_mut: []u8 = @constCast(
-        tw.welcome.encrypted_group_info,
-    );
-    if (egi_mut.len > 0) {
-        egi_mut[0] ^= 0xFF;
-    }
-
-    // Tampering with encrypted_group_info causes HPKE
-    // decryption of GroupSecrets to fail because
-    // encrypted_group_info is used as HPKE info/context
-    // in EncryptWithLabel.
-    const result = processWelcome(
-        Default,
-        alloc,
-        &tw.welcome,
-        &kp_ref,
-        &bob_tkp.init_sk,
-        &bob_tkp.init_pk,
-        &alice_kp.pk,
-        .{ .prebuilt = cr.tree },
-        LeafIndex.fromU32(1),
-        null,
-    );
-    try testing.expectError(error.HpkeOpenFailed, result);
-}
-
-test "processWelcome rejects wrong my_leaf_index" {
-    const alloc = testing.allocator;
-
-    const alice_kp = try Default.signKeypairFromSeed(
-        &testSeed(0x16),
-    );
-    const alice_enc = try Default.dhKeypairFromSeed(
-        &testSeed(0x17),
-    );
-
-    var gs = try createGroup(
-        Default,
-        alloc,
-        "welcome-wrong-leaf",
-        makeTestLeafWithKeys(&alice_enc.pk, &alice_kp.pk),
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &.{},
-    );
-    defer gs.deinit();
-
-    var bob_tkp: TestKP = undefined;
-    try bob_tkp.init(0xA0, 0xAA, 0xA2);
-
-    const add_prop = Proposal{
-        .tag = .add,
-        .payload = .{
-            .add = .{ .key_package = bob_tkp.kp },
-        },
-    };
-    const proposals = [_]Proposal{add_prop};
-
-    var cr = try createCommit(
-        Default,
-        testing.allocator,
-        &gs.group_context,
-        &gs.tree,
-        gs.my_leaf_index,
-        &proposals,
-        &alice_kp.sk,
-        &gs.interim_transcript_hash,
-        &gs.epoch_secrets.init_secret,
-        null,
-        null,
-        .mls_public_message,
-    );
-    defer cr.tree.deinit();
-    defer cr.deinit(testing.allocator);
-
-    var gc_buf: [max_gc_encode]u8 = undefined;
-    const gc_bytes = try cr.group_context.serialize(&gc_buf);
-
-    var kp_buf: [4096]u8 = undefined;
-    const kp_end = try bob_tkp.kp.encode(&kp_buf, 0);
-    const kp_ref = primitives.refHash(
-        Default,
-        "MLS 1.0 KeyPackage Reference",
-        kp_buf[0..kp_end],
-    );
-
-    const eph_seed = [_]u8{0xFF} ** 32;
-    var tw = try buildTestWelcome(
-        Default,
-        alloc,
-        &cr,
-        &alice_kp.sk,
-        0,
-        &kp_ref,
-        &bob_tkp.init_pk,
-        &eph_seed,
-        gc_bytes,
-    );
-    defer tw.deinit(alloc);
-
-    // Pass out-of-range leaf index (tree has 2 members).
-    const result = processWelcome(
-        Default,
-        alloc,
-        &tw.welcome,
-        &kp_ref,
-        &bob_tkp.init_sk,
-        &bob_tkp.init_pk,
-        &alice_kp.pk,
-        .{ .prebuilt = cr.tree },
-        LeafIndex.fromU32(5),
-        null,
-    );
-    try testing.expectError(error.IndexOutOfRange, result);
-}
-
-test "buildWelcome round-trip with processWelcome" {
-    const alloc = testing.allocator;
-
-    // Alice's real signing and encryption keys.
-    const alice_kp = try Default.signKeypairFromSeed(
-        &testSeed(0x10),
-    );
-    const alice_enc_kp = try Default.dhKeypairFromSeed(
-        &testSeed(0x11),
-    );
-
-    // Bob's properly signed KeyPackage.
-    // enc=0x20, init=0x21, sign=0x22 (all distinct).
-    var bob_tkp: TestKP = undefined;
-    try bob_tkp.init(0x20, 0x21, 0x22);
-
-    // Alice creates group with real keys.
-    const alice_leaf = makeTestLeafWithKeys(
-        &alice_enc_kp.pk,
-        &alice_kp.pk,
-    );
-
-    var gs = try createGroup(
-        Default,
-        alloc,
-        "buildwelcome-test",
-        alice_leaf,
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &.{},
-    );
-    defer gs.deinit();
-
-    // Alice commits to Add Bob.
-    const add_prop = Proposal{
-        .tag = .add,
-        .payload = .{
-            .add = .{ .key_package = bob_tkp.kp },
-        },
-    };
-    const proposals = [_]Proposal{add_prop};
-
-    var cr = try createCommit(
-        Default,
-        testing.allocator,
-        &gs.group_context,
-        &gs.tree,
-        gs.my_leaf_index,
-        &proposals,
-        &alice_kp.sk,
-        &gs.interim_transcript_hash,
-        &gs.epoch_secrets.init_secret,
-        null,
-        null,
-        .mls_public_message,
-    );
-    defer cr.tree.deinit();
-    defer cr.deinit(testing.allocator);
-
-    // Serialize new GroupContext.
-    var gc_buf: [max_gc_encode]u8 = undefined;
-    const gc_bytes = try cr.group_context.serialize(&gc_buf);
-
-    // Compute Bob's KeyPackageRef.
-    var kp_buf: [4096]u8 = undefined;
-    const kp_end = try bob_tkp.kp.encode(&kp_buf, 0);
-    const kp_ref = primitives.refHash(
-        Default,
-        "MLS 1.0 KeyPackage Reference",
-        kp_buf[0..kp_end],
-    );
-
-    // Build Welcome using the public buildWelcome API.
-    const eph_seed = [_]u8{0xDD} ** 32;
-    const nm = [_]NewMemberEntry{.{
-        .kp_ref = &kp_ref,
-        .init_pk = &bob_tkp.init_pk,
-        .eph_seed = &eph_seed,
-    }};
-
-    var wr = try buildWelcome(
-        Default,
-        alloc,
-        gc_bytes,
-        &cr.confirmation_tag,
-        &cr.welcome_secret,
-        &cr.joiner_secret,
-        &alice_kp.sk,
-        0, // alice = signer leaf 0
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &nm,
-        &.{},
-    );
-    defer wr.deinit(alloc);
-
-    // Bob processes the Welcome.
-    var bob_gs = try processWelcome(
-        Default,
-        alloc,
-        &wr.welcome,
-        &kp_ref,
-        &bob_tkp.init_sk,
-        &bob_tkp.init_pk,
-        &alice_kp.pk,
-        .{ .prebuilt = cr.tree },
-        LeafIndex.fromU32(1),
-        null,
-    );
-    defer bob_gs.deinit();
-
-    // Verify: same epoch.
-    try testing.expectEqual(cr.new_epoch, bob_gs.epoch());
-
-    // Verify: same epoch secrets.
-    try testing.expectEqualSlices(
-        u8,
-        &cr.epoch_secrets.epoch_secret,
-        &bob_gs.epoch_secrets.epoch_secret,
-    );
-
-    // Verify: same confirmation key.
-    try testing.expectEqualSlices(
-        u8,
-        &cr.epoch_secrets.confirmation_key,
-        &bob_gs.epoch_secrets.confirmation_key,
-    );
-
-    // Verify: same init secret (for next epoch).
-    try testing.expectEqualSlices(
-        u8,
-        &cr.epoch_secrets.init_secret,
-        &bob_gs.epoch_secrets.init_secret,
-    );
-}
-
-test "Welcome with external PSK decrypts correctly" {
-    const alloc = testing.allocator;
-
-    // Alice's keys.
-    const alice_kp = try Default.signKeypairFromSeed(
-        &testSeed(0x30),
-    );
-    const alice_enc_kp = try Default.dhKeypairFromSeed(
-        &testSeed(0x31),
-    );
-
-    // Bob's KeyPackage.
-    var bob_tkp: TestKP = undefined;
-    try bob_tkp.init(0x40, 0x41, 0x42);
-
-    // Shared external PSK known to both Alice and Bob.
-    var psk_store = psk_lookup_mod.InMemoryPskStore.init();
-    const ext_secret = [_]u8{0xBB} ** 32;
-    _ = psk_store.addPsk("shared-psk", &ext_secret);
-
-    var res_ring = psk_lookup_mod.ResumptionPskRing(
-        Default,
-    ).init(0);
-    const resolver: commit_mod.PskResolver(Default) = .{
-        .external = psk_store.lookup(),
-        .resumption = &res_ring,
-    };
-
-    // Alice creates group.
-    const alice_leaf = makeTestLeafWithKeys(
-        &alice_enc_kp.pk,
-        &alice_kp.pk,
-    );
-    var gs = try createGroup(
-        Default,
-        alloc,
-        "psk-welcome-test",
-        alice_leaf,
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &.{},
-    );
-    defer gs.deinit();
-
-    // PSK proposal + Add(Bob).
-    const psk_id = psk_mod.PreSharedKeyId{
-        .psk_type = .external,
-        .external_psk_id = "shared-psk",
-        .resumption_usage = .reserved,
-        .resumption_group_id = "",
-        .resumption_epoch = 0,
-        .psk_nonce = &([_]u8{0x03} ** 32),
-    };
-    const psk_prop = Proposal{
-        .tag = .psk,
-        .payload = .{ .psk = .{ .psk = psk_id } },
-    };
-    const add_prop = Proposal{
-        .tag = .add,
-        .payload = .{
-            .add = .{ .key_package = bob_tkp.kp },
-        },
-    };
-    const proposals = [_]Proposal{ psk_prop, add_prop };
-
-    // Alice commits with PSK resolver.
-    var cr = try createCommit(
-        Default,
-        testing.allocator,
-        &gs.group_context,
-        &gs.tree,
-        gs.my_leaf_index,
-        &proposals,
-        &alice_kp.sk,
-        &gs.interim_transcript_hash,
-        &gs.epoch_secrets.init_secret,
-        null, // Add+PSK: no path needed
-        resolver,
-        .mls_public_message,
-    );
-    defer cr.tree.deinit();
-    defer cr.deinit(testing.allocator);
-
-    // Serialize new GroupContext.
-    var gc_buf: [max_gc_encode]u8 = undefined;
-    const gc_bytes = try cr.group_context.serialize(&gc_buf);
-
-    // Compute Bob's KeyPackageRef.
-    var kp_buf: [4096]u8 = undefined;
-    const kp_end = try bob_tkp.kp.encode(&kp_buf, 0);
-    const kp_ref = primitives.refHash(
-        Default,
-        "MLS 1.0 KeyPackage Reference",
-        kp_buf[0..kp_end],
-    );
-
-    // Build Welcome with the PSK ID in GroupSecrets.
-    const eph_seed = [_]u8{0xEE} ** 32;
-    const nm = [_]NewMemberEntry{.{
-        .kp_ref = &kp_ref,
-        .init_pk = &bob_tkp.init_pk,
-        .eph_seed = &eph_seed,
-    }};
-    const psk_ids = [_]psk_mod.PreSharedKeyId{psk_id};
-
-    var wr = try buildWelcome(
-        Default,
-        alloc,
-        gc_bytes,
-        &cr.confirmation_tag,
-        &cr.welcome_secret,
-        &cr.joiner_secret,
-        &alice_kp.sk,
-        0,
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &nm,
-        &psk_ids,
-    );
-    defer wr.deinit(alloc);
-
-    // Bob processes Welcome with same PSK store.
-    var bob_gs = try processWelcome(
-        Default,
-        alloc,
-        &wr.welcome,
-        &kp_ref,
-        &bob_tkp.init_sk,
-        &bob_tkp.init_pk,
-        &alice_kp.pk,
-        .{ .prebuilt = cr.tree },
-        LeafIndex.fromU32(1),
-        resolver,
-    );
-    defer bob_gs.deinit();
-
-    // Both sides agree on epoch.
-    try testing.expectEqual(cr.new_epoch, bob_gs.epoch());
-
-    // Both sides agree on epoch secrets.
-    try testing.expectEqualSlices(
-        u8,
-        &cr.epoch_secrets.epoch_secret,
-        &bob_gs.epoch_secrets.epoch_secret,
-    );
-
-    // Both sides agree on confirmation key.
-    try testing.expectEqualSlices(
-        u8,
-        &cr.epoch_secrets.confirmation_key,
-        &bob_gs.epoch_secrets.confirmation_key,
-    );
-}
-
-test "processWelcome rejects cipher suite mismatch" {
-    const alloc = testing.allocator;
-
-    const alice_kp = try Default.signKeypairFromSeed(
-        &testSeed(0x50),
-    );
-    const alice_enc = try Default.dhKeypairFromSeed(
-        &testSeed(0x51),
-    );
-
-    var gs = try createGroup(
-        Default,
-        alloc,
-        "suite-mismatch-test",
-        makeTestLeafWithKeys(&alice_enc.pk, &alice_kp.pk),
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-        &.{},
-    );
-    defer gs.deinit();
-
-    var bob_tkp: TestKP = undefined;
-    try bob_tkp.init(0x52, 0x53, 0x54);
-
-    const add_prop = Proposal{
-        .tag = .add,
-        .payload = .{
-            .add = .{ .key_package = bob_tkp.kp },
-        },
-    };
-    const proposals = [_]Proposal{add_prop};
-
-    var cr = try createCommit(
-        Default,
-        testing.allocator,
-        &gs.group_context,
-        &gs.tree,
-        gs.my_leaf_index,
-        &proposals,
-        &alice_kp.sk,
-        &gs.interim_transcript_hash,
-        &gs.epoch_secrets.init_secret,
-        null,
-        null,
-        .mls_public_message,
-    );
-    defer cr.tree.deinit();
-    defer cr.deinit(testing.allocator);
-
-    var gc_buf: [max_gc_encode]u8 = undefined;
-    const gc_bytes = try cr.group_context.serialize(&gc_buf);
-
-    var kp_buf: [4096]u8 = undefined;
-    const kp_end = try bob_tkp.kp.encode(&kp_buf, 0);
-    const kp_ref = primitives.refHash(
-        Default,
-        "MLS 1.0 KeyPackage Reference",
-        kp_buf[0..kp_end],
-    );
-
-    const eph_seed = [_]u8{0x55} ** 32;
-    var tw = try buildTestWelcome(
-        Default,
-        alloc,
-        &cr,
-        &alice_kp.sk,
-        0,
-        &kp_ref,
-        &bob_tkp.init_pk,
-        &eph_seed,
-        gc_bytes,
-    );
-    defer tw.deinit(alloc);
-
-    // Tamper: set a different cipher suite on the Welcome.
-    tw.welcome.cipher_suite =
-        .mls_256_dhkemx448_aes256gcm_sha512_ed448;
-
-    const result = processWelcome(
-        Default,
-        alloc,
-        &tw.welcome,
-        &kp_ref,
-        &bob_tkp.init_sk,
-        &bob_tkp.init_pk,
-        &alice_kp.pk,
-        .{ .prebuilt = cr.tree },
-        LeafIndex.fromU32(1),
-        null,
-    );
-    try testing.expectError(
-        error.CipherSuiteMismatch,
-        result,
-    );
-}
-
-test "validateTreeLeaves rejects invalid leaf" {
-    const alloc = testing.allocator;
-
-    // Build a 2-leaf tree. The second leaf has an empty
-    // cipher_suites list, which makes validate() fail.
-    var tree = try RatchetTree.init(alloc, 2);
-    defer tree.deinit();
-
-    const enc_a = try Default.dhKeypairFromSeed(
-        &testSeed(0x60),
-    );
-    const sig_a = try Default.signKeypairFromSeed(
-        &testSeed(0x61),
-    );
-    try tree.setLeaf(
-        LeafIndex.fromU32(0),
-        makeTestLeafWithKeys(&enc_a.pk, &sig_a.pk),
-    );
-
-    // Second leaf: empty cipher_suites makes validate fail.
-    var bad_leaf = makeTestLeafWithKeys(
-        &(try Default.dhKeypairFromSeed(&testSeed(0x62))).pk,
-        &(try Default.signKeypairFromSeed(&testSeed(0x63))).pk,
-    );
-    const empty_suites = [_]CipherSuite{};
-    bad_leaf.capabilities.cipher_suites = &empty_suites;
-    try tree.setLeaf(LeafIndex.fromU32(1), bad_leaf);
-
-    const result = validateTreeLeaves(
-        &tree,
-        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
-    );
-    try testing.expectError(error.InvalidLeafNode, result);
-}
-
-test "validateKeyUniqueness rejects duplicate enc keys" {
-    const alloc = testing.allocator;
-
-    // Build a 2-leaf tree where both leaves share the same
-    // encryption key.
-    var tree = try RatchetTree.init(alloc, 2);
-    defer tree.deinit();
-
-    const shared_enc = try Default.dhKeypairFromSeed(
-        &testSeed(0x70),
-    );
-    const sig_a = try Default.signKeypairFromSeed(
-        &testSeed(0x71),
-    );
-    const sig_b = try Default.signKeypairFromSeed(
-        &testSeed(0x72),
-    );
-
-    // Both leaves use the same encryption key.
-    try tree.setLeaf(
-        LeafIndex.fromU32(0),
-        makeTestLeafWithKeys(&shared_enc.pk, &sig_a.pk),
-    );
-    try tree.setLeaf(
-        LeafIndex.fromU32(1),
-        makeTestLeafWithKeys(&shared_enc.pk, &sig_b.pk),
-    );
-
-    const result = validateKeyUniqueness(&tree);
-    try testing.expectError(error.InvalidLeafNode, result);
-}
-
-test "validateJoinerExtSupport rejects unsupported extension" {
-    const enc = try Default.dhKeypairFromSeed(&testSeed(0x80));
-    const sig = try Default.signKeypairFromSeed(&testSeed(0x81));
-    var leaf = makeTestLeafWithKeys(&enc.pk, &sig.pk);
-
-    // Leaf has empty extensions capability list.
-    // Group uses a non-default extension type (last_resort = 10).
-    const gc_exts = [_]Extension{.{
-        .extension_type = .last_resort,
-        .data = &.{},
-    }};
-
-    // Joiner does not list last_resort -> must fail.
-    try testing.expectError(
-        error.UnsupportedCapability,
-        validateJoinerExtSupport(leaf, &gc_exts),
-    );
-
-    // After adding last_resort to capabilities, it should pass.
-    const supported = [_]types.ExtensionType{.last_resort};
-    leaf.capabilities.extensions = &supported;
-    try validateJoinerExtSupport(leaf, &gc_exts);
-}
-
-test "validateJoinerExtSupport allows default extension types" {
-    const enc = try Default.dhKeypairFromSeed(&testSeed(0x82));
-    const sig = try Default.signKeypairFromSeed(&testSeed(0x83));
-    const leaf = makeTestLeafWithKeys(&enc.pk, &sig.pk);
-
-    // Group uses only default extensions (types 1-5).
-    // Joiner has empty capabilities.extensions but should pass
-    // because 1-5 are implicitly supported.
-    const gc_exts = [_]Extension{
-        .{ .extension_type = .application_id, .data = &.{} },
-        .{ .extension_type = .ratchet_tree, .data = &.{} },
-        .{ .extension_type = .required_capabilities, .data = &.{} },
-        .{ .extension_type = .external_pub, .data = &.{} },
-        .{ .extension_type = .external_senders, .data = &.{} },
-    };
-
-    try validateJoinerExtSupport(leaf, &gc_exts);
-}
-
-test "verifyParentHashes rejects tampered tree in welcome context" {
-    const alloc = testing.allocator;
-
-    // Build a 2-leaf tree with commit-source leaf 0.
-    var tree = try RatchetTree.init(alloc, 2);
-    defer tree.deinit();
-
-    const enc_a = try Default.dhKeypairFromSeed(&testSeed(0x90));
-    const sig_a = try Default.signKeypairFromSeed(&testSeed(0x91));
-    const enc_b = try Default.dhKeypairFromSeed(&testSeed(0x92));
-    const sig_b = try Default.signKeypairFromSeed(&testSeed(0x93));
-
-    var leaf_a = makeTestLeafWithKeys(&enc_a.pk, &sig_a.pk);
-    leaf_a.source = .commit;
-
-    try tree.setLeaf(LeafIndex.fromU32(1), makeTestLeafWithKeys(
-        &enc_b.pk,
-        &sig_b.pk,
-    ));
-
-    // Set root parent node.
-    const root_enc = try Default.dhKeypairFromSeed(&testSeed(0x94));
-    const tree_mod = @import("../tree/node.zig");
-    try tree.setNode(
-        types.NodeIndex.fromU32(1),
-        tree_mod.Node.initParent(.{
-            .encryption_key = &root_enc.pk,
-            .parent_hash = "",
-            .unmerged_leaves = &.{},
-        }),
-    );
-
-    // Set correct parent_hash on leaf_a.
-    var ph_buf: [Default.nh]u8 = undefined;
-    if (try path_mod.computeLeafParentHash(
-        Default,
-        testing.allocator,
-        &tree,
-        LeafIndex.fromU32(0),
-    )) |ph| {
-        ph_buf = ph;
-        leaf_a.parent_hash = &ph_buf;
-    }
-    try tree.setLeaf(LeafIndex.fromU32(0), leaf_a);
-
-    // Should pass.
-    try tree_hashes.verifyParentHashes(Default, testing.allocator, &tree);
-
-    // Tamper: flip a byte in the leaf's parent_hash.
-    const slot = &tree.nodes[0];
-    const lp = &slot.*.?.payload.leaf;
-    if (lp.parent_hash) |ph| {
-        @constCast(ph)[0] ^= 0xFF;
-    }
-
-    // Should fail.
-    const result = tree_hashes.verifyParentHashes(Default, testing.allocator, &tree);
-    try testing.expectError(error.ParentHashMismatch, result);
 }

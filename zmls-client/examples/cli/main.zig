@@ -385,15 +385,6 @@ fn cmdJoin(
         return fatal(io, "join: load tree failed");
     defer tree.deinit();
 
-    // Find joiner's leaf index by matching sign key.
-    const sign_pk: *const [P.sign_pk_len]u8 =
-        sec_buf[P.sign_sk_len + P.nsk +
-        P.nsk ..][0..P.sign_pk_len];
-    const leaf_idx = findLeafBySignKey(
-        &tree,
-        sign_pk,
-    ) orelse return fatal(io, "join: leaf not found");
-
     var join = client.joinGroup(
         gpa,
         io,
@@ -401,7 +392,6 @@ fn cmdJoin(
         .{
             .ratchet_tree = tree,
             .signer_verify_key = &signer_pub,
-            .my_leaf_index = leaf_idx,
         },
     ) catch return fatal(io, "join: process failed");
     defer join.deinit();
@@ -1115,32 +1105,6 @@ fn injectPendingKp(
             .sign_sk = sign_sk,
         },
     );
-}
-
-fn findLeafBySignKey(
-    tree: *const zmls.RatchetTree,
-    sign_pk: *const [P.sign_pk_len]u8,
-) ?zmls.LeafIndex {
-    var i: u32 = 0;
-    while (i < tree.leaf_count) : (i += 1) {
-        const node_idx = i * 2;
-        if (tree.nodes[node_idx]) |node| {
-            if (node.node_type == .leaf) {
-                const leaf = node.payload.leaf;
-                if (leaf.signature_key.len ==
-                    P.sign_pk_len and
-                    std.mem.eql(
-                        u8,
-                        leaf.signature_key,
-                        sign_pk,
-                    ))
-                {
-                    return zmls.LeafIndex.fromU32(i);
-                }
-            }
-        }
-    }
-    return null;
 }
 
 fn writeTreeFile(

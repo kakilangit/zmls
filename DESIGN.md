@@ -488,6 +488,28 @@ that follows load-compute-persist.
 - Secrets zeroed via `secureZero` (volatile writes, not
   optimizable) before deallocation.
 
+### Stack Usage
+
+Several operations use large stack-allocated buffers:
+
+| Buffer | Size | Location | Purpose |
+|--------|------|----------|---------|
+| `max_labeled_buf` | 68 KB | `hpke.zig` | HPKE labeled IKM/info for Welcome processing |
+| `EncryptContextBuf` | 65 KB | `primitives.zig` | EncryptWithLabel/DecryptWithLabel context |
+| `ValidatedProposals` | ~100 KB | `evolution.zig` | Inline arrays for validated proposal lists |
+| `CommitResult` | ~65 KB | `commit.zig` | Commit creation/processing result |
+| `ExternalCommitResult` | ~65 KB | `external.zig` | External join result |
+
+Peak transient stack usage during commit processing or Welcome
+is approximately 200-300 KB. The default thread stack size (8 MB
+on most platforms) accommodates this comfortably. Applications
+using custom thread stacks should ensure at least 1 MB.
+
+The HPKE labeled buffers could be reduced to ~200 bytes by using
+incremental hashing (feeding prefix + data to HMAC in chunks),
+but this would require changing the `kdfExtract`/`kdfExpand`
+provider interface to support incremental updates.
+
 ### Error Handling
 
 - Per-module error sets unioned as needed.

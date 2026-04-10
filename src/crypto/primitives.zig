@@ -125,19 +125,106 @@ pub fn signWithLabel(
 }
 
 /// VerifyWithLabel(VerifyKey, Label, Content, SignatureValue)
+///
+/// Accepts variable-length signatures to support both IEEE P1363
+/// (raw r||s, fixed size) and DER-encoded ECDSA signatures.
+/// Ed25519/Ed448 signatures are always fixed-size and pass through
+/// directly.
 pub fn verifyWithLabel(
     comptime P: type,
     pk: *const [P.sign_pk_len]u8,
     label: []const u8,
     content: []const u8,
-    sig: *const [P.sig_len]u8,
+    sig_bytes: []const u8,
 ) CryptoError!void {
     assert(label.len > 0 and label.len <= 255);
     assert(label_prefix.len + label.len + content.len + 16 <= 65536);
     var buf: [65536]u8 = undefined;
     defer secureZero(&buf);
     const pos = buildSignContent(&buf, label, content);
-    return P.verify(pk, buf[0..pos], sig);
+    const sig = normalizeSignature(P, sig_bytes) orelse
+        return error.SignatureVerifyFailed;
+    return P.verify(pk, buf[0..pos], &sig);
+}
+
+/// Convert a variable-length signature to the provider's
+/// fixed-size [sig_len]u8 format.
+///
+/// If the input is exactly sig_len bytes, it is treated as raw
+/// IEEE P1363 (r||s). If it starts with 0x30 (DER SEQUENCE tag),
+/// it is decoded as DER. Returns null if neither applies.
+fn normalizeSignature(
+    comptime P: type,
+    sig_bytes: []const u8,
+) ?[P.sig_len]u8 {
+    if (sig_bytes.len == P.sig_len) {
+        return sig_bytes[0..P.sig_len].*;
+    }
+    // Attempt DER decode for ECDSA suites.
+    if (sig_bytes.len > 0 and sig_bytes[0] == 0x30) {
+        return decodeDerSignature(P.sig_len, sig_bytes);
+    }
+    return null;
+}
+
+/// Decode a DER-encoded ECDSA signature into fixed-size r||s.
+///
+/// DER format: SEQUENCE { INTEGER r, INTEGER s }
+/// Each integer is big-endian with possible leading zero for
+/// sign bit. Output is zero-padded to exactly `n` bytes
+/// (n/2 per component).
+fn decodeDerSignature(
+    comptime n: u32,
+    der: []const u8,
+) ?[n]u8 {
+    const half = n / 2;
+    if (der.len < 6) return null;
+    if (der[0] != 0x30) return null;
+
+    const seq_len = der[1];
+    if (@as(usize, seq_len) + 2 != der.len) return null;
+
+    var out: [n]u8 = [_]u8{0} ** n;
+    var pos: usize = 2;
+
+    // Decode r.
+    pos = decodeDerInt(out[0..half], der, pos) orelse
+        return null;
+    // Decode s.
+    pos = decodeDerInt(out[half..n], der, pos) orelse
+        return null;
+
+    if (pos != der.len) return null;
+    return out;
+}
+
+/// Decode a single DER INTEGER into a fixed-size big-endian
+/// buffer. Returns the new position, or null on error.
+fn decodeDerInt(
+    out: []u8,
+    der: []const u8,
+    start: usize,
+) ?usize {
+    if (start + 2 > der.len) return null;
+    if (der[start] != 0x02) return null;
+    const int_len: usize = der[start + 1];
+    var pos = start + 2;
+    if (pos + int_len > der.len) return null;
+    if (int_len == 0) return null;
+
+    var data = der[pos .. pos + int_len];
+    pos += int_len;
+
+    // Strip leading zero used for sign bit.
+    if (data.len > 1 and data[0] == 0x00) {
+        data = data[1..];
+    }
+    if (data.len > out.len) return null;
+
+    // Right-align in output buffer (zero-padded on left).
+    const offset = out.len - data.len;
+    @memcpy(out[offset..], data);
+    return pos;
 }
 
 /// Build the SignContent struct:
@@ -190,7 +277,7 @@ pub fn encryptWithLabel(
     label: []const u8,
     context: []const u8,
     plaintext: []const u8,
-    eph_seed: *const [32]u8,
+    eph_seed: *const [P.seed_len]u8,
     ct_out: []u8,
     tag_out: *[P.nt]u8,
 ) CryptoError![P.npk]u8 {
@@ -242,6 +329,11 @@ pub fn decryptWithLabel(
 /// Build the EncryptContext info blob:
 ///   varint(len("MLS 1.0 " || label)) || "MLS 1.0 " || label
 ///   || varint(len(context)) || context
+///
+/// NOTE: This struct is ~65 KB. It is returned by value from
+/// buildEncryptContext and relies on compiler RVO to avoid a
+/// memcpy. If a future compiler does not perform RVO here,
+/// consider passing as an out-pointer parameter.
 const EncryptContextBuf = struct {
     buf: [65536 + 128]u8 = undefined,
     len: u32 = 0,
@@ -418,7 +510,7 @@ test "signWithLabel and verifyWithLabel round-trip" {
         &kp.pk,
         "LeafNode",
         content,
-        &sig,
+        sig[0..],
     );
 }
 
@@ -438,7 +530,7 @@ test "verifyWithLabel rejects wrong label" {
         &kp.pk,
         "WrongLabel",
         content,
-        &sig,
+        sig[0..],
     );
     try testing.expectError(
         error.SignatureVerifyFailed,

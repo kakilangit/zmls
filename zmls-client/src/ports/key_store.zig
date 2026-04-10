@@ -41,6 +41,12 @@ pub fn KeyStore(comptime P: type) type {
                 leaf_index: u32,
                 out: *[P.nsk]u8,
             ) Error!bool,
+            delete_encryption_key: *const fn (
+                context: *anyopaque,
+                io: Io,
+                group_id: []const u8,
+                leaf_index: u32,
+            ) Error!void,
         };
 
         pub const Error = Io.Cancelable || error{
@@ -107,6 +113,24 @@ pub fn KeyStore(comptime P: type) type {
                 out,
             );
         }
+
+        /// Delete an encryption key for a (group, leaf) pair.
+        /// Idempotent — succeeds even if no key is stored.
+        /// The implementation must secureZero the key before
+        /// freeing the slot.
+        pub fn deleteEncryptionKey(
+            self: Self,
+            io: Io,
+            group_id: []const u8,
+            leaf_index: u32,
+        ) Error!void {
+            return self.vtable.delete_encryption_key(
+                self.context,
+                io,
+                group_id,
+                leaf_index,
+            );
+        }
     };
 }
 
@@ -165,11 +189,19 @@ const NoOpKeyStore = struct {
         return false;
     }
 
+    fn deleteEnc(
+        _: *anyopaque,
+        _: Io,
+        _: []const u8,
+        _: u32,
+    ) StubKS.Error!void {}
+
     const vtable: StubKS.VTable = .{
         .store_signature_key = &storeSig,
         .load_signature_key = &loadSig,
         .store_encryption_key = &storeEnc,
         .load_encryption_key = &loadEnc,
+        .delete_encryption_key = &deleteEnc,
     };
 };
 

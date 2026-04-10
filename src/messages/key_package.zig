@@ -207,19 +207,16 @@ pub const KeyPackage = struct {
             0,
         ) catch return error.KdfOutputTooLong;
 
-        if (self.signature.len != P.sig_len) {
+        if (self.signature.len == 0) {
             return error.SignatureVerifyFailed;
         }
-        const sig: *const [P.sig_len]u8 = @ptrCast(
-            self.signature[0..P.sig_len],
-        );
 
         try prim.verifyWithLabel(
             P,
             pk,
             "KeyPackageTBS",
             tbs_buf[0..tbs_end],
-            sig,
+            self.signature,
         );
     }
 
@@ -267,6 +264,44 @@ pub const KeyPackage = struct {
 
         // 6. Validate LeafNode (RFC 9420 Section 7.3).
         try self.leaf_node.validate(expected_suite, current_time);
+
+        // 7. encryption_key MUST be a valid HPKE public key
+        //    (RFC 9420 §7.3).
+        try self.leaf_node.validateEncryptionKey(P);
+
+        // 8. init_key MUST be a valid HPKE public key
+        //    (RFC 9420 §10.1).
+        if (self.init_key.len != P.npk)
+            return error.InvalidKeyPackage;
+        P.validateDhPublicKey(
+            self.init_key[0..P.npk],
+        ) catch return error.InvalidKeyPackage;
+
+        // 9. KeyPackage extensions MUST all be listed in
+        //    leaf_node.capabilities.extensions (RFC 9420
+        //    §10.1). Default extension types (1-5) are
+        //    implicitly supported per §7.2.
+        for (self.extensions) |ext| {
+            const v = @intFromEnum(ext.extension_type);
+            if (v >= 1 and v <= 5) continue;
+            if (!capsContains(
+                types.ExtensionType,
+                self.leaf_node.capabilities.extensions,
+                ext.extension_type,
+            )) {
+                return error.InvalidKeyPackage;
+            }
+        }
+
+        // 10. capabilities.versions MUST include mls10
+        //     (RFC 9420 §10.1 + §7.2).
+        if (!capsContains(
+            ProtocolVersion,
+            self.leaf_node.capabilities.versions,
+            .mls10,
+        )) {
+            return error.InvalidKeyPackage;
+        }
     }
 
     // -- KeyPackageRef ----------------------------------------------------
@@ -349,29 +384,12 @@ fn encodeExtensionList(
     pos: u32,
     exts: []const Extension,
 ) EncodeError!u32 {
-    const gap: u32 = 4;
-    const start = pos + gap;
-    var p = start;
-    for (exts) |*ext| {
-        p = try ext.encode(buf, p);
-    }
-    const inner_len: u32 = p - start;
-    var len_buf: [4]u8 = undefined;
-    const len_end = try varint.encode(
-        &len_buf,
-        0,
-        inner_len,
+    return codec.encodeVarPrefixedList(
+        Extension,
+        buf,
+        pos,
+        exts,
     );
-    const dest_start = pos + len_end;
-    if (dest_start != start) {
-        std.mem.copyForwards(
-            u8,
-            buf[dest_start..][0..inner_len],
-            buf[start..][0..inner_len],
-        );
-    }
-    @memcpy(buf[pos..][0..len_end], len_buf[0..len_end]);
-    return dest_start + inner_len;
 }
 
 /// Free extension data slices allocated during decode.
@@ -434,6 +452,20 @@ fn decodeExtensionList(
     ) catch return error.OutOfMemory;
     @memcpy(exts, temp[0..count]);
     return .{ .value = exts, .pos = p };
+}
+
+// -- Helpers -----------------------------------------------------------------
+
+/// Check whether `needle` appears in `list`.
+fn capsContains(
+    comptime T: type,
+    list: []const T,
+    needle: T,
+) bool {
+    for (list) |v| {
+        if (v == needle) return true;
+    }
+    return false;
 }
 
 // -- Tests ---------------------------------------------------------------
@@ -745,4 +777,70 @@ test "last_resort_extension encodes empty data" {
         @as(usize, 0),
         last_resort_extension.data.len,
     );
+}
+
+test "KeyPackage validate rejects invalid init_key" {
+    var t = try makeTestKeyPackage();
+    try fixTestKeyPackage(&t);
+
+    // Replace init_key with all-zeros (invalid for X25519).
+    t.init_pk = [_]u8{0x00} ** Default.npk;
+    t.kp.init_key = &t.init_pk;
+
+    // Re-sign after mutation.
+    try t.kp.signKeyPackage(Default, &t.sign_sk, &t.sig_buf);
+
+    const result = t.kp.validate(
+        Default,
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        null,
+    );
+    try testing.expectError(error.InvalidKeyPackage, result);
+}
+
+test "KeyPackage validate rejects extension not in capabilities" {
+    var t = try makeTestKeyPackage();
+    try fixTestKeyPackage(&t);
+
+    // Add a non-default extension (0xBEEF) to KeyPackage but NOT
+    // to leaf_node.capabilities.extensions.
+    const beef_ext: types.ExtensionType = @enumFromInt(0xBEEF);
+    const ext = Extension{
+        .extension_type = beef_ext,
+        .data = &.{},
+    };
+    const exts = [_]Extension{ext};
+    t.kp.extensions = &exts;
+
+    // Re-sign after mutation.
+    try t.kp.signKeyPackage(Default, &t.sign_sk, &t.sig_buf);
+
+    const result = t.kp.validate(
+        Default,
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        null,
+    );
+    try testing.expectError(error.InvalidKeyPackage, result);
+}
+
+test "KeyPackage validate rejects missing mls10 in capabilities" {
+    var t = try makeTestKeyPackage();
+    try fixTestKeyPackage(&t);
+
+    // Override capabilities.versions to exclude mls10.
+    const empty_versions = [_]ProtocolVersion{};
+    t.kp.leaf_node.capabilities.versions = &empty_versions;
+
+    // Re-sign after mutation.
+    try t.kp.signKeyPackage(Default, &t.sign_sk, &t.sig_buf);
+
+    // LeafNode.validate (step 6) catches this first as
+    // InvalidLeafNode. The KeyPackage-level check (step 10)
+    // is a defense-in-depth backstop.
+    const result = t.kp.validate(
+        Default,
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        null,
+    );
+    try testing.expectError(error.InvalidLeafNode, result);
 }

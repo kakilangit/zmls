@@ -11,14 +11,13 @@
 // vectors, variable-length vectors (varint-prefixed), and optional<T>.
 
 const std = @import("std");
-const assert = std.debug.assert;
 const varint = @import("varint.zig");
 const errors = @import("../common/errors.zig");
 
 const DecodeError = errors.DecodeError;
 const max_vec_length = @import("../common/types.zig").max_vec_length;
 
-pub const EncodeError = error{ BufferTooSmall, MissingConfirmationTag };
+pub const EncodeError = error{ BufferTooSmall, MissingConfirmationTag, VectorTooLarge };
 
 // -- Encoding ----------------------------------------------------------------
 
@@ -83,7 +82,7 @@ pub fn encodeVarVector(
     pos: u32,
     data: []const u8,
 ) EncodeError!u32 {
-    assert(data.len <= max_vec_length);
+    if (data.len > max_vec_length) return error.VectorTooLarge;
     const len: u32 = @intCast(data.len);
     var p = try varint.encode(buf, pos, len);
     if (p + len > buf.len) return error.BufferTooSmall;
@@ -107,6 +106,47 @@ pub fn encodeOptional(
     } else {
         return encodeUint8(buf, pos, 0);
     }
+}
+
+/// Encode a slice of items as a varint-length-prefixed list.
+///
+/// Each item must have a method `encode(*const T, []u8, u32) E!u32`
+/// where E is a subset of EncodeError. This function handles the
+/// gap-then-shift pattern: reserve 4 bytes for the varint prefix,
+/// encode all items, then shift left if the varint was shorter.
+pub fn encodeVarPrefixedList(
+    comptime T: type,
+    buf: []u8,
+    pos: u32,
+    items: []const T,
+) EncodeError!u32 {
+    const gap: u32 = 4;
+    const start = pos + gap;
+    var p = start;
+
+    for (items) |*item| {
+        p = try item.encode(buf, p);
+    }
+
+    const inner_len: u32 = p - start;
+    var len_buf: [4]u8 = undefined;
+    const len_end = try varint.encode(
+        &len_buf,
+        0,
+        inner_len,
+    );
+
+    const dest_start = pos + len_end;
+    if (dest_start != start) {
+        std.mem.copyForwards(
+            u8,
+            buf[dest_start..][0..inner_len],
+            buf[start..][0..inner_len],
+        );
+    }
+    @memcpy(buf[pos..][0..len_end], len_buf[0..len_end]);
+
+    return dest_start + inner_len;
 }
 
 // -- Decoding ----------------------------------------------------------------
@@ -426,4 +466,26 @@ test "global max_vec_length is 1 MiB" {
         @as(u32, 1 << 20),
         max_vec_length,
     );
+}
+
+test "encodeVarVector rejects oversized data" {
+    // Create a slice that claims to be larger than max_vec_length.
+    // We can't actually allocate 1 MiB+ on the stack, but we can
+    // test via a pointer-length pair using a small backing buffer
+    // with an artificially large slice.
+    var buf: [64]u8 = undefined;
+    // Use max_vec_length + 1 as input length via a 0-byte slice
+    // trick: Zig slices carry length, so we cast to get an
+    // oversized length.
+    const big_len: usize = max_vec_length + 1;
+    // Build a slice with length > max_vec_length. The backing
+    // memory doesn't matter since encodeVarVector checks length
+    // before reading any data.
+    var dummy: [1]u8 = .{0};
+    const oversized: []const u8 = @as(
+        [*]const u8,
+        &dummy,
+    )[0..big_len];
+    const result = encodeVarVector(&buf, 0, oversized);
+    try testing.expectError(error.VectorTooLarge, result);
 }

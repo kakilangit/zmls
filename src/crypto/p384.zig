@@ -1,6 +1,6 @@
-//! CryptoProvider for MLS cipher suite 0x0006
+//! CryptoProvider for MLS cipher suite 0x0007
 //! (P-384 ECDH + AES-256-GCM + SHA-384 + ECDSA-P384).
-// CryptoProvider backend for MLS cipher suite 0x0006:
+// CryptoProvider backend for MLS cipher suite 0x0007:
 // MLS_256_DHKEMP384_AES256GCM_SHA384_P384.
 //
 // Hash:      SHA-384           (std.crypto.hash.sha2.Sha384)
@@ -25,7 +25,7 @@ const Aes256Gcm = crypto.aead.aes_gcm.Aes256Gcm;
 const P384 = crypto.ecc.P384;
 const Ecdsa = crypto.sign.ecdsa.EcdsaP384Sha384;
 
-/// Cipher suite 0x0006 backend.
+/// Cipher suite 0x0007 backend.
 pub const DhKemP384Sha384Aes256GcmP384 = struct {
     // -- Constants per RFC 9420 Table 2 -----------------------------------
 
@@ -55,6 +55,9 @@ pub const DhKemP384Sha384Aes256GcmP384 = struct {
 
     /// Signature length (ECDSA r||s = 96 bytes).
     pub const sig_len: u32 = 96;
+
+    /// Keypair seed length (P-384 scalar = 48 bytes).
+    pub const seed_len: u32 = 48;
 
     // -- HPKE algorithm IDs per RFC 9180 ---------------------------------
 
@@ -134,20 +137,16 @@ pub const DhKemP384Sha384Aes256GcmP384 = struct {
     // -- Signatures (ECDSA-P384-SHA384) -----------------------------------
 
     pub fn signKeypairFromSeed(
-        seed: *const [32]u8,
+        seed: *const [seed_len]u8,
     ) CryptoError!struct {
         sk: [sign_sk_len]u8,
         pk: [sign_pk_len]u8,
     } {
-        // P-384 scalar is 48 bytes. Extract a PRK from the
-        // 32-byte seed, then expand to 48 bytes.
-        var prk = Hkdf.extract("zmls p384 sign", seed);
-        defer primitives.secureZero(&prk);
-        var extended: [48]u8 = undefined;
-        defer primitives.secureZero(&extended);
-        Hkdf.expand(&extended, "seed", prk);
+        // P-384 scalar is 48 bytes = seed_len, so we use the
+        // seed directly as the scalar for deterministic key
+        // generation.
         const kp = Ecdsa.KeyPair.generateDeterministic(
-            extended,
+            seed.*,
         ) catch return error.InvalidPrivateKey;
         return .{
             .sk = kp.secret_key.bytes,
@@ -159,10 +158,16 @@ pub const DhKemP384Sha384Aes256GcmP384 = struct {
         sk: *const [sign_sk_len]u8,
         msg: []const u8,
     ) CryptoError![sig_len]u8 {
-        const secret_key = Ecdsa.SecretKey{ .bytes = sk.* };
-        const kp = Ecdsa.KeyPair.fromSecretKey(
+        var secret_key = Ecdsa.SecretKey{ .bytes = sk.* };
+        defer primitives.secureZero(
+            std.mem.asBytes(&secret_key),
+        );
+        var kp = Ecdsa.KeyPair.fromSecretKey(
             secret_key,
         ) catch return error.InvalidPrivateKey;
+        defer primitives.secureZero(
+            std.mem.asBytes(&kp),
+        );
         const sig = kp.sign(msg, null) catch {
             return error.SignatureVerifyFailed;
         };
@@ -197,21 +202,16 @@ pub const DhKemP384Sha384Aes256GcmP384 = struct {
         };
     }
 
-    /// Generate a P-384 DH key pair from a 32-byte seed.
+    /// Generate a P-384 DH key pair from a 48-byte seed.
     ///
-    /// P-384 scalars are 48 bytes. We extract a PRK from the
-    /// 32-byte seed, then expand to 48 bytes for scalar
-    /// derivation.
+    /// The seed is used directly as the 48-byte scalar for
+    /// deterministic key generation, matching the curve's
+    /// native scalar size.
     pub fn dhKeypairFromSeed(
-        seed: *const [32]u8,
+        seed: *const [seed_len]u8,
     ) CryptoError!struct { sk: [nsk]u8, pk: [npk]u8 } {
-        var prk = Hkdf.extract("zmls p384 dh", seed);
-        defer primitives.secureZero(&prk);
-        var extended: [48]u8 = undefined;
-        defer primitives.secureZero(&extended);
-        Hkdf.expand(&extended, "seed", prk);
         const kp = Ecdsa.KeyPair.generateDeterministic(
-            extended,
+            seed.*,
         ) catch return error.InvalidPrivateKey;
         const point = P384.fromSec1(
             &kp.public_key.toUncompressedSec1(),
@@ -247,7 +247,7 @@ pub const DhKemP384Sha384Aes256GcmP384 = struct {
 const testing = std.testing;
 const P = DhKemP384Sha384Aes256GcmP384;
 
-test "suite 0x0006 constants match RFC 9420" {
+test "suite 0x0007 constants match RFC 9420" {
     try testing.expectEqual(@as(u32, 48), P.nh);
     try testing.expectEqual(@as(u32, 32), P.nk);
     try testing.expectEqual(@as(u32, 12), P.nn);
@@ -259,7 +259,7 @@ test "suite 0x0006 constants match RFC 9420" {
     try testing.expectEqual(@as(u32, 96), P.sig_len);
 }
 
-test "suite 0x0006 aead seal/open round-trip" {
+test "suite 0x0007 aead seal/open round-trip" {
     const key = [_]u8{0x42} ** P.nk;
     const nonce = [_]u8{0x24} ** P.nn;
     const aad = "additional data";
@@ -288,7 +288,7 @@ test "suite 0x0006 aead seal/open round-trip" {
     try testing.expectEqualSlices(u8, plaintext, &decrypted);
 }
 
-test "suite 0x0006 aead rejects tampered ciphertext" {
+test "suite 0x0007 aead rejects tampered ciphertext" {
     const key = [_]u8{0x42} ** P.nk;
     const nonce = [_]u8{0x24} ** P.nn;
     const plaintext = "secret";
@@ -310,16 +310,16 @@ test "suite 0x0006 aead rejects tampered ciphertext" {
     try testing.expectError(error.AeadError, result);
 }
 
-test "suite 0x0006 sign/verify round-trip" {
-    const seed = [_]u8{0x01} ** 32;
+test "suite 0x0007 sign/verify round-trip" {
+    const seed = [_]u8{0x01} ** 48;
     const kp = try P.signKeypairFromSeed(&seed);
     const msg = "message to sign";
     const sig = try P.sign(&kp.sk, msg);
     try P.verify(&kp.pk, msg, &sig);
 }
 
-test "suite 0x0006 sign/verify rejects wrong message" {
-    const seed = [_]u8{0x02} ** 32;
+test "suite 0x0007 sign/verify rejects wrong message" {
+    const seed = [_]u8{0x02} ** 48;
     const kp = try P.signKeypairFromSeed(&seed);
     const sig = try P.sign(&kp.sk, "correct");
     const result = P.verify(&kp.pk, "wrong", &sig);
@@ -329,9 +329,9 @@ test "suite 0x0006 sign/verify rejects wrong message" {
     );
 }
 
-test "suite 0x0006 dh key exchange" {
-    const seed_a = [_]u8{0x0A} ** 32;
-    const seed_b = [_]u8{0x0B} ** 32;
+test "suite 0x0007 dh key exchange" {
+    const seed_a = [_]u8{0x0A} ** 48;
+    const seed_b = [_]u8{0x0B} ** 48;
 
     const kp_a = try P.dhKeypairFromSeed(&seed_a);
     const kp_b = try P.dhKeypairFromSeed(&seed_b);
@@ -341,13 +341,13 @@ test "suite 0x0006 dh key exchange" {
     try testing.expectEqualSlices(u8, &shared_ab, &shared_ba);
 }
 
-test "suite 0x0006 validate rejects invalid public key" {
+test "suite 0x0007 validate rejects invalid public key" {
     const bad_pk = [_]u8{0x00} ** P.npk;
     const result = P.validateDhPublicKey(&bad_pk);
     try testing.expectError(error.InvalidPublicKey, result);
 }
 
-// -- Full group lifecycle test with suite 0x0006 --
+// -- Full group lifecycle test with suite 0x0007 --
 
 const types = @import("../common/types.zig");
 const ProtocolVersion = types.ProtocolVersion;
@@ -368,17 +368,17 @@ const welcome_mod = @import("../group/welcome.zig");
 const prim_mod = @import("primitives.zig");
 const LeafIndex = types.LeafIndex;
 
-const suite_0x0006: CipherSuite =
+const suite_0x0007: CipherSuite =
     .mls_256_dhkemp384_aes256gcm_sha384_p384;
 
-/// Create a test LeafNode for cipher suite 0x0006
+/// Create a test LeafNode for cipher suite 0x0007
 /// /// (P-384/AES-256-GCM/ECDSA-P384).
-fn makeLeaf0x0006(
+fn makeLeaf0x0007(
     enc_pk: []const u8,
     sig_pk: []const u8,
 ) LeafNode {
     const versions = comptime [_]ProtocolVersion{.mls10};
-    const suites = comptime [_]CipherSuite{suite_0x0006};
+    const suites = comptime [_]CipherSuite{suite_0x0007};
     const ext_types = comptime [_]types.ExtensionType{};
     const prop_types = comptime [_]types.ProposalType{};
     const cred_types = comptime [_]types.CredentialType{
@@ -407,7 +407,7 @@ fn makeLeaf0x0006(
     };
 }
 
-const TestKP0x0006 = struct {
+const TestKP0x0007 = struct {
     kp: KeyPackage,
     sig_buf: [P.sig_len]u8,
     leaf_sig_buf: [P.sig_len]u8,
@@ -418,22 +418,22 @@ const TestKP0x0006 = struct {
     sign_sk: [P.sign_sk_len]u8,
     sign_pk: [P.sign_pk_len]u8,
 
-    /// Initialize a test KeyPackage for suite 0x0006 from
+    /// Initialize a test KeyPackage for suite 0x0007 from
     /// deterministic seed tags.
     fn init(
-        self: *TestKP0x0006,
+        self: *TestKP0x0007,
         enc_tag: u8,
         init_tag: u8,
         sign_tag: u8,
     ) !void {
         const enc_kp = try P.dhKeypairFromSeed(
-            &([_]u8{enc_tag} ** 32),
+            &([_]u8{enc_tag} ** 48),
         );
         const init_kp = try P.dhKeypairFromSeed(
-            &([_]u8{init_tag} ** 32),
+            &([_]u8{init_tag} ** 48),
         );
         const sign_kp = try P.signKeypairFromSeed(
-            &([_]u8{sign_tag} ** 32),
+            &([_]u8{sign_tag} ** 48),
         );
 
         self.enc_sk = enc_kp.sk;
@@ -445,9 +445,9 @@ const TestKP0x0006 = struct {
 
         self.kp = .{
             .version = .mls10,
-            .cipher_suite = suite_0x0006,
+            .cipher_suite = suite_0x0007,
             .init_key = &self.init_pk,
-            .leaf_node = makeLeaf0x0006(
+            .leaf_node = makeLeaf0x0007(
                 &self.enc_pk,
                 &self.sign_pk,
             ),
@@ -473,22 +473,22 @@ const TestKP0x0006 = struct {
     }
 };
 
-test "suite 0x0006 full group lifecycle" {
+test "suite 0x0007 full group lifecycle" {
     const alloc = testing.allocator;
 
     const alice_enc = try P.dhKeypairFromSeed(
-        &([_]u8{0xA1} ** 32),
+        &([_]u8{0xA1} ** 48),
     );
     const alice_sign = try P.signKeypairFromSeed(
-        &([_]u8{0xA2} ** 32),
+        &([_]u8{0xA2} ** 48),
     );
 
     var gs = try state_mod.createGroup(
         P,
         alloc,
         "p384-lifecycle",
-        makeLeaf0x0006(&alice_enc.pk, &alice_sign.pk),
-        suite_0x0006,
+        makeLeaf0x0007(&alice_enc.pk, &alice_sign.pk),
+        suite_0x0007,
         &.{},
     );
     defer gs.deinit();
@@ -496,7 +496,7 @@ test "suite 0x0006 full group lifecycle" {
     try testing.expectEqual(@as(u64, 0), gs.epoch());
     try testing.expectEqual(@as(u32, 1), gs.leafCount());
 
-    var bob: TestKP0x0006 = undefined;
+    var bob: TestKP0x0007 = undefined;
     try bob.init(0xB1, 0xB3, 0xB2);
 
     const add_bob = Proposal{
@@ -537,13 +537,14 @@ test "suite 0x0006 full group lifecycle" {
         kp_buf[0..kp_end],
     );
 
-    const eph_seed = [_]u8{0xCC} ** 32;
+    const eph_seed = [_]u8{0xCC} ** 48;
     const new_members =
-        [_]welcome_mod.NewMemberEntry{
+        [_]welcome_mod.NewMemberEntry(P){
             .{
                 .kp_ref = &kp_ref,
                 .init_pk = &bob.init_pk,
                 .eph_seed = &eph_seed,
+                .leaf_index = LeafIndex.fromU32(1),
             },
         };
 
@@ -556,13 +557,17 @@ test "suite 0x0006 full group lifecycle" {
         &cr.epoch_secrets.joiner_secret,
         &alice_sign.sk,
         0,
-        suite_0x0006,
+        suite_0x0007,
         &new_members,
         &.{},
+        null,
+        0,
+        null,
+        0,
     );
     defer wr.deinit(alloc);
 
-    var bob_gs = try welcome_mod.processWelcome(
+    var bob_join = try welcome_mod.processWelcome(
         P,
         alloc,
         &wr.welcome,
@@ -574,19 +579,19 @@ test "suite 0x0006 full group lifecycle" {
         LeafIndex.fromU32(1),
         null,
     );
-    defer bob_gs.deinit();
+    defer bob_join.deinit();
 
-    try testing.expectEqual(@as(u64, 1), bob_gs.epoch());
-    try testing.expectEqual(@as(u32, 2), bob_gs.leafCount());
+    try testing.expectEqual(@as(u64, 1), bob_join.group_state.epoch());
+    try testing.expectEqual(@as(u32, 2), bob_join.group_state.leafCount());
 
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.epoch_secret,
-        &bob_gs.epoch_secrets.epoch_secret,
+        &bob_join.group_state.epoch_secrets.epoch_secret,
     );
     try testing.expectEqualSlices(
         u8,
         &cr.epoch_secrets.init_secret,
-        &bob_gs.epoch_secrets.init_secret,
+        &bob_join.group_state.epoch_secrets.init_secret,
     );
 }

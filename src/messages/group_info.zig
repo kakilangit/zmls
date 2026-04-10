@@ -200,17 +200,16 @@ pub fn verifyGroupInfo(
         gi.signer,
     ) catch return error.KdfOutputTooLong;
 
-    if (gi.signature.len != P.sig_len) {
+    if (gi.signature.len == 0) {
         return error.SignatureVerifyFailed;
     }
-    const sig: *const [P.sig_len]u8 = gi.signature[0..P.sig_len];
 
     return primitives.verifyWithLabel(
         P,
         verify_key,
         "GroupInfoTBS",
         tbs_buf[0..tbs_end],
-        sig,
+        gi.signature,
     );
 }
 
@@ -341,33 +340,12 @@ fn encodeExtensionList(
     pos: u32,
     items: []const Extension,
 ) EncodeError!u32 {
-    const gap: u32 = 4;
-    const start = pos + gap;
-    var p = start;
-
-    for (items) |*ext| {
-        p = try ext.encode(buf, p);
-    }
-
-    const inner_len: u32 = p - start;
-    var len_buf: [4]u8 = undefined;
-    const len_end = try varint.encode(
-        &len_buf,
-        0,
-        inner_len,
+    return codec.encodeVarPrefixedList(
+        Extension,
+        buf,
+        pos,
+        items,
     );
-
-    const dest_start = pos + len_end;
-    if (dest_start != start) {
-        std.mem.copyForwards(
-            u8,
-            buf[dest_start..][0..inner_len],
-            buf[start..][0..inner_len],
-        );
-    }
-    @memcpy(buf[pos..][0..len_end], len_buf[0..len_end]);
-
-    return dest_start + inner_len;
 }
 
 /// Free extension data slices allocated during decode.

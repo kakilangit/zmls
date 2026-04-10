@@ -502,6 +502,10 @@ pub const ProcessCommitOpts = group_commit.ProcessCommitOpts;
 pub const ProcessWelcomeOpts =
     group_welcome.ProcessWelcomeOpts;
 
+/// Result of processWelcome (GroupState + path keys).
+pub const WelcomeJoinResult =
+    group_welcome.WelcomeJoinResult;
+
 /// Options struct for buildWelcome.
 pub const BuildWelcomeOpts = group_welcome.BuildWelcomeOpts;
 
@@ -593,4 +597,18 @@ test {
     // Pull in all module tests so `zig build test` covers
     // everything reachable from this root.
     @import("std").testing.refAllDecls(@This());
+
+    // Separated test modules (not reachable via refAllDecls).
+    _ = @import("group/commit_test.zig");
+    _ = @import("group/evolution_test.zig");
+    _ = @import("group/external_senders_test.zig");
+    _ = @import("group/external_test.zig");
+    _ = @import("group/welcome_test.zig");
+    _ = @import("framing/private_msg_test.zig");
+    _ = @import("key_schedule/secret_tree_test.zig");
+    _ = @import("messages/proposal_test.zig");
+    _ = @import("messages/welcome_test.zig");
+    _ = @import("tree/hashes_test.zig");
+    _ = @import("tree/node_test.zig");
+    _ = @import("tree/path_test.zig");
 }

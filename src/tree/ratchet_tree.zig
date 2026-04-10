@@ -227,8 +227,11 @@ pub const RatchetTree = struct {
         return buf[0..count];
     }
 
-    /// Collect non-blank nodes into buf, descending into children of
-    /// /// blank intermediates per RFC 9420 Section 7.7.
+    /// Collect non-blank nodes into buf, descending into
+    /// children of blank intermediates per RFC 9420 §7.7.
+    ///
+    /// Uses an explicit stack (bounded by tree depth) instead
+    /// of recursion. Stack cost: 128 bytes.
     fn resolutionInner(
         self: *const RatchetTree,
         index: NodeIndex,
@@ -237,52 +240,104 @@ pub const RatchetTree = struct {
     ) TreeError!void {
         assert(count.* <= max_resolution_size);
         assert(self.nodes.len > 0);
-        const i = index.toUsize();
-        if (i >= self.nodes.len) return error.IndexOutOfRange;
 
-        if (self.nodes[i]) |n| {
-            // Non-blank: resolution includes this node.
-            if (count.* >= max_resolution_size) {
+        var stack: [max_depth]NodeIndex = undefined;
+        var top: u32 = 0;
+        stack[0] = index;
+        top = 1;
+
+        while (top > 0) {
+            top -= 1;
+            const cur = stack[top];
+            const ci = cur.toUsize();
+            if (ci >= self.nodes.len) {
                 return error.IndexOutOfRange;
             }
-            buf[count.*] = index;
-            count.* += 1;
 
-            // Per Section 7.7: for non-blank parent nodes,
-            // also include all unmerged leaves.
-            if (n.node_type == .parent) {
-                for (n.payload.parent.unmerged_leaves) |li| {
-                    if (count.* >= max_resolution_size) {
-                        return error.IndexOutOfRange;
-                    }
-                    buf[count.*] = li.toNodeIndex();
-                    count.* += 1;
+            if (self.nodes[ci]) |n| {
+                // Non-blank: include this node.
+                if (count.* >= max_resolution_size) {
+                    return error.IndexOutOfRange;
                 }
+                buf[count.*] = cur;
+                count.* += 1;
+
+                // For non-blank parents, also include
+                // all unmerged leaves (§7.7).
+                if (n.node_type == .parent) {
+                    for (n.payload.parent.unmerged_leaves) |li| {
+                        if (count.* >= max_resolution_size) {
+                            return error.IndexOutOfRange;
+                        }
+                        buf[count.*] = li.toNodeIndex();
+                        count.* += 1;
+                    }
+                }
+            } else {
+                // Blank node.
+                if (tree_math.isLeaf(cur)) continue;
+
+                // Blank intermediate: push right then left
+                // so left is processed first (DFS order).
+                if (top + 2 > max_depth) {
+                    return error.IndexOutOfRange;
+                }
+                stack[top] = tree_math.right(cur);
+                top += 1;
+                stack[top] = tree_math.left(cur);
+                top += 1;
             }
-            return;
         }
-
-        // Blank node.
-        if (tree_math.isLeaf(index)) {
-            // Blank leaf: empty resolution.
-            return;
-        }
-
-        // Blank intermediate: union of left and right resolutions.
-        try self.resolutionInner(
-            tree_math.left(index),
-            buf,
-            count,
-        );
-        try self.resolutionInner(
-            tree_math.right(index),
-            buf,
-            count,
-        );
     }
 
     /// Maximum resolution buffer size. Worst case: all leaves.
+    /// Stack cost: 256 KiB per `[max_resolution_size]NodeIndex`
+    /// buffer. Use `hasResolution()` when only emptiness needs
+    /// to be checked (128 bytes vs 256 KiB).
     pub const max_resolution_size: u32 = 1 << 16;
+
+    /// Check whether the resolution of `index` is non-empty
+    /// without allocating a full resolution buffer.
+    ///
+    /// Uses an explicit stack bounded by tree depth (128 bytes)
+    /// instead of the 256 KiB resolution buffer.
+    pub fn hasResolution(
+        self: *const RatchetTree,
+        index: NodeIndex,
+    ) TreeError!bool {
+        var stack: [max_depth]NodeIndex = undefined;
+        var top: u32 = 0;
+        stack[0] = index;
+        top = 1;
+
+        while (top > 0) {
+            top -= 1;
+            const cur = stack[top];
+            const i = cur.toUsize();
+            if (i >= self.nodes.len)
+                return error.IndexOutOfRange;
+
+            if (self.nodes[i] != null) {
+                // Non-blank node: resolution is non-empty.
+                return true;
+            }
+
+            // Blank node.
+            if (tree_math.isLeaf(cur)) {
+                // Blank leaf: empty, continue.
+                continue;
+            }
+
+            // Blank intermediate: push children.
+            if (top + 2 > max_depth)
+                return error.IndexOutOfRange;
+            stack[top] = tree_math.left(cur);
+            top += 1;
+            stack[top] = tree_math.right(cur);
+            top += 1;
+        }
+        return false;
+    }
 
     // -- Filtered Direct Path (Section 12.4.1) ------------------------------
 
@@ -317,12 +372,9 @@ pub const RatchetTree = struct {
             @panic("filteredDirectPath: path/copath mismatch");
 
         var count: u32 = 0;
-        var res_buf: [RatchetTree.max_resolution_size]NodeIndex =
-            undefined;
 
         for (dp, cp) |d, c| {
-            const res = try self.resolution(c, &res_buf);
-            if (res.len > 0) {
+            if (try self.hasResolution(c)) {
                 path_buf[count] = d;
                 copath_buf[count] = c;
                 count += 1;
@@ -714,4 +766,59 @@ test "resolution of parent with unmerged leaves" {
     try std.testing.expectEqual(@as(usize, 2), res.len);
     try std.testing.expectEqual(@as(u32, 1), res[0].toU32());
     try std.testing.expectEqual(@as(u32, 2), res[1].toU32());
+}
+
+test "hasResolution matches resolution emptiness" {
+    // 4-leaf tree (7 nodes):
+    //        3
+    //      /   \
+    //    1       5
+    //   / \     / \
+    //  0   2   4   6
+    //  A   B   _   _
+    //
+    // Leaves 0,1 populated; 2,3 blank.
+    const alloc = std.testing.allocator;
+    var tree = try RatchetTree.init(alloc, 4);
+    defer tree.deinit();
+
+    try tree.setLeaf(
+        LeafIndex.fromU32(0),
+        makeTestLeafNode("a"),
+    );
+    try tree.setLeaf(
+        LeafIndex.fromU32(1),
+        makeTestLeafNode("b"),
+    );
+
+    // Non-blank leaf: has resolution.
+    try testing.expect(
+        try tree.hasResolution(NodeIndex.fromU32(0)),
+    );
+    try testing.expect(
+        try tree.hasResolution(NodeIndex.fromU32(2)),
+    );
+
+    // Blank leaf: no resolution.
+    try testing.expect(
+        !try tree.hasResolution(NodeIndex.fromU32(4)),
+    );
+    try testing.expect(
+        !try tree.hasResolution(NodeIndex.fromU32(6)),
+    );
+
+    // Blank parent with non-blank children: has resolution.
+    try testing.expect(
+        try tree.hasResolution(NodeIndex.fromU32(1)),
+    );
+
+    // Blank parent with all-blank children: no resolution.
+    try testing.expect(
+        !try tree.hasResolution(NodeIndex.fromU32(5)),
+    );
+
+    // Root (blank, but left subtree non-empty): has resolution.
+    try testing.expect(
+        try tree.hasResolution(NodeIndex.fromU32(3)),
+    );
 }

@@ -1,12 +1,22 @@
 //! Pure array-based binary tree index arithmetic per RFC 9420
 //! Appendix C. Provides parent/child/sibling navigation for
 //! ratchet tree node indices.
+//
 // Array-based binary tree index arithmetic per RFC 9420 Appendix C.
 //
 // A ratchet tree with `n` leaves is stored in an array of
 // `nodeWidth(n)` nodes. When `n` is not a power of 2, the tree
 // is logically embedded in the smallest complete binary tree that
 // contains `n` leaves. Surplus positions are blank.
+//
+// Note on nodeWidth: RFC Appendix C defines node_width(n) = 2n-1,
+// but for non-power-of-2 n, the parent() formula produces node
+// indices up to 2*ceil_pow2(n)-2 (exceeding 2n-2). This impl
+// uses nodeWidth = 2*paddedLeafCount(n)-1 to ensure all reachable
+// indices have valid array positions. The wire-visible outputs
+// (root, directPath, copath, parent) are identical to the RFC
+// pseudocode. RFC §4.1: "MLS places no requirements on
+// implementations' internal representations."
 //
 // All functions are pure: no allocations, no state, no side effects.
 

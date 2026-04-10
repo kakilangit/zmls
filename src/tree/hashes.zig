@@ -83,18 +83,19 @@ pub fn treeHash(
 
     // Process nodes bottom-up by level. Level 0 = leaves, then
     // level 1, 2, etc. This guarantees children are hashed before
-    // parents.
+    // parents. We enumerate nodes at each level using stride-based
+    // iteration: level k nodes start at (1<<k)-1, stride 1<<(k+1).
     const max_level = tree_math.level(
         tree_math.root(tree.leaf_count),
     );
 
-    // Level 0: hash all leaves in the subtree.
     var lv: u32 = 0;
     while (lv <= max_level) : (lv += 1) {
-        var idx: u32 = 0;
-        while (idx < width) : (idx += 1) {
+        const first: u32 = (@as(u32, 1) << @intCast(lv)) - 1;
+        const stride: u32 = @as(u32, 1) << @intCast(lv + 1);
+        var idx: u32 = first;
+        while (idx < width) : (idx += stride) {
             const ni = NodeIndex.fromU32(idx);
-            if (tree_math.level(ni) != lv) continue;
 
             // Check if this node is in the subtree of root_idx.
             if (!isInSubtree(ni, root_idx)) continue;
@@ -160,62 +161,56 @@ pub fn allTreeHashes(
     comptime Crypto: type,
     tree: *const RatchetTree,
     allocator: std.mem.Allocator,
-) TreeError![][Crypto.nh]u8 {
+) (TreeError || error{OutOfMemory})![][Crypto.nh]u8 {
     const width = tree.nodeCount();
-    const scratch = allocator.alloc(
+    const result = allocator.alloc(
         [Crypto.nh]u8,
         width,
-    ) catch return error.IndexOutOfRange;
-    defer allocator.free(scratch);
+    ) catch return error.OutOfMemory;
+    errdefer allocator.free(result);
 
+    try computeAllTreeHashes(Crypto, tree, result, width);
+    return result;
+}
+
+/// Compute tree hashes for all nodes into a caller-provided
+/// buffer. The buffer must have length >= width.
+fn computeAllTreeHashes(
+    comptime Crypto: type,
+    tree: *const RatchetTree,
+    hashes: [][Crypto.nh]u8,
+    width: u32,
+) (TreeError || error{OutOfMemory})!void {
     const root_idx = tree_math.root(tree.leaf_count);
     const max_level = tree_math.level(root_idx);
 
+    // Stride-based bottom-up: level k nodes start at
+    // (1<<k)-1 with stride 1<<(k+1).
     var lv: u32 = 0;
     while (lv <= max_level) : (lv += 1) {
-        var idx: u32 = 0;
-        while (idx < width) : (idx += 1) {
-            const ni = NodeIndex.fromU32(idx);
-            if (tree_math.level(ni) != lv) continue;
-
+        const first: u32 =
+            (@as(u32, 1) << @intCast(lv)) - 1;
+        const stride: u32 =
+            @as(u32, 1) << @intCast(lv + 1);
+        var idx: u32 = first;
+        while (idx < width) : (idx += stride) {
             if (lv == 0) {
-                scratch[idx] = try hashLeafNode(
+                hashes[idx] = try hashLeafNode(
                     Crypto,
                     tree,
-                    ni,
+                    NodeIndex.fromU32(idx),
                 );
             } else {
-                const l = tree_math.left(ni);
-                const r = tree_math.right(ni);
-                const r_idx = r.toU32();
-                const left_hash = &scratch[l.toU32()];
-                var right_hash: [Crypto.nh]u8 = undefined;
-                if (r_idx < width) {
-                    right_hash = scratch[r_idx];
-                } else {
-                    right_hash = try hashBlankLeaf(
-                        Crypto,
-                        r_idx,
-                    );
-                }
-                scratch[idx] = try hashParentNode(
+                hashes[idx] = try hashParentInSubtree(
                     Crypto,
                     tree,
-                    ni,
-                    left_hash,
-                    &right_hash,
+                    NodeIndex.fromU32(idx),
+                    hashes,
+                    width,
                 );
             }
         }
     }
-
-    // Copy to heap-allocated result.
-    const result = allocator.alloc(
-        [Crypto.nh]u8,
-        width,
-    ) catch return error.IndexOutOfRange;
-    @memcpy(result, scratch);
-    return result;
 }
 
 /// Check if `node` is in the subtree rooted at `root`.
@@ -468,13 +463,28 @@ pub fn parentHash(
 ///    chain. Uncovered or doubly-covered nodes indicate an
 ///    invalid tree.
 ///
-/// Returns error.ParentHashMismatch if the tree is invalid.
+/// Returns the root tree hash as a byproduct (precomputed during
+/// verification), so callers don't need a redundant treeHash call.
 pub fn verifyParentHashes(
     comptime Crypto: type,
     allocator: std.mem.Allocator,
     tree: *const RatchetTree,
-) (TreeError || error{OutOfMemory})!void {
+) (TreeError || error{OutOfMemory})![Crypto.nh]u8 {
     const width = tree.nodeCount();
+
+    // Precompute all base tree hashes in one O(n) pass.
+    const base_hashes = allocator.alloc(
+        [Crypto.nh]u8,
+        width,
+    ) catch return error.OutOfMemory;
+    defer allocator.free(base_hashes);
+    try computeAllTreeHashes(
+        Crypto,
+        tree,
+        base_hashes,
+        width,
+    );
+
     const covered = allocator.alloc(
         bool,
         width,
@@ -491,7 +501,10 @@ pub fn verifyParentHashes(
     }
 
     // No non-blank parents: nothing to verify.
-    if (nb_parents == 0) return;
+    if (nb_parents == 0) {
+        const root = tree_math.root(tree.leaf_count);
+        return base_hashes[root.toU32()];
+    }
 
     // For each non-blank, commit-source leaf, build a chain.
     var li: u32 = 0;
@@ -510,6 +523,7 @@ pub fn verifyParentHashes(
             types.LeafIndex.fromU32(li),
             leaf_node,
             covered,
+            base_hashes,
         );
     }
 
@@ -521,6 +535,9 @@ pub fn verifyParentHashes(
             return error.ParentHashMismatch;
         }
     }
+
+    const root = tree_math.root(tree.leaf_count);
+    return base_hashes[root.toU32()];
 }
 
 /// Build a parent-hash chain from a single commit-source leaf
@@ -538,6 +555,7 @@ fn buildChain(
     leaf: types.LeafIndex,
     leaf_node: *const LeafNode,
     covered: []bool,
+    base_hashes: [][Crypto.nh]u8,
 ) (TreeError || error{OutOfMemory})!void {
     // Compute direct path and copath.
     var dp_buf: [max_depth]NodeIndex = undefined;
@@ -590,6 +608,7 @@ fn buildChain(
             p_idx,
             s_idx,
             expected,
+            base_hashes,
         );
         if (!result.matched) break;
 
@@ -607,6 +626,10 @@ const ChainLinkResult = struct {
 /// Verify a single link in the parent-hash chain: compute the
 /// original sibling tree hash, derive the expected parent hash,
 /// and compare against the expected value.
+///
+/// When `base_hashes` is provided and the parent has no unmerged
+/// leaves, the sibling's precomputed hash is used directly (O(1))
+/// instead of recomputing the subtree hash.
 fn verifyChainLink(
     comptime Crypto: type,
     allocator: std.mem.Allocator,
@@ -614,16 +637,24 @@ fn verifyChainLink(
     p_idx: NodeIndex,
     s_idx: NodeIndex,
     expected: []const u8,
+    base_hashes: ?[][Crypto.nh]u8,
 ) (TreeError || error{OutOfMemory})!ChainLinkResult {
     const pn = &tree.nodes[p_idx.toUsize()].?.payload.parent;
 
-    const osth = try originalSiblingTreeHash(
-        Crypto,
-        allocator,
-        tree,
-        s_idx,
-        pn.unmerged_leaves,
-    );
+    // Fast path: no exclusions and precomputed hashes available.
+    // The sibling tree hash equals the base tree hash.
+    const osth = if (pn.unmerged_leaves.len == 0 and
+        base_hashes != null)
+        base_hashes.?[s_idx.toU32()]
+    else
+        try originalSiblingTreeHash(
+            Crypto,
+            allocator,
+            tree,
+            s_idx,
+            pn.unmerged_leaves,
+            base_hashes,
+        );
 
     const computed = try parentHash(
         Crypto,
@@ -724,6 +755,7 @@ fn verifyStrictParentHashChain(
             tree,
             s_idx,
             pn.unmerged_leaves,
+            null,
         );
         const computed = try parentHash(
             Crypto,
@@ -761,15 +793,22 @@ fn verifyStrictParentHashChain(
 /// tree hash with a virtual blanking overlay: leaves in the
 /// exclusion set are treated as blank, and parent nodes have
 /// their unmerged_leaves filtered to exclude those leaves.
+///
+/// When `base_hashes` is provided, nodes outside the affected
+/// subtrees reuse precomputed values. Stride-based iteration
+/// ensures O(subtree_size) work instead of O(n * log n).
 pub fn originalSiblingTreeHash(
     comptime Crypto: type,
     allocator: std.mem.Allocator,
     tree: *const RatchetTree,
     root_idx: NodeIndex,
     excluded_leaves: []const LeafIndex,
+    base_hashes: ?[]const [Crypto.nh]u8,
 ) (TreeError || error{OutOfMemory})![Crypto.nh]u8 {
-    // If no exclusions, use the regular tree hash.
+    // If no exclusions, use precomputed or regular tree hash.
     if (excluded_leaves.len == 0) {
+        if (base_hashes) |bh|
+            return bh[root_idx.toU32()];
         return treeHash(Crypto, allocator, tree, root_idx);
     }
 
@@ -781,46 +820,80 @@ pub fn originalSiblingTreeHash(
     ) catch return error.OutOfMemory;
     defer allocator.free(hashes);
 
-    const max_level = tree_math.level(
-        tree_math.root(tree.leaf_count),
-    );
+    // If base hashes are available, seed with them so nodes
+    // outside affected subtrees need no recomputation.
+    if (base_hashes) |bh| {
+        @memcpy(hashes, bh);
+    }
 
+    const root_level = tree_math.level(root_idx);
+
+    // Stride-based bottom-up within the subtree. Level k nodes
+    // start at (1<<k)-1 with stride 1<<(k+1).
     var lv: u32 = 0;
-    while (lv <= max_level) : (lv += 1) {
-        var idx: u32 = 0;
-        while (idx < width) : (idx += 1) {
+    while (lv <= root_level) : (lv += 1) {
+        const first: u32 =
+            (@as(u32, 1) << @intCast(lv)) - 1;
+        const stride: u32 =
+            @as(u32, 1) << @intCast(lv + 1);
+        var idx: u32 = first;
+        while (idx < width) : (idx += stride) {
             const ni = NodeIndex.fromU32(idx);
-            if (tree_math.level(ni) != lv) continue;
             if (!isInSubtree(ni, root_idx)) continue;
 
             if (lv == 0) {
-                // Check if this leaf is excluded.
                 if (isExcludedLeaf(idx, excluded_leaves)) {
                     hashes[idx] = try hashBlankLeaf(
                         Crypto,
                         idx,
                     );
-                } else {
+                } else if (base_hashes == null) {
                     hashes[idx] = try hashLeafNode(
                         Crypto,
                         tree,
                         ni,
                     );
                 }
+                // else: base_hashes already seeded.
             } else {
-                hashes[idx] = try hashFilteredParentInSubtree(
-                    Crypto,
-                    tree,
-                    ni,
-                    hashes,
-                    width,
-                    excluded_leaves,
-                );
+                // For parents with base hashes and no affected
+                // children, we could skip. But the filtered hash
+                // encoding differs (unmerged_leaves are filtered),
+                // so we must recompute any parent that has
+                // excluded leaves in its subtree.
+                if (base_hashes != null and
+                    !subtreeContainsExcluded(
+                        ni,
+                        excluded_leaves,
+                    ))
+                {
+                    continue; // base hash is correct
+                }
+                hashes[idx] =
+                    try hashFilteredParentInSubtree(
+                        Crypto,
+                        tree,
+                        ni,
+                        hashes,
+                        width,
+                        excluded_leaves,
+                    );
             }
         }
     }
 
     return hashes[root_idx.toU32()];
+}
+
+/// Check if any excluded leaf is in the subtree rooted at `node`.
+fn subtreeContainsExcluded(
+    node: NodeIndex,
+    excluded: []const LeafIndex,
+) bool {
+    for (excluded) |ex| {
+        if (isInSubtree(ex.toNodeIndex(), node)) return true;
+    }
+    return false;
 }
 
 /// Hash a parent node in a filtered subtree, treating out-of-range
@@ -999,262 +1072,4 @@ fn encodeLeafIndexList(
         p = try codec.encodeUint32(buf, p, item.toU32());
     }
     return p;
-}
-
-// -- Tests -------------------------------------------------------------------
-
-const testing = std.testing;
-const Credential = @import(
-    "../credential/credential.zig",
-).Credential;
-
-const TestCrypto = @import("../crypto/default.zig")
-    .DhKemX25519Sha256Aes128GcmEd25519;
-
-fn makeTestLeaf(id: []const u8) LeafNode {
-    return .{
-        .encryption_key = id,
-        .signature_key = id,
-        .credential = Credential.initBasic(id),
-        .capabilities = .{
-            .versions = &.{},
-            .cipher_suites = &.{},
-            .extensions = &.{},
-            .proposals = &.{},
-            .credentials = &.{},
-        },
-        .source = .commit,
-        .lifetime = null,
-        .parent_hash = null,
-        .extensions = &.{},
-        .signature = id,
-    };
-}
-
-fn makeTestParent(key: []const u8, ph: []const u8) ParentNode {
-    return .{
-        .encryption_key = key,
-        .parent_hash = ph,
-        .unmerged_leaves = &.{},
-    };
-}
-
-test "tree hash of single leaf tree" {
-    const alloc = testing.allocator;
-    var tree = try RatchetTree.init(alloc, 1);
-    defer tree.deinit();
-
-    // Set a leaf node.
-    try tree.setLeaf(
-        LeafIndex.fromU32(0),
-        makeTestLeaf("alice"),
-    );
-
-    const h = try treeHash(
-        TestCrypto,
-        testing.allocator,
-        &tree,
-        tree_math.root(tree.leaf_count),
-    );
-
-    // Should produce a non-zero 32-byte hash.
-    var all_zero = true;
-    for (h) |b| {
-        if (b != 0) {
-            all_zero = false;
-            break;
-        }
-    }
-    try testing.expect(!all_zero);
-}
-
-test "tree hash of blank tree" {
-    const alloc = testing.allocator;
-    var tree = try RatchetTree.init(alloc, 2);
-    defer tree.deinit();
-
-    // All blank — should still produce a valid hash.
-    const h = try treeHash(
-        TestCrypto,
-        testing.allocator,
-        &tree,
-        tree_math.root(tree.leaf_count),
-    );
-
-    var all_zero = true;
-    for (h) |b| {
-        if (b != 0) {
-            all_zero = false;
-            break;
-        }
-    }
-    try testing.expect(!all_zero);
-}
-
-test "tree hash is deterministic" {
-    const alloc = testing.allocator;
-    var tree = try RatchetTree.init(alloc, 4);
-    defer tree.deinit();
-
-    try tree.setLeaf(
-        LeafIndex.fromU32(0),
-        makeTestLeaf("alice"),
-    );
-    try tree.setLeaf(
-        LeafIndex.fromU32(2),
-        makeTestLeaf("carol"),
-    );
-
-    const h1 = try treeHash(
-        TestCrypto,
-        testing.allocator,
-        &tree,
-        tree_math.root(tree.leaf_count),
-    );
-    const h2 = try treeHash(
-        TestCrypto,
-        testing.allocator,
-        &tree,
-        tree_math.root(tree.leaf_count),
-    );
-
-    try testing.expectEqualSlices(u8, &h1, &h2);
-}
-
-test "tree hash changes when tree changes" {
-    const alloc = testing.allocator;
-    var tree = try RatchetTree.init(alloc, 4);
-    defer tree.deinit();
-
-    try tree.setLeaf(
-        LeafIndex.fromU32(0),
-        makeTestLeaf("alice"),
-    );
-
-    const h1 = try treeHash(
-        TestCrypto,
-        testing.allocator,
-        &tree,
-        tree_math.root(tree.leaf_count),
-    );
-
-    // Modify the tree.
-    try tree.setLeaf(
-        LeafIndex.fromU32(1),
-        makeTestLeaf("bob"),
-    );
-
-    const h2 = try treeHash(
-        TestCrypto,
-        testing.allocator,
-        &tree,
-        tree_math.root(tree.leaf_count),
-    );
-
-    // Hashes must differ.
-    try testing.expect(!std.mem.eql(u8, &h1, &h2));
-}
-
-test "parent hash computation" {
-    const alloc = testing.allocator;
-    // 2-leaf tree: nodes 0, 1, 2. Root at 1.
-    var tree = try RatchetTree.init(alloc, 2);
-    defer tree.deinit();
-
-    try tree.setLeaf(
-        LeafIndex.fromU32(0),
-        makeTestLeaf("alice"),
-    );
-    try tree.setLeaf(
-        LeafIndex.fromU32(1),
-        makeTestLeaf("bob"),
-    );
-
-    // Set a parent node at index 1 (root).
-    try tree.setNode(
-        NodeIndex.fromU32(1),
-        Node.initParent(makeTestParent("pk", "")),
-    );
-
-    // Compute tree hash of the sibling (node 2 = leaf "bob").
-    const sibling_hash = try treeHash(
-        TestCrypto,
-        testing.allocator,
-        &tree,
-        NodeIndex.fromU32(2),
-    );
-
-    const ph = try parentHash(
-        TestCrypto,
-        &tree,
-        NodeIndex.fromU32(1),
-        &sibling_hash,
-    );
-
-    // Should produce a non-zero hash.
-    var all_zero = true;
-    for (ph) |b| {
-        if (b != 0) {
-            all_zero = false;
-            break;
-        }
-    }
-    try testing.expect(!all_zero);
-
-    // Deterministic.
-    const ph2 = try parentHash(
-        TestCrypto,
-        &tree,
-        NodeIndex.fromU32(1),
-        &sibling_hash,
-    );
-    try testing.expectEqualSlices(u8, &ph, &ph2);
-}
-
-test "parent hash changes with different sibling hash" {
-    const alloc = testing.allocator;
-    var tree = try RatchetTree.init(alloc, 2);
-    defer tree.deinit();
-
-    try tree.setLeaf(
-        LeafIndex.fromU32(0),
-        makeTestLeaf("alice"),
-    );
-    try tree.setNode(
-        NodeIndex.fromU32(1),
-        Node.initParent(makeTestParent("pk", "")),
-    );
-
-    const sh1 = [_]u8{0x01} ** TestCrypto.nh;
-    const sh2 = [_]u8{0x02} ** TestCrypto.nh;
-
-    const ph1 = try parentHash(
-        TestCrypto,
-        &tree,
-        NodeIndex.fromU32(1),
-        &sh1,
-    );
-    const ph2 = try parentHash(
-        TestCrypto,
-        &tree,
-        NodeIndex.fromU32(1),
-        &sh2,
-    );
-
-    try testing.expect(!std.mem.eql(u8, &ph1, &ph2));
-}
-
-test "parent hash rejects blank node" {
-    const alloc = testing.allocator;
-    var tree = try RatchetTree.init(alloc, 2);
-    defer tree.deinit();
-
-    const sh = [_]u8{0x00} ** TestCrypto.nh;
-    const result = parentHash(
-        TestCrypto,
-        &tree,
-        NodeIndex.fromU32(1), // blank
-        &sh,
-    );
-    try testing.expectError(error.BlankNode, result);
 }
