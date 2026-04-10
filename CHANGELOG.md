@@ -41,6 +41,10 @@ All notable changes to this project will be documented in this file.
   values instead of a negated comparison. Behavior is unchanged
   but the code now clearly documents which usages are valid in a
   normal commit context per RFC 9420 §12.2.
+- **encodeVarVector returns error instead of assert** --
+  `encodeVarVector` now returns `error.VectorTooLarge` when
+  `data.len > max_vec_length` instead of using a debug-only
+  `assert`. Prevents silent corrupt wire data in release builds.
 
 ## [0.1.2] - 2026-04-10
 

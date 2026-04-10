@@ -11,14 +11,13 @@
 // vectors, variable-length vectors (varint-prefixed), and optional<T>.
 
 const std = @import("std");
-const assert = std.debug.assert;
 const varint = @import("varint.zig");
 const errors = @import("../common/errors.zig");
 
 const DecodeError = errors.DecodeError;
 const max_vec_length = @import("../common/types.zig").max_vec_length;
 
-pub const EncodeError = error{ BufferTooSmall, MissingConfirmationTag };
+pub const EncodeError = error{ BufferTooSmall, MissingConfirmationTag, VectorTooLarge };
 
 // -- Encoding ----------------------------------------------------------------
 
@@ -83,7 +82,7 @@ pub fn encodeVarVector(
     pos: u32,
     data: []const u8,
 ) EncodeError!u32 {
-    assert(data.len <= max_vec_length);
+    if (data.len > max_vec_length) return error.VectorTooLarge;
     const len: u32 = @intCast(data.len);
     var p = try varint.encode(buf, pos, len);
     if (p + len > buf.len) return error.BufferTooSmall;
