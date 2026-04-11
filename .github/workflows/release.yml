@@ -95,19 +95,14 @@ jobs:
           tag="${{ needs.preflight.outputs.tag }}"
           version="${tag#v}"
           # Extract the section for this version from CHANGELOG.md.
-          body=$(awk -v ver="$version" '
+          awk -v ver="$version" '
             /^## \[/ {
               if (found) exit
               if (index($0, "["ver"]")) found=1
               next
             }
             found { print }
-          ' CHANGELOG.md)
-          {
-            echo "body<<CHANGELOG_EOF"
-            echo "$body"
-            echo "CHANGELOG_EOF"
-          } >> "$GITHUB_OUTPUT"
+          ' CHANGELOG.md > /tmp/release-notes.md
 
       - name: Create GitHub release
         env:
@@ -115,5 +110,5 @@ jobs:
         run: |
           gh release create "${{ needs.preflight.outputs.tag }}" \
             --title "${{ needs.preflight.outputs.tag }}" \
-            --notes "${{ steps.changelog.outputs.body }}" \
+            --notes-file /tmp/release-notes.md \
             --verify-tag
