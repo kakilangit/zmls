@@ -3040,3 +3040,174 @@ test "group with 257 members" {
     try testing.expectEqual(@as(u32, 257), gs.tree.leaf_count);
     try testing.expectEqual(@as(u64, 256), gs.epoch());
 }
+
+// ── Test: Subgroup branching (RFC 9420 §11.3) ─────────────────
+
+test "subgroup branching: createBranch produces epoch-1 group with branch PSK" {
+    const alloc = testing.allocator;
+    var branch_gs: ?mls.GroupState(Default) = null;
+    errdefer if (branch_gs) |*gs| gs.deinit();
+
+    const alice_enc = try Default.dhKeypairFromSeed(
+        &testSeed(0xA1),
+    );
+    const alice_sign = try Default.signKeypairFromSeed(
+        &testSeed(0xA2),
+    );
+
+    var gs = try mls.createGroup(
+        Default,
+        alloc,
+        "parent-group",
+        makeTestLeafWithKeys(
+            &alice_enc.pk,
+            &alice_sign.pk,
+        ),
+        suite,
+        &.{},
+    );
+    defer gs.deinit();
+
+    try testing.expectEqual(@as(u64, 0), gs.epoch());
+
+    const branch_id = "branch-group";
+    var psk_nonce: [Default.nh]u8 = undefined;
+    @memset(&psk_nonce, 0xBB);
+    const branch = try gs.createBranch(
+        alloc,
+        branch_id,
+        makeTestLeafWithKeys(
+            &alice_enc.pk,
+            &alice_sign.pk,
+        ),
+        &.{},
+        psk_nonce,
+    );
+    branch_gs = branch.group_state;
+
+    try testing.expectEqual(@as(u64, 1), branch.group_state.epoch());
+    try testing.expectEqual(@as(u32, 1), branch.group_state.leafCount());
+    try testing.expectEqualStrings(branch_id, branch.group_state.groupId());
+    try testing.expectEqual(
+        gs.cipherSuite(),
+        branch.group_state.cipherSuite(),
+    );
+
+    try testing.expectEqualStrings(branch_id, branch.outcome.group_id);
+    try testing.expectEqual(
+        @as(u8, @intFromEnum(mls.psk.ResumptionPskUsage.branch)),
+        @intFromEnum(branch.outcome.psk_usage),
+    );
+    try testing.expectEqualStrings(
+        gs.groupId(),
+        branch.outcome.psk_group_id,
+    );
+    try testing.expectEqual(@as(u64, 0), branch.outcome.psk_epoch);
+
+    try testing.expectEqual(@as(u64, 0), gs.epoch());
+    try testing.expectEqualStrings("parent-group", gs.groupId());
+    if (branch_gs) |*bgs| bgs.deinit();
+}
+
+// ── Test: Unknown extension / GREASE rejection ──────────────
+
+test "unknown extension rejection: GroupContext decode rejects unknown extension types" {
+    const alloc = testing.allocator;
+
+    var gs = try mls.createGroup(
+        Default,
+        alloc,
+        "ext-test",
+        makeTestLeafWithKeys(
+            &([_]u8{0xE1} ** 32),
+            &([_]u8{0xE2} ** 32),
+        ),
+        suite,
+        &.{},
+    );
+    defer gs.deinit();
+
+    // Build GroupContext with an unknown extension type.
+    const unknown_ext = mls.Extension{
+        .extension_type = @as(mls.ExtensionType, @enumFromInt(@as(u16, 0xFFFF))),
+        .data = &[_]u8{0x01, 0x02, 0x03},
+    };
+    var gc_buf: [max_gc_encode]u8 = undefined;
+    const gc = mls.GroupContext(Default.nh){
+        .version = .mls10,
+        .cipher_suite = suite,
+        .group_id = gs.groupId(),
+        .epoch = 0,
+        .tree_hash = gs.group_context.tree_hash,
+        .confirmed_transcript_hash = .{0} ** Default.nh,
+        .extensions = &[_]mls.Extension{unknown_ext},
+    };
+    const gc_enc = try gc.serialize(&gc_buf);
+
+    try testing.expectError(
+        error.UnknownExtension,
+        mls.GroupContext(Default.nh).decode(alloc, gc_enc, 0),
+    );
+}
+
+test "unknown extension rejection: GroupContext decode rejects GREASE extension types" {
+    const alloc = testing.allocator;
+
+    var gs = try mls.createGroup(
+        Default,
+        alloc,
+        "grease-test",
+        makeTestLeafWithKeys(
+            &([_]u8{0xE3} ** 32),
+            &([_]u8{0xE4} ** 32),
+        ),
+        suite,
+        &.{},
+    );
+    defer gs.deinit();
+
+    // Build GroupContext with a GREASE extension type (0x0A0A).
+    const grease_ext = mls.Extension{
+        .extension_type = @as(mls.ExtensionType, @enumFromInt(@as(u16, 0x0A0A))),
+        .data = &[_]u8{0x01, 0x02, 0x03},
+    };
+    var gc_buf: [max_gc_encode]u8 = undefined;
+    const gc = mls.GroupContext(Default.nh){
+        .version = .mls10,
+        .cipher_suite = suite,
+        .group_id = gs.groupId(),
+        .epoch = 0,
+        .tree_hash = gs.group_context.tree_hash,
+        .confirmed_transcript_hash = .{0} ** Default.nh,
+        .extensions = &[_]mls.Extension{grease_ext},
+    };
+    const gc_enc = try gc.serialize(&gc_buf);
+
+    try testing.expectError(
+        error.GreaseNotAllowed,
+        mls.GroupContext(Default.nh).decode(alloc, gc_enc, 0),
+    );
+}
+
+test "unknown extension rejection: GCE proposal decode rejects unknown extension types" {
+    const alloc = testing.allocator;
+
+    const unknown_ext = mls.Extension{
+        .extension_type = @as(mls.ExtensionType, @enumFromInt(@as(u16, 0xFFFF))),
+        .data = &[_]u8{0x01, 0x02, 0x03},
+    };
+    var gce_buf: [4096]u8 = undefined;
+    const gce = mls.proposal.GroupContextExtensions{
+        .extensions = &[_]mls.Extension{unknown_ext},
+    };
+    const enc_len = try gce.encode(&gce_buf, 0);
+
+    try testing.expectError(
+        error.UnknownExtension,
+        mls.proposal.GroupContextExtensions.decode(
+            alloc,
+            gce_buf[0..enc_len],
+            0,
+        ),
+    );
+}

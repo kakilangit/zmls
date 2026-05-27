@@ -324,7 +324,7 @@ pub fn GroupState(comptime P: type) type {
             creator_leaf: LeafNode,
             group_extensions: []const Extension,
             psk_nonce: [P.nh]u8,
-        ) (TreeError || CryptoError || error{OutOfMemory})!CreateBranchResult(P) {
+        ) (TreeError || CryptoError || error{OutOfMemory})!CreateBranchResult {
             // Derive branch PSK from the current epoch's
             // resumption_secret.
             const version = self.group_context.version;

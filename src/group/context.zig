@@ -139,6 +139,7 @@ pub fn GroupContext(comptime nh: u32) type {
                 p,
                 types.max_public_key_length,
             );
+            errdefer allocator.free(gid_r.value);
             p = gid_r.pos;
 
             // uint64 epoch.
