@@ -325,6 +325,8 @@ pub fn GroupState(comptime P: type) type {
             group_extensions: []const Extension,
             psk_nonce: [P.nh]u8,
         ) (TreeError || CryptoError || error{OutOfMemory})!CreateBranchResult {
+            assert(group_id.len > 0);
+
             // Derive branch PSK from the current epoch's
             // resumption_secret.
             const version = self.group_context.version;
@@ -430,6 +432,7 @@ pub fn GroupState(comptime P: type) type {
             allocator: std.mem.Allocator,
             outcome: commit_mod.ReInitOutcome(P),
         ) (TreeError || CryptoError || GroupError || ValidationError || error{OutOfMemory})!Self {
+            assert(outcome.group_id.len > 0);
             if (@intFromEnum(outcome.version) <
                 @intFromEnum(self.group_context.version))
             {

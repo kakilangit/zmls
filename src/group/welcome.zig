@@ -265,6 +265,10 @@ pub fn processWelcome(
     psk_resolver: ?commit_mod.PskResolver(P),
     credential_validator: ?CredentialValidator,
 ) WelcomeError!WelcomeJoinResult(P) {
+    assert(my_leaf_index.toU32() < 1 << 32);
+    assert(kp_ref.len > 0);
+    assert(init_sk.len == P.nsk);
+
     // 1-2. Decrypt GroupSecrets, derive welcome_secret.
     var ws = try decryptWelcomeSecrets(
         P,
@@ -373,6 +377,7 @@ fn verifyWelcomeSignerAndJoiner(
     group_extensions: []const Extension,
 ) WelcomeError!void {
     const signer_leaf_idx = LeafIndex.fromU32(gi.signer);
+    assert(signer_leaf_idx.toU32() < tree.leaf_count);
     const signer_leaf = tree.getLeaf(signer_leaf_idx) catch
         return error.IndexOutOfRange;
     if (signer_leaf) |sl| {
