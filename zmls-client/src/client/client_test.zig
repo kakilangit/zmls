@@ -3060,8 +3060,13 @@ test "Client: proposeAdd rejects reused key package after invite commit" {
     defer bob_gs.deinit();
     var bob_ks = MemKS(TestP, 8).init();
     defer bob_ks.deinit();
+    var carol_gs = MemGS(8).init();
+    defer carol_gs.deinit();
+    var carol_ks = MemKS(TestP, 8).init();
+    defer carol_ks.deinit();
     var alice: Client(TestP) = undefined;
     var bob: Client(TestP) = undefined;
+    var carol: Client(TestP) = undefined;
 
     const group_id = try setupTwoMemberGroup(
         &alice_gs,
@@ -3075,7 +3080,13 @@ test "Client: proposeAdd rejects reused key package after invite commit" {
     defer alice.deinit();
     defer bob.deinit();
 
-    const kp = try bob.freshKeyPackage(
+    carol = try makeTestClientCarol(
+        &carol_gs,
+        &carol_ks,
+    );
+    defer carol.deinit();
+
+    const kp = try carol.freshKeyPackage(
         testing.allocator,
         io,
     );
