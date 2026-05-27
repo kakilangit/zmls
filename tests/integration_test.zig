@@ -3130,7 +3130,7 @@ test "unknown extension rejection: GroupContext decode rejects unknown extension
     // Build GroupContext with an unknown extension type.
     const unknown_ext = mls.Extension{
         .extension_type = @as(mls.ExtensionType, @enumFromInt(@as(u16, 0xFFFF))),
-        .data = &[_]u8{0x01, 0x02, 0x03},
+        .data = &[_]u8{ 0x01, 0x02, 0x03 },
     };
     var gc_buf: [max_gc_encode]u8 = undefined;
     const gc = mls.GroupContext(Default.nh){
@@ -3169,7 +3169,7 @@ test "unknown extension rejection: GroupContext decode rejects GREASE extension 
     // Build GroupContext with a GREASE extension type (0x0A0A).
     const grease_ext = mls.Extension{
         .extension_type = @as(mls.ExtensionType, @enumFromInt(@as(u16, 0x0A0A))),
-        .data = &[_]u8{0x01, 0x02, 0x03},
+        .data = &[_]u8{ 0x01, 0x02, 0x03 },
     };
     var gc_buf: [max_gc_encode]u8 = undefined;
     const gc = mls.GroupContext(Default.nh){
@@ -3194,7 +3194,7 @@ test "unknown extension rejection: GCE proposal decode rejects unknown extension
 
     const unknown_ext = mls.Extension{
         .extension_type = @as(mls.ExtensionType, @enumFromInt(@as(u16, 0xFFFF))),
-        .data = &[_]u8{0x01, 0x02, 0x03},
+        .data = &[_]u8{ 0x01, 0x02, 0x03 },
     };
     var gce_buf: [4096]u8 = undefined;
     const gce = mls.proposal.GroupContextExtensions{
