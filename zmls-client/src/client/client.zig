@@ -2610,7 +2610,7 @@ pub fn Client(comptime P: type) type {
                 bundle.group_state.wire_format_policy,
             ) catch return error.WireDecodeFailed;
 
-            // Verify sender is a valid group member.
+            // Verify signature according to sender type.
             if (sender.sender_type == .member) {
                 const sender_leaf = zmls.types.LeafIndex
                     .fromU32(sender.leaf_index);
@@ -2656,6 +2656,35 @@ pub fn Client(comptime P: type) type {
                     // Member proposals require a tag.
                     return error.WireDecodeFailed;
                 }
+            } else if (sender.sender_type == .new_member_proposal) {
+                // RFC 9420 §6.1: new_member_proposal signatures
+                // are verified with Add.KeyPackage.LeafNode.signature_key.
+                if (decoded.proposal.tag != .add)
+                    return error.WireDecodeFailed;
+                if (decoded.membership_tag != null)
+                    return error.WireDecodeFailed;
+
+                const sig_key = decoded.proposal.payload.add
+                    .key_package.leaf_node.signature_key;
+                if (sig_key.len != P.sign_pk_len)
+                    return error.WireDecodeFailed;
+
+                var gc_buf: [max_group_context_encode]u8 =
+                    undefined;
+                const gc_bytes = bundle.group_state
+                    .serializeContext(&gc_buf) catch
+                    return error.WireDecodeFailed;
+
+                zmls.verifyFramedContent(
+                    P,
+                    fc,
+                    .mls_public_message,
+                    gc_bytes,
+                    sig_key[0..P.sign_pk_len],
+                    &decoded.auth,
+                ) catch return error.WireDecodeFailed;
+            } else {
+                return error.WireDecodeFailed;
             }
 
             // Build AuthenticatedContent for ref hash.

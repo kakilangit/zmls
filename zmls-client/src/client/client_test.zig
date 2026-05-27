@@ -2873,3 +2873,178 @@ test "Client: processIncoming rejects proposal from non-member" {
         bob.proposal_store.count,
     );
 }
+
+fn buildSignedNewMemberAddProposalWire(
+    allocator: std.mem.Allocator,
+    io: Io,
+    group_id: []const u8,
+    receiver: *Client(TestP),
+    new_member: *Client(TestP),
+) ![]u8 {
+    const kp = try new_member.freshKeyPackage(allocator, io);
+    defer allocator.free(kp.data);
+
+    const pending = new_member.pending_key_packages.find(&kp.ref_hash) orelse
+        return error.NoPendingKeyPackage;
+
+    const dec = try KeyPackage.decode(allocator, kp.data, 0);
+    var decoded_kp = dec.value;
+    defer decoded_kp.deinit(allocator);
+
+    const proposal = zmls.Proposal{
+        .tag = .add,
+        .payload = .{ .add = .{ .key_package = decoded_kp } },
+    };
+
+    var proposal_buf: [1 << 16]u8 = undefined;
+    const proposal_len = try proposal.encode(&proposal_buf, 0);
+
+    var bundle = try receiver.loadBundle(io, group_id);
+    defer bundle.deinit(allocator);
+
+    const fc = zmls.FramedContent{
+        .group_id = group_id,
+        .epoch = bundle.group_state.epoch(),
+        .sender = zmls.Sender.newMemberProposal(),
+        .authenticated_data = "",
+        .content_type = .proposal,
+        .content = proposal_buf[0..proposal_len],
+    };
+
+    var gc_buf: [zmls.group_context.max_gc_encode]u8 = undefined;
+    const gc_bytes = try bundle.group_state.serializeContext(&gc_buf);
+
+    const auth = try zmls.signFramedContent(
+        TestP,
+        &fc,
+        .mls_public_message,
+        gc_bytes,
+        &pending.sign_sk,
+        null,
+        null,
+    );
+
+    const PM = zmls.public_msg.PublicMessage(TestP);
+    const pm = PM{
+        .content = fc,
+        .auth = auth,
+        .membership_tag = null,
+    };
+    var pm_buf: [1 << 17]u8 = undefined;
+    const pm_len = try pm.encode(&pm_buf, 0);
+
+    const msg = zmls.mls_message.MLSMessage{
+        .version = .mls10,
+        .wire_format = .mls_public_message,
+        .body = .{ .public_message = pm_buf[0..pm_len] },
+    };
+    var wire_buf: [1 << 17]u8 = undefined;
+    const wire_len = try msg.encode(&wire_buf, 0);
+    return allocator.dupe(u8, wire_buf[0..wire_len]);
+}
+
+test "Client: processIncoming accepts valid new_member_proposal Add" {
+    const io = testIo();
+
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(TestP, 8).init();
+    defer alice_ks.deinit();
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(TestP, 8).init();
+    defer bob_ks.deinit();
+    var eve_gs = MemGS(8).init();
+    defer eve_gs.deinit();
+    var eve_ks = MemKS(TestP, 8).init();
+    defer eve_ks.deinit();
+
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+    var eve = try makeTestClientBob(&eve_gs, &eve_ks);
+    defer eve.deinit();
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_gs,
+        &alice_ks,
+        &bob_gs,
+        &bob_ks,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    const wire = try buildSignedNewMemberAddProposalWire(
+        testing.allocator,
+        io,
+        group_id,
+        &bob,
+        &eve,
+    );
+    defer testing.allocator.free(wire);
+
+    const result = try bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        wire,
+    );
+    switch (result) {
+        .proposal_cached => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "Client: processIncoming rejects forged new_member_proposal signature" {
+    const io = testIo();
+
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(TestP, 8).init();
+    defer alice_ks.deinit();
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(TestP, 8).init();
+    defer bob_ks.deinit();
+    var eve_gs = MemGS(8).init();
+    defer eve_gs.deinit();
+    var eve_ks = MemKS(TestP, 8).init();
+    defer eve_ks.deinit();
+
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+    var eve = try makeTestClientBob(&eve_gs, &eve_ks);
+    defer eve.deinit();
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_gs,
+        &alice_ks,
+        &bob_gs,
+        &bob_ks,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    var wire = try buildSignedNewMemberAddProposalWire(
+        testing.allocator,
+        io,
+        group_id,
+        &bob,
+        &eve,
+    );
+    defer testing.allocator.free(wire);
+    wire[wire.len - 3] ^= 0xff;
+
+    const result = bob.processIncoming(
+        testing.allocator,
+        io,
+        group_id,
+        wire,
+    );
+    try testing.expectError(error.WireDecodeFailed, result);
+}
