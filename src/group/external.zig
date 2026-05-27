@@ -1226,6 +1226,32 @@ pub fn processExternalCommit(
     );
 }
 
+/// Enforce credential matching for resync (RFC 9420 §12.4.3.2).
+///
+/// When an external commit includes a Remove proposal to replace
+/// an existing member, the joiner's credential must match the
+/// removed member's credential (verified via application-defined
+/// `credential_matcher` callback).
+///
+/// # Resync PSK (advanced)
+///
+/// For higher security, the joiner may also include a `PreSharedKey`
+/// proposal with a resumption PSK derived from the removed member's
+/// prior epoch. This allows the new member to prove they previously
+/// held the removed leaf. Derivation:
+///
+/// ```text
+/// psk = ExpandWithLabel(resumption_secret, "resync", context, KDF.Nh)
+/// ```
+///
+/// where `context` = `confirmed_transcript_hash` of the epoch being
+/// referenced, and the PSK usage is `.application` (not `.reinit` or
+/// `.branch`).
+///
+/// This is an advanced, application-level concern. The library does
+/// not automatically derive or inject resync PSKs — the caller is
+/// responsible for providing them via the `psk_resolver` parameter
+/// in `ProcessExternalCommitOpts`.
 fn enforceExternalResyncCredentialMatch(
     proposals: []const Proposal,
     tree: *const RatchetTree,
