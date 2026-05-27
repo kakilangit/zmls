@@ -2557,12 +2557,18 @@ test "ReInit proposal: commit with reinit processed by receiver" {
     try testing.expect(cr2.apply_result.has_reinit);
     try testing.expect(cr2.apply_result.reinit_outcome != null);
     const cr2_reinit = cr2.apply_result.reinit_outcome.?;
+    try testing.expect(cr2.reinit_outcome != null);
+    const cr2_reinit_direct = cr2.reinit_outcome.?;
     try testing.expectEqualStrings(
         "new-group-id",
         cr2_reinit.group_id,
     );
     try testing.expectEqual(.mls10, cr2_reinit.version);
     try testing.expectEqual(suite, cr2_reinit.cipher_suite);
+    try testing.expectEqualStrings(
+        cr2_reinit.group_id,
+        cr2_reinit_direct.group_id,
+    );
 
     // 4. Bob processes the ReInit commit.
     const fc = FramedContent{
@@ -2596,12 +2602,18 @@ test "ReInit proposal: commit with reinit processed by receiver" {
     try testing.expect(pr.apply_result.has_reinit);
     try testing.expect(pr.apply_result.reinit_outcome != null);
     const pr_reinit = pr.apply_result.reinit_outcome.?;
+    try testing.expect(pr.reinit_outcome != null);
+    const pr_reinit_direct = pr.reinit_outcome.?;
     try testing.expectEqualStrings(
         "new-group-id",
         pr_reinit.group_id,
     );
     try testing.expectEqual(.mls10, pr_reinit.version);
     try testing.expectEqual(suite, pr_reinit.cipher_suite);
+    try testing.expectEqualStrings(
+        pr_reinit.group_id,
+        pr_reinit_direct.group_id,
+    );
     try testing.expectEqual(cr2.new_epoch, pr.new_epoch);
 
     // Epoch secrets agree.

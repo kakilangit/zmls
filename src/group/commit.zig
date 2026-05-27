@@ -153,6 +153,8 @@ pub fn CommitResult(comptime P: type) type {
 
         /// Apply result (added/removed leaves, PSK ids).
         apply_result: ProposalApplyResult,
+        /// ReInit outcome parameters when a ReInit is present.
+        reinit_outcome: ?ProposalApplyResult.ReInitOutcome,
 
         /// The new epoch number.
         new_epoch: Epoch,
@@ -578,6 +580,8 @@ pub fn ProcessResult(comptime P: type) type {
 
         /// Apply result (added/removed leaves, PSK ids).
         apply_result: ProposalApplyResult,
+        /// ReInit outcome parameters when a ReInit is present.
+        reinit_outcome: ?ProposalApplyResult.ReInitOutcome,
 
         /// The new epoch number.
         new_epoch: Epoch,
@@ -1223,6 +1227,7 @@ fn deriveProcessEpochState(
         .group_context = new_gc,
         .tree = new_tree.*,
         .apply_result = apply_result,
+        .reinit_outcome = apply_result.reinit_outcome,
         .new_epoch = std.math.add(
             Epoch,
             group_context.epoch,
@@ -1846,6 +1851,7 @@ fn buildCommitResult(
         .group_context = new_gc,
         .tree = new_tree,
         .apply_result = apply_result,
+        .reinit_outcome = apply_result.reinit_outcome,
         .new_epoch = std.math.add(
             Epoch,
             group_context.epoch,
