@@ -26,6 +26,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("../codec/codec.zig");
 const varint = @import("../codec/varint.zig");
+const grease = @import("../common/grease.zig");
 const types = @import("../common/types.zig");
 const errors = @import("../common/errors.zig");
 const node_mod = @import("../tree/node.zig");
@@ -173,6 +174,14 @@ pub fn GroupContext(comptime nh: u32) type {
             // RFC 9420 S13: all GroupContext extensions are
             // mandatory to implement — reject unknown types.
             for (ext_r.value) |ext| {
+                if (grease.isGreaseExtension(ext.extension_type)) {
+                    freeDecodedExts(
+                        allocator,
+                        @constCast(ext_r.value),
+                    );
+                    allocator.free(@constCast(ext_r.value));
+                    return error.GreaseNotAllowed;
+                }
                 if (!types.isGroupContextExtension(
                     ext.extension_type,
                 )) {
@@ -180,6 +189,7 @@ pub fn GroupContext(comptime nh: u32) type {
                         allocator,
                         @constCast(ext_r.value),
                     );
+                    allocator.free(@constCast(ext_r.value));
                     return error.UnknownExtension;
                 }
             }

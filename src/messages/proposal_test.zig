@@ -265,8 +265,7 @@ test "Proposal decode accepts unknown/GREASE type" {
     try testing.expectEqual(@as(u32, 2), dec_r.pos);
 }
 
-test "Proposal unknown/GREASE encode round-trip" {
-    const alloc = testing.allocator;
+test "Proposal decode rejects GREASE proposal type" {
     const grease_tag: ProposalType = @enumFromInt(0x0A0A);
     const prop = Proposal{
         .tag = grease_tag,
@@ -277,14 +276,12 @@ test "Proposal unknown/GREASE encode round-trip" {
     const end = try prop.encode(&buf, 0);
     try testing.expectEqual(@as(u32, 2), end);
 
-    var dec_r = try Proposal.decode(alloc, buf[0..end], 0);
-    defer dec_r.value.deinit(alloc);
-
-    try testing.expectEqual(grease_tag, dec_r.value.tag);
-    try testing.expectEqual(
-        @as(usize, 0),
-        dec_r.value.payload.unknown.len,
+    const result = Proposal.decode(
+        testing.allocator,
+        buf[0..end],
+        0,
     );
+    try testing.expectError(error.GreaseNotAllowed, result);
 }
 
 test "Proposal skipDecode handles unknown type" {
@@ -293,4 +290,24 @@ test "Proposal skipDecode handles unknown type" {
     const p = try Proposal.skipDecode(&buf, 0);
     // Advances past 2-byte tag, zero-length body.
     try testing.expectEqual(@as(u32, 2), p);
+}
+
+test "Proposal GroupContextExtensions rejects GREASE extension type" {
+    const alloc = testing.allocator;
+    const ext = node_mod.Extension{
+        .extension_type = @enumFromInt(0x0A0A),
+        .data = "",
+    };
+    const prop = Proposal{
+        .tag = .group_context_extensions,
+        .payload = .{
+            .group_context_extensions = .{
+                .extensions = &[_]node_mod.Extension{ext},
+            },
+        },
+    };
+    var buf: [128]u8 = undefined;
+    const end = try prop.encode(&buf, 0);
+    const result = Proposal.decode(alloc, buf[0..end], 0);
+    try testing.expectError(error.GreaseNotAllowed, result);
 }

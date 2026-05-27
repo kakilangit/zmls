@@ -33,6 +33,8 @@ pub const DecodeError = error{
     UnsupportedProtocolVersion,
     /// An unknown extension type was found in a mandatory context.
     UnknownExtension,
+    /// A GREASE value was used in a context where it is prohibited.
+    GreaseNotAllowed,
 };
 
 /// Errors from cryptographic operations.

@@ -20,6 +20,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("../codec/codec.zig");
 const varint = @import("../codec/varint.zig");
+const grease = @import("../common/grease.zig");
 const types = @import("../common/types.zig");
 const errors = @import("../common/errors.zig");
 const node_mod = @import("../tree/node.zig");
@@ -328,6 +329,14 @@ pub const GroupContextExtensions = struct {
         // RFC 9420 S13: GroupContextExtensions extensions
         // are mandatory — reject unknown types.
         for (ext_r.value) |ext| {
+            if (grease.isGreaseExtension(ext.extension_type)) {
+                freeDecodedExts(
+                    allocator,
+                    ext_r.value,
+                );
+                allocator.free(ext_r.value);
+                return error.GreaseNotAllowed;
+            }
             if (!types.isGroupContextExtension(
                 ext.extension_type,
             )) {
@@ -335,6 +344,7 @@ pub const GroupContextExtensions = struct {
                     allocator,
                     ext_r.value,
                 );
+                allocator.free(ext_r.value);
                 return error.UnknownExtension;
             }
         }
@@ -446,6 +456,8 @@ pub const Proposal = struct {
     } {
         const type_r = try codec.decodeUint16(data, pos);
         const tag: ProposalType = @enumFromInt(type_r.value);
+        if (grease.isGreaseProposal(tag))
+            return error.GreaseNotAllowed;
         var p = type_r.pos;
 
         switch (tag) {

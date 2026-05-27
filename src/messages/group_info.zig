@@ -20,6 +20,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("../codec/codec.zig");
 const varint = @import("../codec/varint.zig");
+const grease = @import("../common/grease.zig");
 const types = @import("../common/types.zig");
 const errors = @import("../common/errors.zig");
 const node_mod = @import("../tree/node.zig");
@@ -96,6 +97,14 @@ pub const GroupInfo = struct {
         // Valid types: ratchet_tree (2), external_pub (4), plus
         // any valid GroupContext extension type.
         for (ext_r.value) |ext| {
+            if (grease.isGreaseExtension(ext.extension_type)) {
+                freeDecodedExts(
+                    allocator,
+                    @constCast(ext_r.value),
+                );
+                allocator.free(@constCast(ext_r.value));
+                return error.GreaseNotAllowed;
+            }
             const v = @intFromEnum(ext.extension_type);
             if (v != 2 and v != 4 and
                 !types.isGroupContextExtension(
@@ -106,6 +115,7 @@ pub const GroupInfo = struct {
                     allocator,
                     @constCast(ext_r.value),
                 );
+                allocator.free(@constCast(ext_r.value));
                 return error.UnknownExtension;
             }
         }

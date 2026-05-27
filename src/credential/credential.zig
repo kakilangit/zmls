@@ -16,6 +16,7 @@ const codec = @import("../codec/codec.zig");
 const varint = @import("../codec/varint.zig");
 const types = @import("../common/types.zig");
 const errors = @import("../common/errors.zig");
+const grease = @import("../common/grease.zig");
 
 const CredentialType = types.CredentialType;
 const DecodeError = errors.DecodeError;
@@ -173,6 +174,8 @@ pub const Credential = struct {
         const cred_type: CredentialType = @enumFromInt(
             type_r.value,
         );
+        if (grease.isGreaseCredential(cred_type))
+            return error.GreaseNotAllowed;
 
         switch (cred_type) {
             .basic => {
@@ -581,4 +584,18 @@ test "Credential unknown type round-trips correctly" {
         "opaque-data",
         decoded.payload.unknown,
     );
+}
+
+test "decode rejects GREASE credential type" {
+    // credential_type = 0x0A0A (GREASE), body = empty vector.
+    const bytes = [_]u8{
+        0x0A, 0x0A,
+        0x00,
+    };
+    const result = Credential.decode(
+        testing.allocator,
+        &bytes,
+        0,
+    );
+    try testing.expectError(error.GreaseNotAllowed, result);
 }
