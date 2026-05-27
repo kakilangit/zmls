@@ -249,6 +249,7 @@ test "full lifecycle: create → add → welcome → join" {
         0,
         null,
         0,
+        null,
     );
     defer wr.deinit(alloc);
 

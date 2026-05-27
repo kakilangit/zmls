@@ -566,6 +566,7 @@ test "suite 0x0002 full group lifecycle" {
         0,
         null,
         0,
+        null,
     );
     defer wr.deinit(alloc);
 

@@ -356,6 +356,7 @@ pub fn GroupState(comptime P: type) type {
                 opts.path_secret_count,
                 opts.fdp_nodes,
                 opts.tree_size,
+                opts.ratchet_tree,
             );
         }
 

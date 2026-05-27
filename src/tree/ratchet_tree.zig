@@ -17,16 +17,22 @@ const types = @import("../common/types.zig");
 const errors = @import("../common/errors.zig");
 const tree_math = @import("math.zig");
 const node_mod = @import("node.zig");
+const codec = @import("../codec/codec.zig");
+const varint = @import("../codec/varint.zig");
+const Extension = node_mod.Extension;
 
 const NodeIndex = types.NodeIndex;
 const LeafIndex = types.LeafIndex;
 const TreeError = errors.TreeError;
+const DecodeError = errors.DecodeError;
+const EncodeError = codec.EncodeError;
 const Node = node_mod.Node;
 const LeafNode = node_mod.LeafNode;
 const ParentNode = node_mod.ParentNode;
 
 /// Maximum tree depth (32-bit indices → max 32 levels).
 const max_depth: u32 = 32;
+const max_nodes_decode: u32 = 4096;
 
 pub const RatchetTree = struct {
     /// Array of optional nodes. Length = nodeWidth(leaf_count).
@@ -387,6 +393,104 @@ pub const RatchetTree = struct {
         };
     }
 };
+
+/// Decode a TLS-serialized ratchet tree extension payload.
+///
+/// Format: varint-prefixed vector of optional<Node>, where each
+/// node is encoded as presence byte (0/1) + Node if present.
+pub fn decodeRatchetTree(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+) (DecodeError || error{OutOfMemory})!RatchetTree {
+    const vr = try varint.decode(data, 0);
+    const vec_len = vr.value;
+    var pos = vr.pos;
+    const end = pos + vec_len;
+    if (end > data.len) return error.Truncated;
+
+    var entries: [max_nodes_decode]?Node = undefined;
+    var node_count: u32 = 0;
+    while (pos < end) {
+        if (node_count >= max_nodes_decode) return error.VectorTooLarge;
+        const presence = try codec.decodeUint8(data, pos);
+        pos = presence.pos;
+        if (presence.value == 1) {
+            const nr = try Node.decode(allocator, data, pos);
+            pos = nr.pos;
+            entries[node_count] = nr.value;
+        } else if (presence.value == 0) {
+            entries[node_count] = null;
+        } else {
+            return error.InvalidEnumValue;
+        }
+        node_count += 1;
+    }
+
+    const leaf_count: u32 = (node_count + 1) / 2;
+    if (leaf_count == 0) return error.Truncated;
+    var tree = try RatchetTree.init(allocator, leaf_count);
+    errdefer tree.deinit();
+    var i: u32 = 0;
+    while (i < node_count) : (i += 1) {
+        tree.nodes[i] = entries[i];
+    }
+    tree.owns_contents = true;
+    return tree;
+}
+
+/// Encode a ratchet tree as extension data.
+pub fn encodeRatchetTree(
+    allocator: std.mem.Allocator,
+    tree: *const RatchetTree,
+) (EncodeError || error{OutOfMemory})![]u8 {
+    const full_width = tree.nodeCount();
+    var trim_width: u32 = full_width;
+    while (trim_width > 0 and tree.nodes[trim_width - 1] == null) {
+        trim_width -= 1;
+    }
+
+    var payload_size: u32 = 0;
+    var buf_tmp: [65536]u8 = undefined;
+    var ni: u32 = 0;
+    while (ni < trim_width) : (ni += 1) {
+        payload_size += 1; // presence byte
+        if (tree.nodes[ni]) |*n| {
+            const node_end = try n.encode(&buf_tmp, 0);
+            payload_size += node_end;
+        }
+    }
+
+    const hdr_size = varint.encodedLength(payload_size);
+    const total = hdr_size + payload_size;
+    const out = allocator.alloc(u8, total) catch
+        return error.OutOfMemory;
+    errdefer allocator.free(out);
+
+    var pos = try varint.encode(out, 0, payload_size);
+    ni = 0;
+    while (ni < trim_width) : (ni += 1) {
+        if (tree.nodes[ni]) |*n| {
+            pos = try codec.encodeUint8(out, pos, 1);
+            pos = try n.encode(out, pos);
+        } else {
+            pos = try codec.encodeUint8(out, pos, 0);
+        }
+    }
+    std.debug.assert(pos == total);
+    return out;
+}
+
+/// Wrap encoded ratchet tree data as an extension.
+pub fn encodeRatchetTreeExtension(
+    allocator: std.mem.Allocator,
+    tree: *const RatchetTree,
+) (EncodeError || error{OutOfMemory})!Extension {
+    const data = try encodeRatchetTree(allocator, tree);
+    return .{
+        .extension_type = .ratchet_tree,
+        .data = data,
+    };
+}
 
 // -- Tests -------------------------------------------------------------------
 

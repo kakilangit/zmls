@@ -213,6 +213,8 @@ pub fn BuildWelcomeOpts(comptime P: type) type {
         /// Leaf count of the post-commit tree (needed for
         /// direct path computation).
         tree_size: u32 = 0,
+        /// Optional full ratchet tree to embed in GroupInfo.
+        ratchet_tree: ?*const RatchetTree = null,
     };
 }
 
@@ -279,7 +281,11 @@ pub fn processWelcome(
     defer gi.deinit(allocator);
 
     // 6-7b. Build tree, verify tree hash, decode GroupContext.
-    var tree = try buildTree(allocator, tree_data);
+    var tree = try buildTree(
+        allocator,
+        tree_data,
+        gi.extensions,
+    );
     errdefer tree.deinit();
     var gc = try verifyTreeAndDecodeContext(
         P,
@@ -870,7 +876,17 @@ pub const TreeInput = union(enum) {
 fn buildTree(
     allocator: std.mem.Allocator,
     input: TreeInput,
+    gi_extensions: []const Extension,
 ) (TreeError || error{OutOfMemory})!RatchetTree {
+    for (gi_extensions) |ext| {
+        if (ext.extension_type == .ratchet_tree) {
+            return ratchet_tree_mod.decodeRatchetTree(
+                allocator,
+                ext.data,
+            ) catch return error.MalformedUpdatePath;
+        }
+    }
+
     switch (input) {
         .prebuilt => |*t| {
             // Deep-clone so caller retains ownership of original.
@@ -973,15 +989,18 @@ pub fn buildWelcome(
     path_secret_count: u32,
     fdp_nodes: ?*const [path_mod.max_path_nodes]NodeIndex,
     tree_size: u32,
+    ratchet_tree: ?*const RatchetTree,
 ) WelcomeError!WelcomeResult {
     // 1. Sign and encode GroupInfo.
     var gi_buf: [max_gi_buf]u8 = undefined;
     const gi_end = try signAndEncodeGroupInfo(
         P,
+        allocator,
         gc_bytes,
         confirmation_tag,
         sign_key,
         signer,
+        ratchet_tree,
         &gi_buf,
     );
 
@@ -1021,16 +1040,30 @@ pub fn buildWelcome(
 /// Sign GroupInfo and encode to a stack buffer.
 fn signAndEncodeGroupInfo(
     comptime P: type,
+    allocator: std.mem.Allocator,
     gc_bytes: []const u8,
     confirmation_tag: *const [P.nh]u8,
     sign_key: *const [P.sign_sk_len]u8,
     signer: u32,
+    ratchet_tree: ?*const RatchetTree,
     gi_buf: *[max_gi_buf]u8,
 ) WelcomeError!u32 {
+    var ext_storage: [1]Extension = undefined;
+    var tree_ext_data: ?[]const u8 = null;
+    defer if (tree_ext_data) |d| allocator.free(d);
+    const exts: []const Extension = if (ratchet_tree) |rt| blk: {
+        const tree_ext = ratchet_tree_mod
+            .encodeRatchetTreeExtension(allocator, rt) catch
+            return error.OutOfMemory;
+        tree_ext_data = tree_ext.data;
+        ext_storage[0] = tree_ext;
+        break :blk ext_storage[0..1];
+    } else &.{};
+
     const sig = group_info_mod.signGroupInfo(
         P,
         gc_bytes,
-        &.{},
+        exts,
         confirmation_tag,
         signer,
         sign_key,
@@ -1038,7 +1071,7 @@ fn signAndEncodeGroupInfo(
 
     const gi = GroupInfo{
         .group_context = gc_bytes,
-        .extensions = &.{},
+        .extensions = exts,
         .confirmation_tag = confirmation_tag,
         .signer = signer,
         .signature = &sig,

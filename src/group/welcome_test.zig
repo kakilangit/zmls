@@ -1151,8 +1151,33 @@ test "buildWelcome round-trip with processWelcome" {
         0,
         null,
         0,
+        &cr.tree,
     );
     defer wr.deinit(alloc);
+
+    // GroupInfo must carry in-band ratchet_tree extension.
+    var gi_pt: [65536]u8 = undefined;
+    const gi_len = wr.welcome.encrypted_group_info.len - Default.nt;
+    try group_info_mod.decryptGroupInfo(
+        Default,
+        &cr.welcome_secret,
+        wr.welcome.encrypted_group_info,
+        gi_pt[0..gi_len],
+    );
+    var gi_dec = try GroupInfo.decode(
+        alloc,
+        gi_pt[0..gi_len],
+        0,
+    );
+    defer gi_dec.value.deinit(alloc);
+    var saw_ratchet_tree = false;
+    for (gi_dec.value.extensions) |ext| {
+        if (ext.extension_type == .ratchet_tree) {
+            saw_ratchet_tree = true;
+            break;
+        }
+    }
+    try testing.expect(saw_ratchet_tree);
 
     // Bob processes the Welcome.
     var bob_join = try processWelcome(
@@ -1315,6 +1340,7 @@ test "Welcome with external PSK decrypts correctly" {
         0,
         null,
         0,
+        null,
     );
     defer wr.deinit(alloc);
 
@@ -1724,6 +1750,7 @@ test "Welcome with path_secret: joiner derives path keys" {
         cr2.path_secret_count,
         &cr2.fdp_nodes,
         cr2.tree.leaf_count,
+        null,
     );
     defer wr.deinit(alloc);
 
@@ -1857,6 +1884,7 @@ test "Welcome without path has zero path keys" {
         0,
         null,
         0,
+        null,
     );
     defer wr.deinit(alloc);
 
@@ -2035,6 +2063,7 @@ test "Welcome rejects corrupted path_secret" {
         cr2.path_secret_count,
         &cr2.fdp_nodes,
         cr2.tree.leaf_count,
+        null,
     );
     defer wr.deinit(alloc);
 

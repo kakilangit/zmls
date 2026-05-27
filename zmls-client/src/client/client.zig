@@ -816,6 +816,7 @@ pub fn Client(comptime P: type) type {
                 .fdp_nodes = &commit_output.fdp_nodes,
                 .tree_size = commit_output.group_state
                     .tree.leaf_count,
+                .ratchet_tree = &commit_output.group_state.tree,
             }) catch return error.WelcomeBuildFailed;
             defer welcome_result.deinit(allocator);
 
