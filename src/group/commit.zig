@@ -790,6 +790,7 @@ fn validateProcessProposals(
         P,
         validated,
         group_context.cipher_suite,
+        null,
     );
     try evolution.validateUpdateLeafNodes(
         P,
@@ -806,6 +807,7 @@ fn validateProcessProposals(
         validated,
         tree,
         sender,
+        null,
     );
     try evolution.validateRemovesAgainstTree(
         validated,
@@ -1314,6 +1316,7 @@ fn validateCommitProposals(
         P,
         validated,
         group_context.cipher_suite,
+        null,
     );
     try evolution.validateUpdateLeafNodes(
         P,
@@ -1330,6 +1333,7 @@ fn validateCommitProposals(
         validated,
         tree,
         sender,
+        null,
     );
     try evolution.validateRemovesAgainstTree(
         validated,

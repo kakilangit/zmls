@@ -60,6 +60,9 @@ const ReInit = proposal_mod.ReInit;
 const ExternalInit = proposal_mod.ExternalInit;
 const GroupContextExtensions = proposal_mod.GroupContextExtensions;
 const PreSharedKeyId = psk_mod.PreSharedKeyId;
+const CredentialValidator = @import(
+    "../credential/validator.zig",
+).CredentialValidator;
 const CryptoError = errors.CryptoError;
 const ValidationError = errors.ValidationError;
 const TreeError = errors.TreeError;
@@ -438,6 +441,7 @@ pub fn validateAddKeyPackages(
     comptime P: type,
     validated: *const ValidatedProposals,
     expected_suite: CipherSuite,
+    credential_validator: ?CredentialValidator,
 ) (ValidationError || CryptoError)!void {
     const n = validated.adds_len;
     for (validated.adds[0..n]) |*add| {
@@ -451,6 +455,11 @@ pub fn validateAddKeyPackages(
         ) catch {
             return error.SignatureVerifyFailed;
         };
+        if (credential_validator) |cv| {
+            try cv.validate(
+                &add.key_package.leaf_node.credential,
+            );
+        }
     }
 }
 
@@ -687,6 +696,7 @@ pub fn validateUpdatesAgainstTree(
     validated: *const ValidatedProposals,
     tree: *const RatchetTree,
     sender: CommitSender,
+    credential_validator: ?CredentialValidator,
 ) ValidationError!void {
     const n = validated.updates_len;
     const updates = validated.updates[0..n];
@@ -744,6 +754,9 @@ pub fn validateUpdatesAgainstTree(
         // Encryption/signature key must not duplicate any
         // other Update in this commit.
         try checkUpdateKeyUniqueness(updates, entry, new_ek, new_sk);
+        if (credential_validator) |cv| {
+            try cv.validate(&entry.leaf_node.credential);
+        }
     }
 }
 

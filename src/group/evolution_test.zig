@@ -9,6 +9,7 @@ const proposal_mod = @import("../messages/proposal.zig");
 const key_package_mod = @import("../messages/key_package.zig");
 const psk_mod = @import("../key_schedule/psk.zig");
 const credential_mod = @import("../credential/credential.zig");
+const validator_mod = @import("../credential/validator.zig");
 const evolution = @import("evolution.zig");
 
 const LeafIndex = types.LeafIndex;
@@ -22,6 +23,7 @@ const Proposal = proposal_mod.Proposal;
 const PreSharedKeyId = psk_mod.PreSharedKeyId;
 const Credential = credential_mod.Credential;
 const Certificate = credential_mod.Certificate;
+const CredentialValidator = validator_mod.CredentialValidator;
 const KeyPackage = key_package_mod.KeyPackage;
 
 const CommitSender = evolution.CommitSender;
@@ -790,6 +792,7 @@ test "validateUpdatesAgainstTree rejects committer self-update" {
         validated,
         &tree,
         makeCommitSender(0),
+        null,
     );
     try testing.expectError(
         error.InvalidProposalList,
@@ -834,6 +837,7 @@ test "validateUpdatesAgainstTree rejects wrong source" {
         validated,
         &tree,
         makeCommitSender(0),
+        null,
     );
     try testing.expectError(error.InvalidLeafNode, result);
 }
@@ -877,6 +881,7 @@ test "validateUpdatesAgainstTree rejects duplicate encryption key" {
         validated,
         &tree,
         makeCommitSender(0),
+        null,
     );
     try testing.expectError(error.InvalidLeafNode, result);
 }
@@ -916,7 +921,56 @@ test "validateUpdatesAgainstTree accepts valid update" {
         validated,
         &tree,
         makeCommitSender(0),
+        null,
     );
+}
+
+test "validateUpdatesAgainstTree applies optional credential validator" {
+    const RejectAll = struct {
+        fn check(
+            _: *const anyopaque,
+            _: *const Credential,
+        ) errors.ValidationError!void {
+            return error.InvalidCredential;
+        }
+        fn validator() CredentialValidator {
+            return .{
+                .context = undefined,
+                .validate_fn = &check,
+            };
+        }
+    };
+
+    const alloc = testing.allocator;
+    var tree = try RatchetTree.init(alloc, 4);
+    defer tree.deinit();
+
+    try tree.setLeaf(LeafIndex.fromU32(0), makeTestLeaf("alice"));
+    try tree.setLeaf(LeafIndex.fromU32(1), makeTestLeaf("bob"));
+
+    var up_leaf = makeTestLeaf("bob-new");
+    up_leaf.source = .update;
+    const up_prop = Proposal{
+        .tag = .update,
+        .payload = .{ .update = .{ .leaf_node = up_leaf } },
+    };
+
+    const proposals = [_]Proposal{up_prop};
+    const validated = try validateProposalList(
+        testing.allocator,
+        &proposals,
+        makeCommitSender(1),
+        null,
+    );
+    defer validated.destroy(testing.allocator);
+
+    const result = validateUpdatesAgainstTree(
+        validated,
+        &tree,
+        makeCommitSender(0),
+        RejectAll.validator(),
+    );
+    try testing.expectError(error.InvalidCredential, result);
 }
 
 // -- Phase 14.3: PSK proposal validation tests -------------------------------
