@@ -57,6 +57,7 @@ const max_gc_encode = context_mod.max_gc_encode;
 const TreeError = errors.TreeError;
 const CryptoError = errors.CryptoError;
 const GroupError = errors.GroupError;
+const ValidationError = errors.ValidationError;
 
 /// Maximum tree hash output size (for the largest supported hash).
 const max_nh: u32 = 64;
@@ -301,6 +302,111 @@ pub fn GroupState(comptime P: type) type {
                 credential_matcher,
                 wire_format,
             );
+        }
+
+        /// Create a reinitialized group state from a ReInit outcome.
+        ///
+        /// The new group is independent from the old group and starts
+        /// at epoch 1 with this member as leaf 0.
+        pub fn reinitGroup(
+            self: *const Self,
+            allocator: std.mem.Allocator,
+            outcome: commit_mod.ReInitOutcome(P),
+        ) (TreeError || CryptoError || GroupError || ValidationError || error{OutOfMemory})!Self {
+            if (@intFromEnum(outcome.version) <
+                @intFromEnum(self.group_context.version))
+            {
+                return error.VersionMismatch;
+            }
+
+            // Clone current self leaf into the new one-member tree.
+            const old_leaf_ptr = try self.tree.getLeaf(
+                self.my_leaf_index,
+            );
+            if (old_leaf_ptr == null) return error.NotAMember;
+            var leaf_clone = try old_leaf_ptr.?.clone(allocator);
+            defer leaf_clone.deinit(allocator);
+
+            var tree = try RatchetTree.init(allocator, 1);
+            errdefer tree.deinit();
+            // Own incoming leaf data in the new tree.
+            tree.owns_contents = true;
+            try tree.setLeaf(LeafIndex.fromU32(0), leaf_clone);
+
+            const root = tree_math.root(tree.leaf_count);
+            const tree_hash = try tree_hashes.treeHash(
+                P,
+                allocator,
+                &tree,
+                root,
+            );
+
+            const owned_gid = try allocator.dupe(
+                u8,
+                outcome.group_id,
+            );
+            errdefer allocator.free(owned_gid);
+            const owned_exts = try cloneExtensions(
+                allocator,
+                outcome.extensions,
+            );
+            errdefer freeClonedExtensions(allocator, owned_exts);
+
+            const zero_th: [P.nh]u8 = .{0} ** P.nh;
+            const gc: context_mod.GroupContext(P.nh) = .{
+                .version = outcome.version,
+                .cipher_suite = outcome.cipher_suite,
+                .group_id = owned_gid,
+                .epoch = 1,
+                .tree_hash = tree_hash,
+                .confirmed_transcript_hash = zero_th,
+                .extensions = owned_exts,
+            };
+
+            var result: Self = .{
+                .tree = tree,
+                .group_context = gc,
+                .epoch_secrets = undefined,
+                .interim_transcript_hash = zero_th,
+                .confirmed_transcript_hash = zero_th,
+                .my_leaf_index = LeafIndex.fromU32(0),
+                .wire_format_policy = self.wire_format_policy,
+                .pending_proposals = proposal_cache_mod.ProposalCache(P).init(),
+                .epoch_key_ring = epoch_key_ring_mod.EpochKeyRing(P).init(0),
+                .resumption_psk_ring = psk_lookup_mod.ResumptionPskRing(P).init(0),
+                .allocator = allocator,
+            };
+
+            var gc_buf: [max_gc_encode]u8 = undefined;
+            const gc_bytes = result.group_context.serialize(
+                &gc_buf,
+            ) catch unreachable;
+
+            const zero: [P.nh]u8 = .{0} ** P.nh;
+            const psk_secret = if (outcome.resumption_psk) |psk|
+                psk
+            else
+                zero;
+            result.epoch_secrets = schedule.deriveEpochSecrets(
+                P,
+                &zero, // init_secret
+                &zero, // commit_secret
+                &psk_secret,
+                gc_bytes,
+            );
+            const conf_tag = auth_mod.computeConfirmationTag(
+                P,
+                &result.epoch_secrets.confirmation_key,
+                &zero_th,
+            );
+            result.interim_transcript_hash =
+                transcript.updateInterimTranscriptHash(
+                    P,
+                    &zero_th,
+                    &conf_tag,
+                ) catch unreachable;
+
+            return result;
         }
 
         /// Encrypt application data (static helper).
@@ -899,4 +1005,85 @@ test "epochAuthenticator is non-zero after createGroup" {
     // Must not be all zero.
     const zero = [_]u8{0} ** Default.nh;
     try testing.expect(!std.mem.eql(u8, ea, &zero));
+}
+
+test "reinitGroup creates independent epoch-1 one-member group" {
+    const alloc = testing.allocator;
+    var gs = try createGroup(
+        Default,
+        alloc,
+        "orig-group",
+        makeCreatorLeaf(),
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &.{},
+    );
+    defer gs.deinit();
+
+    const outcome = commit_mod.ReInitOutcome(Default){
+        .group_id = "new-group",
+        .version = .mls10,
+        .cipher_suite = .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        .extensions = &.{},
+        .psk_usage = .reinit,
+        .psk_group_id = gs.group_context.group_id,
+        .psk_epoch = 1,
+        .resumption_psk = null,
+    };
+    var next = try gs.reinitGroup(alloc, outcome);
+    defer next.deinit();
+
+    try testing.expectEqual(@as(u64, 1), next.epoch());
+    try testing.expectEqual(@as(u32, 1), next.leafCount());
+    try testing.expectEqual(@as(u32, 0), next.my_leaf_index.toU32());
+    try testing.expectEqualStrings("new-group", next.groupId());
+
+    const leaf = try next.tree.getLeaf(LeafIndex.fromU32(0));
+    try testing.expect(leaf != null);
+    try testing.expectEqualSlices(
+        u8,
+        "alice",
+        leaf.?.credential.payload.basic,
+    );
+}
+
+test "reinitGroup uses resumption_psk when provided" {
+    const alloc = testing.allocator;
+    var gs = try createGroup(
+        Default,
+        alloc,
+        "orig-group-2",
+        makeCreatorLeaf(),
+        .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        &.{},
+    );
+    defer gs.deinit();
+
+    const psk_a: [Default.nh]u8 = [_]u8{0xA5} ** Default.nh;
+    const psk_b: [Default.nh]u8 = [_]u8{0x5A} ** Default.nh;
+    const base = commit_mod.ReInitOutcome(Default){
+        .group_id = "same-target",
+        .version = .mls10,
+        .cipher_suite = .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+        .extensions = &.{},
+        .psk_usage = .reinit,
+        .psk_group_id = gs.group_context.group_id,
+        .psk_epoch = 1,
+        .resumption_psk = null,
+    };
+
+    var o1 = base;
+    o1.resumption_psk = psk_a;
+    var g1 = try gs.reinitGroup(alloc, o1);
+    defer g1.deinit();
+
+    var o2 = base;
+    o2.resumption_psk = psk_b;
+    var g2 = try gs.reinitGroup(alloc, o2);
+    defer g2.deinit();
+
+    try testing.expect(!std.mem.eql(
+        u8,
+        &g1.epoch_secrets.epoch_secret,
+        &g2.epoch_secrets.epoch_secret,
+    ));
 }
