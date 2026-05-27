@@ -267,6 +267,10 @@ pub fn GroupState(comptime P: type) type {
             psk_lookup: ?psk_lookup_mod.PskLookup,
             receiver_sk: *const [P.nsk]u8,
             receiver_pk: *const [P.npk]u8,
+            credential_matcher: ?*const fn (
+                joiner: *const Credential,
+                removed: *const Credential,
+            ) bool,
             wire_format: types.WireFormat,
         ) external_mod.ExternalCommitError!external_mod.ProcessExternalResult(P) {
             return external_mod.processExternalCommit(
@@ -286,6 +290,7 @@ pub fn GroupState(comptime P: type) type {
                 self.my_leaf_index,
                 receiver_sk,
                 receiver_pk,
+                credential_matcher,
                 wire_format,
             );
         }

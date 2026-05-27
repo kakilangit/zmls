@@ -105,6 +105,8 @@ pub const ValidationError = error{
     UnknownMember,
     /// A credential failed application-level validation.
     InvalidCredential,
+    /// Resync external commit credential matcher rejected mapping.
+    CredentialMismatch,
     /// Protocol version mismatch.
     VersionMismatch,
     /// Cipher suite mismatch.

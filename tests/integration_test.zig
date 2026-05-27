@@ -938,6 +938,7 @@ test "external join: create → external commit → agree" {
         gs.my_leaf_index,
         &alice_enc.sk,
         &alice_enc.pk,
+        null,
         .mls_public_message,
     );
     defer pr.tree.deinit();
