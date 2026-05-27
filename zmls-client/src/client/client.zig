@@ -1301,7 +1301,7 @@ pub fn Client(comptime P: type) type {
             var pos: u32 = hdr_end;
             const end: u32 = hdr_end + payload_len;
             while (pos < end) {
-                const pres = zmls.codec.decodeUint8(
+                const pres = zmls.codec.decode_uint8(
                     data,
                     pos,
                 ) catch return error.Truncated;
@@ -3167,7 +3167,7 @@ pub fn Client(comptime P: type) type {
             var pos: u32 = 0;
 
             // WireFormat (u16)
-            pos = zmls.codec.encodeUint16(
+            pos = zmls.codec.encode_uint16(
                 &result.data,
                 pos,
                 @intFromEnum(
@@ -3423,7 +3423,7 @@ pub fn Client(comptime P: type) type {
             var ni: u32 = 0;
             while (ni < trim_width) : (ni += 1) {
                 if (tree.nodes[ni]) |*n| {
-                    pos = zmls.codec.encodeUint8(
+                    pos = zmls.codec.encode_uint8(
                         &tmp,
                         pos,
                         1,
@@ -3433,7 +3433,7 @@ pub fn Client(comptime P: type) type {
                         pos,
                     ) catch return error.EncodingFailed;
                 } else {
-                    pos = zmls.codec.encodeUint8(
+                    pos = zmls.codec.encode_uint8(
                         &tmp,
                         pos,
                         0,
