@@ -2091,6 +2091,7 @@ test "unified API: commit + applyCommit + joinViaWelcome" {
         @as(u32, 2),
         output.group_state.leafCount(),
     );
+    try testing.expect(output.reinit_outcome == null);
 
     // 4. Build Welcome from the output.
     var gc_buf: [max_gc_encode]u8 = undefined;

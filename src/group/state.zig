@@ -42,6 +42,7 @@ const framed_content_mod = @import(
 const proposal_mod = @import("../messages/proposal.zig");
 const path_mod = @import("../tree/path.zig");
 const evolution = @import("evolution.zig");
+const psk_mod = @import("../key_schedule/psk.zig");
 const primitives = @import("../crypto/primitives.zig");
 const secureZero = primitives.secureZero;
 
@@ -304,6 +305,121 @@ pub fn GroupState(comptime P: type) type {
             );
         }
 
+        /// Create a subgroup branch (RFC 9420 §11.3).
+        ///
+        /// Takes a subset of member leaf indices from the current
+        /// group, derives a branch-usage resumption PSK from the
+        /// current epoch's resumption secret, and creates a new
+        /// one-member group at epoch 1 with the branch PSK
+        /// injected into the key schedule.
+        ///
+        /// `psk_nonce` must be fresh random bytes of length KDF.Nh.
+        /// The `creator_leaf` must be a fully-formed LeafNode for
+        /// the branching member (source = .commit or .key_package).
+        pub fn createBranch(
+            self: *const Self,
+            allocator: std.mem.Allocator,
+            group_id: []const u8,
+            creator_leaf: LeafNode,
+            group_extensions: []const Extension,
+            psk_nonce: [P.nh]u8,
+        ) (TreeError || CryptoError || error{OutOfMemory})!CreateBranchResult(P) {
+            // Derive branch PSK from the current epoch's
+            // resumption_secret.
+            const version = self.group_context.version;
+            const cipher_suite = self.group_context.cipher_suite;
+
+            var tree = try RatchetTree.init(allocator, 1);
+            errdefer tree.deinit();
+
+            try tree.setLeaf(LeafIndex.fromU32(0), creator_leaf);
+
+            const root = tree_math.root(tree.leaf_count);
+            const tree_hash = try tree_hashes.treeHash(
+                P,
+                allocator,
+                &tree,
+                root,
+            );
+
+            const owned_gid = try allocator.dupe(u8, group_id);
+            errdefer allocator.free(owned_gid);
+
+            const owned_exts = try cloneExtensions(
+                allocator,
+                group_extensions,
+            );
+            errdefer freeClonedExtensions(allocator, owned_exts);
+
+            const zero_th: [P.nh]u8 = .{0} ** P.nh;
+            const gc: context_mod.GroupContext(P.nh) = .{
+                .version = version,
+                .cipher_suite = cipher_suite,
+                .group_id = owned_gid,
+                .epoch = 1,
+                .tree_hash = tree_hash,
+                .confirmed_transcript_hash = zero_th,
+                .extensions = owned_exts,
+            };
+
+            var new_gs: Self = .{
+                .tree = tree,
+                .group_context = gc,
+                .epoch_secrets = undefined,
+                .interim_transcript_hash = zero_th,
+                .confirmed_transcript_hash = zero_th,
+                .my_leaf_index = LeafIndex.fromU32(0),
+                .wire_format_policy = self.wire_format_policy,
+                .pending_proposals = proposal_cache_mod.ProposalCache(P).init(),
+                .epoch_key_ring = epoch_key_ring_mod.EpochKeyRing(P).init(0),
+                .resumption_psk_ring = psk_lookup_mod.ResumptionPskRing(P).init(0),
+                .allocator = allocator,
+            };
+
+            var gc_buf: [max_gc_encode]u8 = undefined;
+            const gc_bytes = new_gs.group_context.serialize(
+                &gc_buf,
+            ) catch unreachable;
+
+            const zero: [P.nh]u8 = .{0} ** P.nh;
+            new_gs.epoch_secrets = schedule.deriveEpochSecrets(
+                P,
+                &zero,
+                &zero,
+                &self.epoch_secrets.resumption_psk,
+                gc_bytes,
+            );
+
+            const conf_tag = auth_mod.computeConfirmationTag(
+                P,
+                &new_gs.epoch_secrets.confirmation_key,
+                &zero_th,
+            );
+            new_gs.interim_transcript_hash =
+                transcript.updateInterimTranscriptHash(
+                    P,
+                    &zero_th,
+                    &conf_tag,
+                ) catch unreachable;
+
+            const outcome = BranchOutcome(P){
+                .group_id = owned_gid,
+                .version = version,
+                .cipher_suite = cipher_suite,
+                .extensions = owned_exts,
+                .psk_usage = .branch,
+                .psk_group_id = self.group_context.group_id,
+                .psk_epoch = self.group_context.epoch,
+                .resumption_psk = self.epoch_secrets.resumption_psk,
+                .psk_nonce = psk_nonce,
+            };
+
+            return .{
+                .group_state = new_gs,
+                .outcome = outcome,
+            };
+        }
+
         /// Create a reinitialized group state from a ReInit outcome.
         ///
         /// The new group is independent from the old group and starts
@@ -498,6 +614,8 @@ pub fn GroupState(comptime P: type) type {
             leaf_sig: [P.sig_len]u8,
             /// Added leaves (for Welcome recipients).
             apply_result: evolution.ProposalApplyResult,
+            /// ReInit outcome material (if commit carries ReInit).
+            reinit_outcome: ?commit_mod.ReInitOutcome(P),
             /// Path secrets from filtered direct path
             /// (for Welcome, RFC 9420 §12.4.3.1).
             path_secrets: [path_mod.max_path_nodes][P.nh]u8,
@@ -524,11 +642,21 @@ pub fn GroupState(comptime P: type) type {
         pub const ProcessOutput = struct {
             /// New group state for the next epoch.
             group_state: Self,
+            /// ReInit outcome material (if commit carries ReInit).
+            reinit_outcome: ?commit_mod.ReInitOutcome(P),
 
             pub fn deinit(self: *@This()) void {
                 self.group_state.deinit();
                 self.* = undefined;
             }
+        };
+
+        /// Output of creating a subgroup branch.
+        pub const CreateBranchResult = struct {
+            /// New branch group state at epoch 1.
+            group_state: Self,
+            /// Branch outcome (PSK metadata for other members).
+            outcome: BranchOutcome(P),
         };
 
         /// Create a commit and return a unified output
@@ -578,6 +706,7 @@ pub fn GroupState(comptime P: type) type {
                 .welcome_secret = cr.welcome_secret,
                 .leaf_sig = cr.leaf_sig,
                 .apply_result = cr.apply_result,
+                .reinit_outcome = cr.reinit_outcome,
                 .path_secrets = cr.path_secrets,
                 .path_secret_count = cr.path_secret_count,
                 .fdp_nodes = cr.fdp_nodes,
@@ -619,6 +748,7 @@ pub fn GroupState(comptime P: type) type {
                     .resumption_psk_ring = self.resumption_psk_ring,
                     .allocator = allocator,
                 },
+                .reinit_outcome = cr.reinit_outcome,
             };
         }
     };
@@ -784,6 +914,38 @@ fn freeClonedExtensions(
         allocator.free(ext.data);
     }
     allocator.free(exts);
+}
+
+// -- Branch Outcome -----------------------------------------------------------
+
+/// Outcome of a subgroup branch operation (RFC 9420 §11.3).
+///
+/// Contains everything needed by the branching member to start the
+/// new group and by other members to join via an external commit
+/// that includes the branch PSK.
+pub fn BranchOutcome(comptime P: type) type {
+    return struct {
+        /// New group ID.
+        group_id: []const u8,
+        /// Same protocol version as parent (RFC requirement).
+        version: types.ProtocolVersion,
+        /// Same cipher suite as parent (RFC requirement).
+        cipher_suite: types.CipherSuite,
+        /// New group context extensions.
+        extensions: []const Extension,
+        /// Branch PSK usage (always .branch).
+        psk_usage: psk_mod.ResumptionPskUsage,
+        /// Parent group ID (for PSK identification).
+        psk_group_id: []const u8,
+        /// Parent epoch (the epoch from which the branch was
+        /// created).
+        psk_epoch: Epoch,
+        /// Resumption PSK value derived from parent's
+        /// resumption_secret.
+        resumption_psk: [P.nh]u8,
+        /// Fresh random nonce for the PSK.
+        psk_nonce: [P.nh]u8,
+    };
 }
 
 // -- Tests -------------------------------------------------------------------
