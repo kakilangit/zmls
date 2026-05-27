@@ -311,35 +311,16 @@ pub fn processWelcome(
     // Validate tree leaf nodes and structural invariants.
     try validateWelcomeTree(P, &tree, gc.cipher_suite);
 
-    // RFC 9420 §12.4.3.1: verify that the caller-provided
-    // signer_verify_key matches the signer's leaf in the
-    // tree. The GroupInfo signer is at leaf index gi.signer.
-    const signer_leaf_idx = LeafIndex.fromU32(gi.signer);
-    const signer_leaf = tree.getLeaf(signer_leaf_idx) catch
-        return error.IndexOutOfRange;
-    if (signer_leaf) |sl| {
-        if (sl.signature_key.len != P.sign_pk_len or
-            !primitives.constantTimeEql(
-                P.sign_pk_len,
-                sl.signature_key[0..P.sign_pk_len],
-                signer_verify_key,
-            ))
-            return error.SignatureVerifyFailed;
-        // RFC 9420 §12.4.3.2: validate signer's credential.
-        if (credential_validator) |cv| {
-            try cv.validate(&sl.credential);
-        }
-    } else {
-        return error.InvalidLeafNode;
-    }
-
-    // 7c. Verify joiner's leaf is present at my_leaf_index.
-    const my_leaf = tree.getLeaf(my_leaf_index) catch
-        return error.IndexOutOfRange;
-    if (my_leaf == null) return error.InvalidLeafNode;
-
-    // RFC 9420 S13.4: joiner must support all group extensions.
-    try validateJoinerExtSupport(my_leaf.?.*, gc.extensions);
+    // Verify signer and joiner leaf.
+    try verifyWelcomeSignerAndJoiner(
+        P,
+        &tree,
+        &gi,
+        signer_verify_key,
+        credential_validator,
+        my_leaf_index,
+        gc.extensions,
+    );
 
     // Derive path keys from Welcome path_secret
     // (RFC 9420 §12.4.3.1).
@@ -378,6 +359,41 @@ pub fn processWelcome(
         .path_keys = path_keys,
         .path_key_count = path_key_count,
     };
+}
+
+/// Verify that the signer's leaf matches the expected verify
+/// key and that the joiner's leaf is present.
+fn verifyWelcomeSignerAndJoiner(
+    comptime P: type,
+    tree: *const RatchetTree,
+    gi: *const GroupInfo,
+    signer_verify_key: *const [P.sign_pk_len]u8,
+    credential_validator: ?CredentialValidator,
+    my_leaf_index: LeafIndex,
+    group_extensions: []const Extension,
+) WelcomeError!void {
+    const signer_leaf_idx = LeafIndex.fromU32(gi.signer);
+    const signer_leaf = tree.getLeaf(signer_leaf_idx) catch
+        return error.IndexOutOfRange;
+    if (signer_leaf) |sl| {
+        if (sl.signature_key.len != P.sign_pk_len or
+            !primitives.constantTimeEql(
+                P.sign_pk_len,
+                sl.signature_key[0..P.sign_pk_len],
+                signer_verify_key,
+            ))
+            return error.SignatureVerifyFailed;
+        if (credential_validator) |cv| {
+            try cv.validate(&sl.credential);
+        }
+    } else {
+        return error.InvalidLeafNode;
+    }
+
+    const my_leaf = tree.getLeaf(my_leaf_index) catch
+        return error.IndexOutOfRange;
+    if (my_leaf == null) return error.InvalidLeafNode;
+    try validateJoinerExtSupport(my_leaf.?.*, group_extensions);
 }
 
 /// Result of decryptWelcomeSecrets.
