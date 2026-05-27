@@ -171,7 +171,7 @@ pub fn GroupState(comptime P: type) type {
             allocator: std.mem.Allocator,
             opts: commit_mod.CreateCommitOpts(P),
         ) CommitError!commit_mod.CommitResult(P) {
-            return commit_mod.createCommit(
+            return commit_mod.createCommitWithValidator(
                 P,
                 allocator,
                 &self.group_context,
@@ -183,6 +183,7 @@ pub fn GroupState(comptime P: type) type {
                 &self.epoch_secrets.init_secret,
                 opts.path_params,
                 opts.psk_resolver,
+                opts.credential_validator,
                 opts.wire_format,
             );
         }
@@ -424,7 +425,7 @@ pub fn GroupState(comptime P: type) type {
             allocator: std.mem.Allocator,
             opts: commit_mod.CreateCommitOpts(P),
         ) commit_mod.CommitError!CommitOutput {
-            const cr = try commit_mod.createCommit(
+            const cr = try commit_mod.createCommitWithValidator(
                 P,
                 allocator,
                 &self.group_context,
@@ -436,6 +437,7 @@ pub fn GroupState(comptime P: type) type {
                 &self.epoch_secrets.init_secret,
                 opts.path_params,
                 opts.psk_resolver,
+                opts.credential_validator,
                 opts.wire_format,
             );
             // Assemble the new GroupState from result fields.

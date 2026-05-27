@@ -37,6 +37,9 @@ const primitives = @import("../crypto/primitives.zig");
 const secureZero = primitives.secureZero;
 const codec = @import("../codec/codec.zig");
 const public_msg = @import("../framing/public_msg.zig");
+const CredentialValidator = @import(
+    "../credential/validator.zig",
+).CredentialValidator;
 
 const Epoch = types.Epoch;
 const LeafIndex = types.LeafIndex;
@@ -210,6 +213,8 @@ pub fn CreateCommitOpts(comptime P: type) type {
         path_params: ?PathParams(P) = null,
         /// PSK resolver (required when PSK proposals present).
         psk_resolver: ?PskResolver(P) = null,
+        /// Optional application credential validator.
+        credential_validator: ?CredentialValidator = null,
         /// Wire format for the commit message.
         wire_format: WireFormat = .mls_public_message,
     };
@@ -235,6 +240,8 @@ pub fn ProcessCommitOpts(comptime P: type) type {
         receiver_params: ?ReceiverPathParams(P) = null,
         /// PSK resolver.
         psk_resolver: ?PskResolver(P) = null,
+        /// Optional application credential validator.
+        credential_validator: ?CredentialValidator = null,
         /// Original proposal senders (for by-ref proposals).
         proposal_senders: ?[]const Sender = null,
         /// Membership key (for tagged messages).
@@ -430,6 +437,39 @@ pub fn createCommit(
     psk_resolver: ?PskResolver(P),
     wire_format: WireFormat,
 ) CommitError!CommitResult(P) {
+    return createCommitWithValidator(
+        P,
+        allocator,
+        group_context,
+        tree,
+        my_leaf,
+        proposals,
+        sign_key,
+        interim_transcript_hash,
+        init_secret,
+        path_params,
+        psk_resolver,
+        null,
+        wire_format,
+    );
+}
+
+/// Create a Commit with optional credential validation.
+pub fn createCommitWithValidator(
+    comptime P: type,
+    allocator: std.mem.Allocator,
+    group_context: *const context_mod.GroupContext(P.nh),
+    tree: *const RatchetTree,
+    my_leaf: LeafIndex,
+    proposals: []const Proposal,
+    sign_key: *const [P.sign_sk_len]u8,
+    interim_transcript_hash: *const [P.nh]u8,
+    init_secret: *const [P.nh]u8,
+    path_params: ?PathParams(P),
+    psk_resolver: ?PskResolver(P),
+    credential_validator: ?CredentialValidator,
+    wire_format: WireFormat,
+) CommitError!CommitResult(P) {
     assert(tree.leaf_count > 0);
     assert(my_leaf.toNodeIndex().toUsize() < tree.nodes.len);
     const validated = try validateCommitProposals(
@@ -439,6 +479,7 @@ pub fn createCommit(
         my_leaf,
         group_context,
         tree,
+        credential_validator,
     );
     defer validated.destroy(allocator);
 
@@ -629,6 +670,7 @@ pub fn processCommit(
         opts.proposal_senders,
         group_context,
         tree,
+        opts.credential_validator,
     );
     defer validated.destroy(allocator);
     // 6. Apply proposals to a copy of the tree.
@@ -762,6 +804,7 @@ fn validateProcessProposals(
     proposal_senders: ?[]const Sender,
     group_context: *const context_mod.GroupContext(P.nh),
     tree: *const RatchetTree,
+    credential_validator: ?CredentialValidator,
 ) CommitError!*ValidatedProposals {
     assert(sender_leaf.toNodeIndex().toUsize() < tree.nodes.len);
     if (proposal_senders) |ps| {
@@ -790,7 +833,7 @@ fn validateProcessProposals(
         P,
         validated,
         group_context.cipher_suite,
-        null,
+        credential_validator,
     );
     try evolution.validateUpdateLeafNodes(
         P,
@@ -807,7 +850,7 @@ fn validateProcessProposals(
         validated,
         tree,
         sender,
-        null,
+        credential_validator,
     );
     try evolution.validateRemovesAgainstTree(
         validated,
@@ -1290,6 +1333,7 @@ fn validateCommitProposals(
     my_leaf: LeafIndex,
     group_context: *const context_mod.GroupContext(P.nh),
     tree: *const RatchetTree,
+    credential_validator: ?CredentialValidator,
 ) CommitError!*ValidatedProposals {
     assert(tree.leaf_count > 0);
     assert(my_leaf.toNodeIndex().toUsize() < tree.nodes.len);
@@ -1316,7 +1360,7 @@ fn validateCommitProposals(
         P,
         validated,
         group_context.cipher_suite,
-        null,
+        credential_validator,
     );
     try evolution.validateUpdateLeafNodes(
         P,
@@ -1333,7 +1377,7 @@ fn validateCommitProposals(
         validated,
         tree,
         sender,
-        null,
+        credential_validator,
     );
     try evolution.validateRemovesAgainstTree(
         validated,
