@@ -519,9 +519,9 @@ provider interface to support incremental updates.
 
 ### Testing
 
-- 310 unit tests (in-file `test` blocks).
-- 7 integration tests (end-to-end protocol flows).
-- 13 interop tests against RFC 9420 official test vectors.
+- 289 unit tests (in-file `test` blocks).
+- 23 integration tests (end-to-end protocol flows).
+- 35 interop tests against RFC 9420 official test vectors.
 - 4 fuzz target files (codec, tree, proposals, messages).
 - Zero external test dependencies.
 

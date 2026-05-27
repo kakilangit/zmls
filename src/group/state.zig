@@ -684,21 +684,16 @@ pub fn GroupState(comptime P: type) type {
                 opts.credential_validator,
                 opts.wire_format,
             );
-            // Assemble the new GroupState from result fields.
             return .{
-                .group_state = .{
-                    .tree = cr.tree,
-                    .group_context = cr.group_context,
-                    .epoch_secrets = cr.epoch_secrets,
-                    .interim_transcript_hash = cr.interim_transcript_hash,
-                    .confirmed_transcript_hash = cr.confirmed_transcript_hash,
-                    .my_leaf_index = self.my_leaf_index,
-                    .wire_format_policy = self.wire_format_policy,
-                    .pending_proposals = proposal_cache_mod.ProposalCache(P).init(),
-                    .epoch_key_ring = self.epoch_key_ring,
-                    .resumption_psk_ring = self.resumption_psk_ring,
-                    .allocator = allocator,
-                },
+                .group_state = newGroupState(
+                    self,
+                    allocator,
+                    cr.tree,
+                    cr.group_context,
+                    cr.epoch_secrets,
+                    cr.interim_transcript_hash,
+                    cr.confirmed_transcript_hash,
+                ),
                 .commit_bytes = cr.commit_bytes,
                 .commit_len = cr.commit_len,
                 .signature = cr.signature,
@@ -736,20 +731,42 @@ pub fn GroupState(comptime P: type) type {
                 &self.epoch_secrets.init_secret,
             );
             return .{
-                .group_state = .{
-                    .tree = cr.tree,
-                    .group_context = cr.group_context,
-                    .epoch_secrets = cr.epoch_secrets,
-                    .interim_transcript_hash = cr.interim_transcript_hash,
-                    .confirmed_transcript_hash = cr.confirmed_transcript_hash,
-                    .my_leaf_index = self.my_leaf_index,
-                    .wire_format_policy = self.wire_format_policy,
-                    .pending_proposals = proposal_cache_mod.ProposalCache(P).init(),
-                    .epoch_key_ring = self.epoch_key_ring,
-                    .resumption_psk_ring = self.resumption_psk_ring,
-                    .allocator = allocator,
-                },
+                .group_state = newGroupState(
+                    self,
+                    allocator,
+                    cr.tree,
+                    cr.group_context,
+                    cr.epoch_secrets,
+                    cr.interim_transcript_hash,
+                    cr.confirmed_transcript_hash,
+                ),
                 .reinit_outcome = cr.reinit_outcome,
+            };
+        }
+
+        /// Assemble a new GroupState from the fields produced by
+        /// a commit or process operation.
+        fn newGroupState(
+            self: *const Self,
+            allocator: std.mem.Allocator,
+            tree: RatchetTree,
+            group_context: context_mod.GroupContext(P.nh),
+            epoch_secrets: schedule.EpochSecrets(P),
+            interim_transcript_hash: [P.nh]u8,
+            confirmed_transcript_hash: [P.nh]u8,
+        ) Self {
+            return .{
+                .tree = tree,
+                .group_context = group_context,
+                .epoch_secrets = epoch_secrets,
+                .interim_transcript_hash = interim_transcript_hash,
+                .confirmed_transcript_hash = confirmed_transcript_hash,
+                .my_leaf_index = self.my_leaf_index,
+                .wire_format_policy = self.wire_format_policy,
+                .pending_proposals = proposal_cache_mod.ProposalCache(P).init(),
+                .epoch_key_ring = self.epoch_key_ring,
+                .resumption_psk_ring = self.resumption_psk_ring,
+                .allocator = allocator,
             };
         }
     };
