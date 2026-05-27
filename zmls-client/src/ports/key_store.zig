@@ -47,6 +47,16 @@ pub fn KeyStore(comptime P: type) type {
                 group_id: []const u8,
                 leaf_index: u32,
             ) Error!void,
+            mark_key_package_used: *const fn (
+                context: *anyopaque,
+                io: Io,
+                kp_ref: []const u8,
+            ) Error!void,
+            is_key_package_used: *const fn (
+                context: *anyopaque,
+                io: Io,
+                kp_ref: []const u8,
+            ) Error!bool,
         };
 
         pub const Error = Io.Cancelable || error{
@@ -131,6 +141,30 @@ pub fn KeyStore(comptime P: type) type {
                 leaf_index,
             );
         }
+
+        pub fn markKeyPackageUsed(
+            self: Self,
+            io: Io,
+            kp_ref: []const u8,
+        ) Error!void {
+            return self.vtable.mark_key_package_used(
+                self.context,
+                io,
+                kp_ref,
+            );
+        }
+
+        pub fn isKeyPackageUsed(
+            self: Self,
+            io: Io,
+            kp_ref: []const u8,
+        ) Error!bool {
+            return self.vtable.is_key_package_used(
+                self.context,
+                io,
+                kp_ref,
+            );
+        }
     };
 }
 
@@ -196,12 +230,28 @@ const NoOpKeyStore = struct {
         _: u32,
     ) StubKS.Error!void {}
 
+    fn markKpUsed(
+        _: *anyopaque,
+        _: Io,
+        _: []const u8,
+    ) StubKS.Error!void {}
+
+    fn isKpUsed(
+        _: *anyopaque,
+        _: Io,
+        _: []const u8,
+    ) StubKS.Error!bool {
+        return false;
+    }
+
     const vtable: StubKS.VTable = .{
         .store_signature_key = &storeSig,
         .load_signature_key = &loadSig,
         .store_encryption_key = &storeEnc,
         .load_encryption_key = &loadEnc,
         .delete_encryption_key = &deleteEnc,
+        .mark_key_package_used = &markKpUsed,
+        .is_key_package_used = &isKpUsed,
     };
 };
 
@@ -234,4 +284,6 @@ test "KeyStore: no-op stub is callable" {
         &out_enc,
     );
     try testing.expect(!found_enc);
+    try testing.expect(!(try ks.isKeyPackageUsed(io, "kp")));
+    try ks.markKeyPackageUsed(io, "kp");
 }

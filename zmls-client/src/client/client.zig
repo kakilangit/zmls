@@ -239,6 +239,7 @@ pub fn Client(comptime P: type) type {
             };
 
         pub const InviteError = GroupStore.Error ||
+            KS.Error ||
             Allocator.Error || error{
             ClientClosed,
             GroupNotFound,
@@ -250,6 +251,7 @@ pub fn Client(comptime P: type) type {
             KeyGenerationFailed,
             BundleSerializeFailed,
             CredentialValidationFailed,
+            KeyPackageAlreadyUsed,
         };
 
         pub const JoinError = GroupStore.Error ||
@@ -302,6 +304,7 @@ pub fn Client(comptime P: type) type {
             CommitProc.ProcessError;
 
         pub const ProposeError = GroupStore.Error ||
+            KS.Error ||
             Allocator.Error || error{
             ClientClosed,
             GroupNotFound,
@@ -309,6 +312,7 @@ pub fn Client(comptime P: type) type {
             BundleSerializeFailed,
             ProposalEncodeFailed,
             ProposalCacheFailed,
+            KeyPackageAlreadyUsed,
         };
 
         pub const GroupInfoError = GroupStore.Error ||
@@ -717,6 +721,10 @@ pub fn Client(comptime P: type) type {
             self.credential_validator.validate(
                 &key_package.leaf_node.credential,
             ) catch return error.CredentialValidationFailed;
+            try self.rejectUsedKeyPackage(
+                io,
+                &key_package,
+            );
 
             var bundle = try self.loadBundle(
                 io,
@@ -818,6 +826,7 @@ pub fn Client(comptime P: type) type {
                 pre_commit_state,
                 commit_output,
                 &welcome_result,
+                key_package,
             );
         }
 
@@ -830,6 +839,7 @@ pub fn Client(comptime P: type) type {
             commit_output: *GS.CommitOutput,
             welcome_result: *const zmls.group_welcome
                 .WelcomeResult,
+            invited_key_package: *const KeyPackage,
         ) InviteError!InviteResult {
             const commit_data = encodeCommitAsWireMessage(
                 allocator,
@@ -862,6 +872,7 @@ pub fn Client(comptime P: type) type {
                 &commit_output.group_state,
                 &secret_tree,
             );
+            try self.markKeyPackageUsed(io, invited_key_package);
 
             return .{
                 .commit = commit_data,
@@ -1641,6 +1652,7 @@ pub fn Client(comptime P: type) type {
             ) catch return error.ProposalEncodeFailed;
             var key_package = decoded.value;
             defer key_package.deinit(allocator);
+            try self.rejectUsedKeyPackage(io, &key_package);
 
             const proposal = zmls.Proposal{
                 .tag = .add,
@@ -2112,6 +2124,46 @@ pub fn Client(comptime P: type) type {
             };
         }
 
+        fn rejectUsedKeyPackage(
+            self: *Self,
+            io: Io,
+            key_package: *const KeyPackage,
+        ) KS.Error!void {
+            if (key_package.isLastResort()) return;
+            const kp_ref = key_package.makeRef(P) catch
+                return error.StorageFault;
+            const used = try self.key_store.isKeyPackageUsed(
+                io,
+                &kp_ref,
+            );
+            if (used) return error.KeyPackageAlreadyUsed;
+        }
+
+        fn markKeyPackageUsed(
+            self: *Self,
+            io: Io,
+            key_package: *const KeyPackage,
+        ) KS.Error!void {
+            if (key_package.isLastResort()) return;
+            const kp_ref = key_package.makeRef(P) catch
+                return error.StorageFault;
+            try self.key_store.markKeyPackageUsed(io, &kp_ref);
+        }
+
+        fn markAddProposalsUsed(
+            self: *Self,
+            io: Io,
+            proposals: []const zmls.Proposal,
+        ) KS.Error!void {
+            for (proposals) |*prop| {
+                if (prop.tag != .add) continue;
+                try self.markKeyPackageUsed(
+                    io,
+                    &prop.payload.add.key_package,
+                );
+            }
+        }
+
         /// Shared commit-and-persist for removeMember.
         fn commitWithProposals(
             self: *Self,
@@ -2156,6 +2208,10 @@ pub fn Client(comptime P: type) type {
                 group_id,
                 &commit_output.group_state,
                 &secret_tree,
+            );
+            try self.markAddProposalsUsed(
+                io,
+                proposals,
             );
 
             return wire_bytes;

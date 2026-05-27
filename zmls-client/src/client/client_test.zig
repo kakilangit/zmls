@@ -3048,3 +3048,52 @@ test "Client: processIncoming rejects forged new_member_proposal signature" {
     );
     try testing.expectError(error.WireDecodeFailed, result);
 }
+
+test "Client: proposeAdd rejects reused key package after invite commit" {
+    const io = testIo();
+
+    var alice_gs = MemGS(8).init();
+    defer alice_gs.deinit();
+    var alice_ks = MemKS(TestP, 8).init();
+    defer alice_ks.deinit();
+    var bob_gs = MemGS(8).init();
+    defer bob_gs.deinit();
+    var bob_ks = MemKS(TestP, 8).init();
+    defer bob_ks.deinit();
+    var alice: Client(TestP) = undefined;
+    var bob: Client(TestP) = undefined;
+
+    const group_id = try setupTwoMemberGroup(
+        &alice_gs,
+        &alice_ks,
+        &bob_gs,
+        &bob_ks,
+        &alice,
+        &bob,
+    );
+    defer testing.allocator.free(group_id);
+    defer alice.deinit();
+    defer bob.deinit();
+
+    const kp = try bob.freshKeyPackage(
+        testing.allocator,
+        io,
+    );
+    defer testing.allocator.free(kp.data);
+
+    var invite = try alice.inviteMember(
+        testing.allocator,
+        io,
+        group_id,
+        kp.data,
+    );
+    defer invite.deinit();
+
+    const result = alice.proposeAdd(
+        testing.allocator,
+        io,
+        group_id,
+        kp.data,
+    );
+    try testing.expectError(error.KeyPackageAlreadyUsed, result);
+}
