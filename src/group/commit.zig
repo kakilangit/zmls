@@ -690,6 +690,11 @@ fn verifyCommitPreconditions(
         return error.NotAMember;
     if (fc.content_type != .commit)
         return error.InvalidProposalList;
+    try evolution.validateWireFormat(
+        wire_format,
+        fc.content_type,
+        .encrypt_application_only,
+    );
 
     var gc_buf: [max_gc_encode]u8 = undefined;
     const gc_bytes = group_context.serialize(&gc_buf) catch
@@ -933,6 +938,21 @@ fn validatePathKeyFreshness(
     for (up.nodes) |upn| {
         if (keyExistsInTree(tree, upn.encryption_key))
             return error.InvalidLeafNode;
+    }
+
+    // RFC 9420 S16.7: committer's new signature key must be
+    // unique across all other non-blank leaves.
+    var i: usize = 0;
+    while (i < tree.nodes.len) : (i += 2) {
+        if (i == leaf_idx) continue;
+        const maybe_node = tree.nodes[i] orelse continue;
+        if (maybe_node.node_type != .leaf) continue;
+        const other_sig = maybe_node.payload.leaf.signature_key;
+        if (std.mem.eql(
+            u8,
+            other_sig,
+            up.leaf_node.signature_key,
+        )) return error.InvalidLeafNode;
     }
 }
 

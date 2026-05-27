@@ -2604,6 +2604,11 @@ pub fn Client(comptime P: type) type {
 
             const fc = &decoded.framed_content;
             const sender = fc.sender;
+            zmls.validateWireFormat(
+                .mls_public_message,
+                fc.content_type,
+                bundle.group_state.wire_format_policy,
+            ) catch return error.WireDecodeFailed;
 
             // Verify sender is a valid group member.
             if (sender.sender_type == .member) {

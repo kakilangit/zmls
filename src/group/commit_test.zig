@@ -2257,6 +2257,26 @@ test "processCommit rejects duplicate path node key" {
     try testing.expectError(error.InvalidLeafNode, result);
 }
 
+test "processCommit rejects duplicate committer signature_key" {
+    var context: PathTestCtx = undefined;
+    try context.init();
+    defer context.deinit();
+
+    // Reuse Bob's signature key in committer leaf.
+    const bob_idx =
+        LeafIndex.fromU32(1).toNodeIndex().toUsize();
+    const bob_sig =
+        context.add_cr.tree.nodes[bob_idx].?.payload.leaf
+            .signature_key;
+    const dst = @constCast(
+        context.path_commit.path.?.leaf_node.signature_key,
+    );
+    @memcpy(dst, bob_sig);
+
+    const result = context.process();
+    try testing.expectError(error.InvalidLeafNode, result);
+}
+
 test "verifyParentHashes rejects tampered parent hash" {
     // Build a 2-leaf tree with a valid commit path, then
     // tamper the leaf's parent_hash. verifyParentHashes must
