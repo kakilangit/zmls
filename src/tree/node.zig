@@ -590,6 +590,20 @@ pub const LeafNode = struct {
         // 7. If required_capabilities extension present, the leaf's
         //    own capabilities must satisfy it (RFC 9420 S7.3).
         try self.validateSelfRequiredCaps();
+
+        // 8. Source-specific structural invariants.
+        switch (self.source) {
+            .key_package => {
+                if (self.lifetime == null)
+                    return error.InvalidLeafNode;
+            },
+            .update => {},
+            .commit => {
+                if (self.parent_hash == null)
+                    return error.InvalidLeafNode;
+            },
+            else => return error.InvalidLeafNode,
+        }
     }
 
     /// Validate that encryption_key is a valid HPKE public

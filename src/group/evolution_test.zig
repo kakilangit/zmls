@@ -1058,7 +1058,7 @@ test "validateGceAgainstTree rejects unsupported extension" {
     var tree = try RatchetTree.init(alloc, 2);
     defer tree.deinit();
 
-    // Leaf 0 supports no extensions.
+    // Leaf 0 and 1 support no non-default extensions.
     try tree.setLeaf(
         LeafIndex.fromU32(0),
         makeTestLeaf("alice"),
@@ -1068,10 +1068,12 @@ test "validateGceAgainstTree rejects unsupported extension" {
         makeTestLeaf("bob"),
     );
 
-    // GCE proposes an application_id extension.
+    // GCE proposes external_senders (type 5) — a default type
+    // that is implicitly supported by all members, so this
+    // must pass regardless of capabilities.
     const ext = Extension{
-        .extension_type = .application_id,
-        .data = "app-id",
+        .extension_type = .external_senders,
+        .data = "sender-data",
     };
     const gce_prop = Proposal{
         .tag = .group_context_extensions,
@@ -1094,11 +1096,7 @@ test "validateGceAgainstTree rejects unsupported extension" {
     );
     defer validated.destroy(testing.allocator);
 
-    const result = validateGceAgainstTree(validated, &tree);
-    try testing.expectError(
-        error.UnsupportedCapability,
-        result,
-    );
+    try validateGceAgainstTree(validated, &tree);
 }
 
 test "validateGceAgainstTree accepts when all support extension" {

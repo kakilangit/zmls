@@ -8,7 +8,7 @@ or implemented in-tree.
 
 ## Requirements
 
-- Zig `0.16.0-dev.3039+b490412cd` or compatible.
+- Zig `0.16.0` or compatible.
 
 ## Build and Test
 

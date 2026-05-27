@@ -1759,13 +1759,10 @@ test "concurrent commits: second commit rejected" {
 test "GCE proposal: extensions updated through commit" {
     const alloc = testing.allocator;
 
-    // Both members must support the extension type we're going
-    // to set via GCE. Use a non-default extension type (>5)
-    // since default types (1-5) must NOT appear in capabilities.
-    const custom_ext_type: mls.ExtensionType = @enumFromInt(
-        0xFF01,
-    );
-    const ext_types = [_]mls.ExtensionType{custom_ext_type};
+    // Both members will use application_id (type 1) via GCE.
+    // Default extension types (1-5) are implicitly supported
+    // and must NOT appear in capabilities per RFC 9420 §7.2.
+    const ext_types = [_]mls.ExtensionType{};
 
     // Helper to build leaf with extension support.
     const versions = comptime [_]ProtocolVersion{.mls10};
@@ -1894,10 +1891,12 @@ test "GCE proposal: extensions updated through commit" {
     defer cr1.tree.deinit();
     defer cr1.deinit(alloc);
 
-    // GCE commit: set application_id extension.
+    // GCE commit: set application_id extension (type 1).
+    // application_id is a default GroupContext extension type
+    // per RFC 9420 §13 — no capabilities listing needed.
     const gce_data = "my-application-id";
     const gce_ext = Extension{
-        .extension_type = custom_ext_type,
+        .extension_type = .application_id,
         .data = gce_data,
     };
     const gce_exts = [_]Extension{gce_ext};
@@ -1969,7 +1968,7 @@ test "GCE proposal: extensions updated through commit" {
         cr2.group_context.extensions.len,
     );
     try testing.expectEqual(
-        custom_ext_type,
+        mls.ExtensionType.application_id,
         cr2.group_context.extensions[0].extension_type,
     );
     try testing.expectEqualSlices(

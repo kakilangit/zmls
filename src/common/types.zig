@@ -162,6 +162,23 @@ pub const ExtensionType = enum(u16) {
     _,
 };
 
+/// Check whether an ExtensionType is a known GroupContext
+/// extension per RFC 9420 Section 13.
+///
+/// GroupContext extensions are mandatory to implement. Unknown
+/// extension types in GroupContext MUST be rejected.
+pub fn isGroupContextExtension(et: ExtensionType) bool {
+    return switch (et) {
+        .application_id,
+        .ratchet_tree,
+        .required_capabilities,
+        .external_pub,
+        .external_senders,
+        => true,
+        else => false,
+    };
+}
+
 /// Leaf node source discriminator. Per RFC 9420 Section 7.2.
 pub const LeafNodeSource = enum(u8) {
     reserved = 0,

@@ -1138,7 +1138,11 @@ fn deriveProcessEpochState(
         .group_context = new_gc,
         .tree = new_tree.*,
         .apply_result = apply_result,
-        .new_epoch = group_context.epoch + 1,
+        .new_epoch = std.math.add(
+            Epoch,
+            group_context.epoch,
+            1,
+        ) catch return error.EpochOverflow,
         .path_keys = derived_path_keys,
         .path_key_count = derived_key_count,
     };
@@ -1754,7 +1758,11 @@ fn buildCommitResult(
         .group_context = new_gc,
         .tree = new_tree,
         .apply_result = apply_result,
-        .new_epoch = group_context.epoch + 1,
+        .new_epoch = std.math.add(
+            Epoch,
+            group_context.epoch,
+            1,
+        ) catch return error.EpochOverflow,
         .joiner_secret = epoch_secrets.joiner_secret,
         .welcome_secret = epoch_secrets.welcome_secret,
         .leaf_sig = leaf_sig,

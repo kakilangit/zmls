@@ -170,6 +170,19 @@ pub fn GroupContext(comptime nh: u32) type {
                 data,
                 p,
             );
+            // RFC 9420 S13: all GroupContext extensions are
+            // mandatory to implement — reject unknown types.
+            for (ext_r.value) |ext| {
+                if (!types.isGroupContextExtension(
+                    ext.extension_type,
+                )) {
+                    freeDecodedExts(
+                        allocator,
+                        @constCast(ext_r.value),
+                    );
+                    return error.UnknownExtension;
+                }
+            }
             p = ext_r.pos;
 
             // Copy decoded variable-length slices into
@@ -407,7 +420,7 @@ test "GroupContext with extensions round-trip" {
     const alloc = testing.allocator;
 
     const ext = Extension{
-        .extension_type = @enumFromInt(0xFE01),
+        .extension_type = .external_pub,
         .data = "ext-payload",
     };
     const exts = [_]Extension{ext};

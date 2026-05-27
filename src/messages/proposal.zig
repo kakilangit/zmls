@@ -325,6 +325,19 @@ pub const GroupContextExtensions = struct {
             data,
             pos,
         );
+        // RFC 9420 S13: GroupContextExtensions extensions
+        // are mandatory — reject unknown types.
+        for (ext_r.value) |ext| {
+            if (!types.isGroupContextExtension(
+                ext.extension_type,
+            )) {
+                freeDecodedExts(
+                    allocator,
+                    ext_r.value,
+                );
+                return error.UnknownExtension;
+            }
+        }
         return .{
             .value = .{
                 .extensions = @as(

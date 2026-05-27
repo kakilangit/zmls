@@ -31,6 +31,8 @@ pub const DecodeError = error{
     InvalidMembershipTagLength,
     /// The protocol version is not supported (must be mls10).
     UnsupportedProtocolVersion,
+    /// An unknown extension type was found in a mandatory context.
+    UnknownExtension,
 };
 
 /// Errors from cryptographic operations.

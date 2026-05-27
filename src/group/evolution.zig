@@ -32,6 +32,7 @@ const proposal_mod = @import("../messages/proposal.zig");
 const key_package_mod = @import("../messages/key_package.zig");
 const psk_mod = @import("../key_schedule/psk.zig");
 const framing = @import("../framing/content_type.zig");
+const grease = @import("../common/grease.zig");
 
 const LeafIndex = types.LeafIndex;
 const ProposalType = types.ProposalType;
@@ -255,7 +256,15 @@ fn categorizeProposal(
             result.psk_ids_len += 1;
         },
         else => {
-            // Unknown/GREASE: silently skip per Section 13.
+            // RFC 9420 S13.4: GREASE MUST NOT appear in
+            // Proposal.proposal_type — reject outright.
+            if (grease.isGreaseProposal(prop.tag)) {
+                return error.InvalidProposalList;
+            }
+            // Unknown non-default proposal: silently skip.
+            // Capability enforcement for non-default proposals
+            // is handled separately by
+            // validateNonDefaultProposalCaps.
         },
     }
 }
@@ -906,10 +915,16 @@ pub fn validateGceAgainstTree(
 
 /// Check that every non-blank leaf in the tree advertises
 /// support for the given extension type.
+///
+/// Default extension types (1-5) are implicitly supported
+/// per RFC 9420 Section 7.2 and MUST NOT appear in
+/// capabilities — skip the check for them.
 fn checkAllLeavesSupport(
     tree: *const RatchetTree,
     ext_type: ExtensionType,
 ) ValidationError!void {
+    const v = @intFromEnum(ext_type);
+    if (v >= 1 and v <= 5) return;
     var li: u32 = 0;
     while (li < tree.leaf_count) : (li += 1) {
         const node_idx = LeafIndex.fromU32(li).toNodeIndex();

@@ -666,7 +666,10 @@ test "validate accepts leaf whose caps satisfy required_capabilities" {
         .source = .key_package,
         .extensions = &extensions,
         .signature = &.{},
-        .lifetime = null,
+        .lifetime = .{
+            .not_before = 1000,
+            .not_after = 9999999999,
+        },
         .parent_hash = null,
     };
 
@@ -849,7 +852,10 @@ test "validate rejects leaf without mls10 in versions" {
         .source = .key_package,
         .extensions = &.{},
         .signature = &.{},
-        .lifetime = null,
+        .lifetime = .{
+            .not_before = 1000,
+            .not_after = 9999999999,
+        },
         .parent_hash = null,
     };
     const result = leaf.validate(

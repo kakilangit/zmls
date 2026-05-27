@@ -92,6 +92,23 @@ pub const GroupInfo = struct {
             data,
             p,
         );
+        // RFC 9420 S13: GroupInfo extensions must be known.
+        // Valid types: ratchet_tree (2), external_pub (4), plus
+        // any valid GroupContext extension type.
+        for (ext_r.value) |ext| {
+            const v = @intFromEnum(ext.extension_type);
+            if (v != 2 and v != 4 and
+                !types.isGroupContextExtension(
+                    ext.extension_type,
+                ))
+            {
+                freeDecodedExts(
+                    allocator,
+                    @constCast(ext_r.value),
+                );
+                return error.UnknownExtension;
+            }
+        }
         p = ext_r.pos;
 
         // opaque confirmation_tag<V>.
@@ -563,7 +580,7 @@ test "GroupInfo with extensions round-trip" {
     const gc = gc_buf[0..gc_len];
 
     const ext = Extension{
-        .extension_type = @enumFromInt(0xFE01),
+        .extension_type = .external_pub,
         .data = "some-ext-data",
     };
     const exts = [_]Extension{ext};
