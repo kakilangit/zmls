@@ -607,7 +607,7 @@ test "parseExternalSenders mixed basic and x509" {
 
 test "validateExternalSenderProposal accepts x509 sender" {
     var certs = [_]Certificate{
-        .{ .data = "leaf-cert" },
+        .{ .data = "x509-key" },
     };
     const senders = [_]ExternalSender{
         .{

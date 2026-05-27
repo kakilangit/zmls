@@ -117,6 +117,8 @@ pub const ValidationError = error{
     MissingExtension,
     /// A required capability is not supported.
     UnsupportedCapability,
+    /// External sender signature_key does not match credential binding.
+    SignatureKeyMismatch,
     /// No private key available for the matched resolution node.
     MissingDecryptionKey,
 };
