@@ -519,6 +519,18 @@ pub const LeafNode = struct {
         expected_suite: CipherSuite,
         current_time: ?u64,
     ) ValidationError!void {
+        try self.validateLeafNodeProperties(expected_suite, current_time);
+        try self.validateSelfRequiredCaps();
+        try self.validateSourceInvariants();
+    }
+
+    /// Validate capability, credential, and lifetime properties
+    /// (RFC 9420 §7.2–7.3).
+    fn validateLeafNodeProperties(
+        self: *const LeafNode,
+        expected_suite: CipherSuite,
+        current_time: ?u64,
+    ) ValidationError!void {
         // 1. Credential type must be in capabilities.
         const cred_type = self.credential.tag;
         if (!capsContains(
@@ -549,8 +561,6 @@ pub const LeafNode = struct {
         }
 
         // 3. Non-default extensions must be in capabilities.
-        //    Default extension types (1-5) are implicitly
-        //    supported per RFC 9420 Section 7.2.
         for (self.extensions) |ext| {
             const v = @intFromEnum(ext.extension_type);
             if (v >= 1 and v <= 5) continue;
@@ -563,16 +573,14 @@ pub const LeafNode = struct {
             }
         }
 
-        // 4. capabilities.proposals MUST NOT list default
-        //    proposal types (1-7) per RFC 9420 Section 7.2.
+        // 4. capabilities.proposals MUST NOT list default types.
         for (self.capabilities.proposals) |pt| {
             const v = @intFromEnum(pt);
             if (v >= 1 and v <= 7)
                 return error.InvalidLeafNode;
         }
 
-        // 5. capabilities.extensions MUST NOT list default
-        //    extension types (1-5) per RFC 9420 Section 7.2.
+        // 5. capabilities.extensions MUST NOT list default types.
         for (self.capabilities.extensions) |et| {
             const v = @intFromEnum(et);
             if (v >= 1 and v <= 5)
@@ -586,12 +594,13 @@ pub const LeafNode = struct {
                     return error.InvalidLeafNode;
             }
         }
+    }
 
-        // 7. If required_capabilities extension present, the leaf's
-        //    own capabilities must satisfy it (RFC 9420 S7.3).
-        try self.validateSelfRequiredCaps();
-
-        // 8. Source-specific structural invariants.
+    /// Validate source-specific structural invariants
+    /// (RFC 9420 §7.3).
+    fn validateSourceInvariants(
+        self: *const LeafNode,
+    ) ValidationError!void {
         switch (self.source) {
             .key_package => {
                 if (self.lifetime == null)
