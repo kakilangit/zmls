@@ -519,6 +519,7 @@ pub fn validateAddsAgainstTree(
     expected_suite: CipherSuite,
 ) ValidationError!void {
     const n = validated.adds_len;
+    assert(n <= max_affected);
     const adds = validated.adds[0..n];
 
     for (adds) |*add| {
@@ -1282,6 +1283,8 @@ pub fn applyProposals(
     validated: *const ValidatedProposals,
     tree: *RatchetTree,
 ) (TreeError || error{OutOfMemory})!ProposalApplyResult {
+    assert(validated.adds_len <= max_affected);
+    assert(validated.removes_len <= max_affected);
     var result: ProposalApplyResult = undefined;
     result.new_extensions = null;
     result.added_count = 0;
