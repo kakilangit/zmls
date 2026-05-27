@@ -43,6 +43,7 @@ const errors = @import("../common/errors.zig");
 const primitives = @import("../crypto/primitives.zig");
 const framed_content_mod = @import("framed_content.zig");
 const content_type_mod = @import("content_type.zig");
+const proposal_mod = @import("../messages/proposal.zig");
 
 const CryptoError = errors.CryptoError;
 const EncodeError = codec.EncodeError;
@@ -221,6 +222,31 @@ pub fn verifyFramedContent(
         "FramedContentTBS",
         tbs_buf[0..tbs_len],
         auth.signature[0..],
+    );
+}
+
+/// Verify a FramedContent whose sender is `new_member_proposal`.
+///
+/// Per RFC 9420 §6.1, the signature key is extracted from the
+/// KeyPackage in the corresponding Add proposal.
+pub fn verifyFramedContentForNewMember(
+    comptime P: type,
+    content: *const FramedContent,
+    wire_format: WireFormat,
+    group_context: []const u8,
+    add_proposal: *const proposal_mod.Add,
+    auth: *const FramedContentAuthData(P),
+) (CryptoError || error{SignatureKeyLengthMismatch})!void {
+    const sig_key = add_proposal.key_package.leaf_node.signature_key;
+    if (sig_key.len != P.sign_pk_len)
+        return error.SignatureKeyLengthMismatch;
+    return verifyFramedContent(
+        P,
+        content,
+        wire_format,
+        group_context,
+        sig_key[0..P.sign_pk_len],
+        auth,
     );
 }
 

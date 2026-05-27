@@ -43,6 +43,9 @@ const psk_mod = @import("../key_schedule/psk.zig");
 const commit_mod = @import("commit.zig");
 const path_mod = @import("../tree/path.zig");
 const path_secrets_mod = @import("../tree/path_secrets.zig");
+const CredentialValidator = @import(
+    "../credential/validator.zig",
+).CredentialValidator;
 const secureZero = primitives.secureZero;
 
 const CipherSuite = types.CipherSuite;
@@ -177,6 +180,11 @@ pub fn ProcessWelcomeOpts(comptime P: type) type {
         my_leaf_index: LeafIndex,
         /// PSK resolver.
         psk_resolver: ?commit_mod.PskResolver(P) = null,
+        /// Application-level credential validation for the
+        /// GroupInfo signer. When provided, the signer's
+        /// credential is validated after the signature key
+        /// check (RFC 9420 §12.4.3.2).
+        credential_validator: ?CredentialValidator = null,
     };
 }
 
@@ -255,6 +263,7 @@ pub fn processWelcome(
     tree_data: TreeInput,
     my_leaf_index: LeafIndex,
     psk_resolver: ?commit_mod.PskResolver(P),
+    credential_validator: ?CredentialValidator,
 ) WelcomeError!WelcomeJoinResult(P) {
     // 1-2. Decrypt GroupSecrets, derive welcome_secret.
     var ws = try decryptWelcomeSecrets(
@@ -316,6 +325,10 @@ pub fn processWelcome(
                 signer_verify_key,
             ))
             return error.SignatureVerifyFailed;
+        // RFC 9420 §12.4.3.2: validate signer's credential.
+        if (credential_validator) |cv| {
+            try cv.validate(&sl.credential);
+        }
     } else {
         return error.InvalidLeafNode;
     }

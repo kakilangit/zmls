@@ -3698,6 +3698,7 @@ fn verifyPassiveWelcome(entry: PassiveWelcomeEntry) !void {
         .{ .prebuilt = tree },
         my_leaf,
         resolver,
+        null,
     );
     defer join_result.deinit();
 
@@ -4116,6 +4117,7 @@ fn verifyPassiveHandlingCommit(
         .{ .prebuilt = tree },
         my_leaf,
         resolver,
+        null,
     );
     defer join_result.deinit();
 

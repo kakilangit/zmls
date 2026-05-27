@@ -1543,6 +1543,7 @@ fn benchProcessWelcome() void {
         .{ .prebuilt = cr.tree },
         mls.LeafIndex.fromU32(1),
         null,
+        null,
     ) catch {
         wr.deinit(alloc);
         cr.deinit(alloc);

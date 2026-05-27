@@ -235,6 +235,7 @@ pub fn GroupState(comptime P: type) type {
                 opts.tree_data,
                 opts.my_leaf_index,
                 opts.psk_resolver,
+                opts.credential_validator,
             );
         }
 

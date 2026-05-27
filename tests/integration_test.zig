@@ -265,6 +265,7 @@ test "full lifecycle: create → add → welcome → join" {
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
         null,
+        null,
     );
     defer bob_join.deinit();
 

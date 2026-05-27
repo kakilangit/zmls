@@ -431,6 +431,7 @@ test "processWelcome: full create-commit-welcome-join flow" {
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1), // Bob is leaf 1
         null,
+        null,
     );
     defer bob_join.deinit();
 
@@ -551,6 +552,7 @@ test "processWelcome rejects wrong init key" {
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
         null,
+        null,
     );
     try testing.expectError(error.HpkeOpenFailed, result);
 }
@@ -643,6 +645,7 @@ test "processWelcome rejects wrong signer key" {
         &wrong_sign_kp.pk,
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
+        null,
         null,
     );
     try testing.expectError(
@@ -737,6 +740,7 @@ test "processWelcome rejects wrong kp_ref" {
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
         null,
+        null,
     );
     try testing.expectError(
         error.NoMatchingKeyPackage,
@@ -829,6 +833,7 @@ test "processWelcome: epoch secrets enable next commit" {
         &alice_kp.pk,
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
+        null,
         null,
     );
     defer bob_join.deinit();
@@ -962,6 +967,7 @@ test "processWelcome rejects tampered encrypted_group_info" {
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
         null,
+        null,
     );
     try testing.expectError(error.HpkeOpenFailed, result);
 }
@@ -1050,6 +1056,7 @@ test "processWelcome rejects wrong my_leaf_index" {
         &alice_kp.pk,
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(5),
+        null,
         null,
     );
     try testing.expectError(error.IndexOutOfRange, result);
@@ -1190,6 +1197,7 @@ test "buildWelcome round-trip with processWelcome" {
         &alice_kp.pk,
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
+        null,
         null,
     );
     defer bob_join.deinit();
@@ -1356,6 +1364,7 @@ test "Welcome with external PSK decrypts correctly" {
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
         resolver,
+        null,
     );
     defer bob_join.deinit();
 
@@ -1464,6 +1473,7 @@ test "processWelcome rejects cipher suite mismatch" {
         &alice_kp.pk,
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
+        null,
         null,
     );
     try testing.expectError(
@@ -1766,6 +1776,7 @@ test "Welcome with path_secret: joiner derives path keys" {
         .{ .prebuilt = cr2.tree },
         LeafIndex.fromU32(1), // Carol takes leaf 1
         null,
+        null,
     );
     defer carol_join.deinit();
 
@@ -1898,6 +1909,7 @@ test "Welcome without path has zero path keys" {
         &alice_kp.pk,
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
+        null,
         null,
     );
     defer bob_join.deinit();
@@ -2079,6 +2091,7 @@ test "Welcome rejects corrupted path_secret" {
         &alice_kp.pk,
         .{ .prebuilt = cr2.tree },
         LeafIndex.fromU32(1),
+        null,
         null,
     );
     try testing.expectError(

@@ -582,6 +582,7 @@ test "suite 0x0002 full group lifecycle" {
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
         null,
+        null,
     );
     defer bob_join.deinit();
 

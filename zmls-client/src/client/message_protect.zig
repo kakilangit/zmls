@@ -326,6 +326,12 @@ pub fn MessageProtect(comptime P: type) type {
             if (private_message.epoch != group_state.epoch())
                 return error.EpochMismatch;
 
+            zmls.validateWireFormat(
+                message.wire_format,
+                private_message.content_type,
+                group_state.wire_format_policy,
+            ) catch return error.DecodingFailed;
+
             const sender_data = decryptSenderData(
                 group_state,
                 &private_message,
