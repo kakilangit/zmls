@@ -825,8 +825,12 @@ pub const LeafNode = struct {
             types.max_signature_length,
         );
 
-        const source: LeafNodeSource =
-            if (src_r.lifetime != null) .key_package else if (src_r.parent_hash != null) .commit else .update;
+        const source: LeafNodeSource = if (src_r.lifetime != null)
+            .key_package
+        else if (src_r.parent_hash != null)
+            .commit
+        else
+            .update;
 
         return .{ .value = .{
             .encryption_key = id.encryption_key,

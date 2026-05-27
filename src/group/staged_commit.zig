@@ -650,7 +650,8 @@ test "stageCommit exposes reinit outcome" {
         &cr_add.interim_transcript_hash,
         &cr_add.epoch_secrets.init_secret,
     );
-    defer staged.discard(testing.allocator) catch {};
+    defer staged.discard(testing.allocator) catch |err|
+        @panic(@errorName(err));
 
     try testing.expect(staged.reinitOutcome() != null);
     const out = staged.reinitOutcome().?;

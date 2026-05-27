@@ -203,6 +203,7 @@ pub const max_vec_length: u32 = 1 << 20; // 1 MiB.
 
 /// Per-field decode limits for known-bounded MLS fields.
 pub const max_public_key_length: u32 = 256;
+pub const max_group_id_length: u32 = 255;
 pub const max_signature_length: u32 = 512;
 pub const max_hash_length: u32 = 128;
 pub const max_credential_length: u32 = 1 << 16; // 64 KiB.

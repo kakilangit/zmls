@@ -735,7 +735,7 @@ test "all-zero init_secret rejected as CorruptState" {
     defer gs.deinit();
 
     // Zero the init_secret before serializing.
-    @memset(&gs.epoch_secrets.init_secret, 0);
+    secureZero(u8, &gs.epoch_secrets.init_secret);
 
     const data = try S.serialize(alloc, &gs);
     defer {

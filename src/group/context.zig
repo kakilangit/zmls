@@ -137,7 +137,7 @@ pub fn GroupContext(comptime nh: u32) type {
                 allocator,
                 data,
                 p,
-                types.max_public_key_length,
+                types.max_group_id_length,
             );
             errdefer allocator.free(gid_r.value);
             p = gid_r.pos;
