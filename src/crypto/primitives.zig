@@ -79,7 +79,7 @@ fn buildKdfLabel(
     var pos: u32 = 0;
 
     // uint16 length.
-    pos = codec.encodeUint16(buf, pos, length) catch unreachable;
+    pos = codec.encode_uint16(buf, pos, length) catch unreachable;
 
     // opaque label<V> — "MLS 1.0 " || Label, varint-prefixed.
     const full_label_len: u32 = @intCast(
@@ -94,7 +94,7 @@ fn buildKdfLabel(
     pos += @intCast(label.len);
 
     // opaque context<V>.
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         buf,
         pos,
         context,
@@ -251,7 +251,7 @@ fn buildSignContent(
     pos += @intCast(label.len);
 
     // opaque content<V> = Content
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         buf,
         pos,
         content,
@@ -371,7 +371,7 @@ fn buildEncryptContext(
     pos += @intCast(label.len);
 
     // opaque context<V>.
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         &result.buf,
         pos,
         context,
@@ -400,12 +400,12 @@ pub fn refHash(
     var buf: [65536]u8 = undefined;
     var pos: u32 = 0;
 
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         &buf,
         pos,
         label,
     ) catch unreachable;
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         &buf,
         pos,
         value,

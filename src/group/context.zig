@@ -67,38 +67,38 @@ pub fn GroupContext(comptime nh: u32) type {
             var p = pos;
 
             // ProtocolVersion version (u16).
-            p = try codec.encodeUint16(
+            p = try codec.encode_uint16(
                 buf,
                 p,
                 @intFromEnum(self.version),
             );
 
             // CipherSuite cipher_suite (u16).
-            p = try codec.encodeUint16(
+            p = try codec.encode_uint16(
                 buf,
                 p,
                 @intFromEnum(self.cipher_suite),
             );
 
             // opaque group_id<V>.
-            p = try codec.encodeVarVector(
+            p = try codec.encode_var_vector(
                 buf,
                 p,
                 self.group_id,
             );
 
             // uint64 epoch.
-            p = try codec.encodeUint64(buf, p, self.epoch);
+            p = try codec.encode_uint64(buf, p, self.epoch);
 
             // opaque tree_hash<V>.
-            p = try codec.encodeVarVector(
+            p = try codec.encode_var_vector(
                 buf,
                 p,
                 &self.tree_hash,
             );
 
             // opaque confirmed_transcript_hash<V>.
-            p = try codec.encodeVarVector(
+            p = try codec.encode_var_vector(
                 buf,
                 p,
                 &self.confirmed_transcript_hash,
@@ -125,15 +125,15 @@ pub fn GroupContext(comptime nh: u32) type {
             var p = pos;
 
             // ProtocolVersion (u16).
-            const ver_r = try codec.decodeUint16(data, p);
+            const ver_r = try codec.decode_uint16(data, p);
             p = ver_r.pos;
 
             // CipherSuite (u16).
-            const cs_r = try codec.decodeUint16(data, p);
+            const cs_r = try codec.decode_uint16(data, p);
             p = cs_r.pos;
 
             // group_id<V>.
-            const gid_r = try codec.decodeVarVectorLimited(
+            const gid_r = try codec.decode_var_vector_limited(
                 allocator,
                 data,
                 p,
@@ -143,11 +143,11 @@ pub fn GroupContext(comptime nh: u32) type {
             p = gid_r.pos;
 
             // uint64 epoch.
-            const ep_r = try codec.decodeUint64(data, p);
+            const ep_r = try codec.decode_uint64(data, p);
             p = ep_r.pos;
 
             // tree_hash<V>.
-            const th_r = try codec.decodeVarVectorLimited(
+            const th_r = try codec.decode_var_vector_limited(
                 allocator,
                 data,
                 p,
@@ -157,7 +157,7 @@ pub fn GroupContext(comptime nh: u32) type {
             p = th_r.pos;
 
             // confirmed_transcript_hash<V>.
-            const cth_r = try codec.decodeVarVectorLimited(
+            const cth_r = try codec.decode_var_vector_limited(
                 allocator,
                 data,
                 p,
@@ -287,7 +287,7 @@ fn encodeExtensionList(
     pos: u32,
     items: []const Extension,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         Extension,
         buf,
         pos,

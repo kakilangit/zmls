@@ -247,7 +247,7 @@ test "Proposal makeRef is deterministic" {
 test "Proposal decode accepts unknown/GREASE type" {
     const alloc = testing.allocator;
     var buf: [4]u8 = undefined;
-    _ = try codec.encodeUint16(&buf, 0, 0xFFFF);
+    _ = try codec.encode_uint16(&buf, 0, 0xFFFF);
     var dec_r = try Proposal.decode(alloc, &buf, 0);
     defer dec_r.value.deinit(alloc);
 
@@ -286,7 +286,7 @@ test "Proposal decode rejects GREASE proposal type" {
 
 test "Proposal skipDecode handles unknown type" {
     var buf: [4]u8 = undefined;
-    _ = try codec.encodeUint16(&buf, 0, 0x0A0A);
+    _ = try codec.encode_uint16(&buf, 0, 0x0A0A);
     const p = try Proposal.skipDecode(&buf, 0);
     // Advances past 2-byte tag, zero-length body.
     try testing.expectEqual(@as(u32, 2), p);

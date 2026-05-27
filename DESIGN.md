@@ -170,8 +170,8 @@ zmls/
 |       +-- errors.zig         Unified error set
 |
 +-- tests/
-    +-- integration_test.zig   7 end-to-end protocol tests
-    +-- interop_test.zig       13 tests against RFC 9420 test vectors
+    +-- integration_test.zig   End-to-end protocol flows
+    +-- interop_test.zig       RFC 9420 test vectors
     +-- fuzz_codec.zig         Fuzz: codec decode
     +-- fuzz_tree.zig          Fuzz: tree operations
     +-- fuzz_proposals.zig     Fuzz: proposal validation
@@ -519,10 +519,10 @@ provider interface to support incremental updates.
 
 ### Testing
 
-- 289 unit tests (in-file `test` blocks).
-- 23 integration tests (end-to-end protocol flows).
-- 35 interop tests against RFC 9420 official test vectors.
-- 4 fuzz target files (codec, tree, proposals, messages).
+- Unit tests (in-file `test` blocks).
+- Integration tests (end-to-end protocol flows).
+- Interop tests against RFC 9420 official test vectors.
+- Fuzz targets (codec, tree, proposals, messages).
 - Zero external test dependencies.
 
 

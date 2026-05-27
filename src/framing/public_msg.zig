@@ -84,7 +84,7 @@ pub fn PublicMessage(comptime P: type) type {
             if (self.content.sender.sender_type == .member) {
                 const tag = self.membership_tag orelse
                     return error.InvalidMembershipTagLength;
-                p = try codec.encodeVarVector(
+                p = try codec.encode_var_vector(
                     buf,
                     p,
                     &tag,
@@ -117,7 +117,7 @@ pub fn PublicMessage(comptime P: type) type {
             // RFC 9420 Section 6.2).
             var tag: ?[P.nh]u8 = null;
             if (fc.value.sender.sender_type == .member) {
-                const tag_data = try codec.decodeVarVectorSlice(
+                const tag_data = try codec.decode_var_vector_slice(
                     buf,
                     p,
                 );

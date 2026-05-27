@@ -1002,11 +1002,11 @@ pub fn parseRequiredCapabilities(
 ) DecodeError!RequiredCapabilities {
     var pos: u32 = 0;
 
-    const ext_r = try codec.decodeVarVectorSlice(data, pos);
+    const ext_r = try codec.decode_var_vector_slice(data, pos);
     pos = ext_r.pos;
-    const prop_r = try codec.decodeVarVectorSlice(data, pos);
+    const prop_r = try codec.decode_var_vector_slice(data, pos);
     pos = prop_r.pos;
-    const cred_r = try codec.decodeVarVectorSlice(data, pos);
+    const cred_r = try codec.decode_var_vector_slice(data, pos);
 
     return .{
         .extension_types = ext_r.value,

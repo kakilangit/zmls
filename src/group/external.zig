@@ -356,14 +356,7 @@ fn ExternalSetupResult(comptime P: type) type {
         new_tree: RatchetTree,
         joiner_leaf: LeafIndex,
         init_secret: [P.nh]u8,
-        ext_init_proposal: Proposal,
         kem_output_buf: [P.npk]u8,
-
-        /// Fix kem_output pointer after struct relocation.
-        fn fixPointers(self: *@This()) void {
-            self.ext_init_proposal.payload
-                .external_init.kem_output = &self.kem_output_buf;
-        }
     };
 }
 
@@ -383,7 +376,6 @@ fn setupExternalTree(
         &result.kem_output_buf,
     );
     result.init_secret = ext_init.init_secret;
-    result.ext_init_proposal = ext_init.proposal;
 
     var new_tree = try tree.clone();
     errdefer new_tree.deinit();
@@ -688,9 +680,16 @@ pub fn createExternalCommit(
         gi_extensions,
         &params,
     );
-    setup.fixPointers();
     errdefer setup.new_tree.deinit();
     defer secureZero(&setup.init_secret);
+    const ext_init_proposal = Proposal{
+        .tag = .external_init,
+        .payload = .{
+            .external_init = ExternalInit{
+                .kem_output = &setup.kem_output_buf,
+            },
+        },
+    };
 
     // 4-9. Path, encode, sign, confirmed transcript hash.
     var bc = try buildExternalCommitContent(
@@ -698,7 +697,7 @@ pub fn createExternalCommit(
         allocator,
         &setup.new_tree,
         setup.joiner_leaf,
-        setup.ext_init_proposal,
+        ext_init_proposal,
         &params,
         group_context,
         interim_transcript_hash,

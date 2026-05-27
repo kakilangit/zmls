@@ -63,7 +63,7 @@ pub const GroupInfo = struct {
         );
 
         // opaque signature<V>.
-        p = try codec.encodeVarVector(buf, p, self.signature);
+        p = try codec.encode_var_vector(buf, p, self.signature);
 
         return p;
     }
@@ -122,7 +122,7 @@ pub const GroupInfo = struct {
         p = ext_r.pos;
 
         // opaque confirmation_tag<V>.
-        const ct_r = try codec.decodeVarVectorLimited(
+        const ct_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
@@ -131,11 +131,11 @@ pub const GroupInfo = struct {
         p = ct_r.pos;
 
         // uint32 signer.
-        const s_r = try codec.decodeUint32(data, p);
+        const s_r = try codec.decode_uint32(data, p);
         p = s_r.pos;
 
         // opaque signature<V>.
-        const sig_r = try codec.decodeVarVectorLimited(
+        const sig_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
@@ -352,10 +352,10 @@ fn encodeTbs(
     p = try encodeExtensionList(buf, p, extensions);
 
     // opaque confirmation_tag<V>.
-    p = try codec.encodeVarVector(buf, p, confirmation_tag);
+    p = try codec.encode_var_vector(buf, p, confirmation_tag);
 
     // uint32 signer.
-    p = try codec.encodeUint32(buf, p, signer);
+    p = try codec.encode_uint32(buf, p, signer);
 
     return p;
 }
@@ -367,7 +367,7 @@ fn encodeExtensionList(
     pos: u32,
     items: []const Extension,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         Extension,
         buf,
         pos,
@@ -464,20 +464,20 @@ fn skipGroupContext(
     p += 4;
 
     // opaque group_id<V>.
-    p = try codec.skipVarVector(data, p);
+    p = try codec.skip_var_vector(data, p);
 
     // uint64 epoch.
     if (p + 8 > data.len) return error.Truncated;
     p += 8;
 
     // opaque tree_hash<V>.
-    p = try codec.skipVarVector(data, p);
+    p = try codec.skip_var_vector(data, p);
 
     // opaque confirmed_transcript_hash<V>.
-    p = try codec.skipVarVector(data, p);
+    p = try codec.skip_var_vector(data, p);
 
     // Extension extensions<V>.
-    p = try codec.skipVarVector(data, p);
+    p = try codec.skip_var_vector(data, p);
 
     return p;
 }

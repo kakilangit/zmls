@@ -70,7 +70,7 @@ pub fn updateInterimTranscriptHash(
     //   struct { opaque confirmation_tag<V>; }
     // 512B: confirmation_tag is bounded by P.nh (<=64).
     var input_buf: [512]u8 = undefined;
-    const pos = try codec.encodeVarVector(
+    const pos = try codec.encode_var_vector(
         &input_buf,
         0,
         confirmation_tag,

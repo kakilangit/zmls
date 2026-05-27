@@ -92,28 +92,28 @@ pub const PreSharedKeyId = struct {
         var p = pos;
 
         // PSKType (u8).
-        p = try codec.encodeUint8(buf, p, @intFromEnum(self.psk_type));
+        p = try codec.encode_uint8(buf, p, @intFromEnum(self.psk_type));
 
         switch (self.psk_type) {
             .external => {
-                p = try codec.encodeVarVector(
+                p = try codec.encode_var_vector(
                     buf,
                     p,
                     self.external_psk_id,
                 );
             },
             .resumption => {
-                p = try codec.encodeUint8(
+                p = try codec.encode_uint8(
                     buf,
                     p,
                     @intFromEnum(self.resumption_usage),
                 );
-                p = try codec.encodeVarVector(
+                p = try codec.encode_var_vector(
                     buf,
                     p,
                     self.resumption_group_id,
                 );
-                p = try codec.encodeUint64(
+                p = try codec.encode_uint64(
                     buf,
                     p,
                     self.resumption_epoch,
@@ -123,7 +123,7 @@ pub const PreSharedKeyId = struct {
         }
 
         // psk_nonce<V>.
-        p = try codec.encodeVarVector(buf, p, self.psk_nonce);
+        p = try codec.encode_var_vector(buf, p, self.psk_nonce);
 
         return p;
     }
@@ -137,7 +137,7 @@ pub const PreSharedKeyId = struct {
         var p = pos;
 
         // PSKType (u8).
-        const pt_r = try codec.decodeUint8(data, p);
+        const pt_r = try codec.decode_uint8(data, p);
         const psk_type: PskType = @enumFromInt(pt_r.value);
         p = pt_r.pos;
 
@@ -152,7 +152,7 @@ pub const PreSharedKeyId = struct {
 
         switch (psk_type) {
             .external => {
-                const id_r = try codec.decodeVarVectorSlice(
+                const id_r = try codec.decode_var_vector_slice(
                     data,
                     p,
                 );
@@ -160,18 +160,18 @@ pub const PreSharedKeyId = struct {
                 p = id_r.pos;
             },
             .resumption => {
-                const usage_r = try codec.decodeUint8(data, p);
+                const usage_r = try codec.decode_uint8(data, p);
                 result.resumption_usage = @enumFromInt(
                     usage_r.value,
                 );
                 p = usage_r.pos;
-                const gid_r = try codec.decodeVarVectorSlice(
+                const gid_r = try codec.decode_var_vector_slice(
                     data,
                     p,
                 );
                 result.resumption_group_id = gid_r.value;
                 p = gid_r.pos;
-                const ep_r = try codec.decodeUint64(data, p);
+                const ep_r = try codec.decode_uint64(data, p);
                 result.resumption_epoch = ep_r.value;
                 p = ep_r.pos;
             },
@@ -179,7 +179,7 @@ pub const PreSharedKeyId = struct {
         }
 
         // psk_nonce<V>.
-        const nonce_r = try codec.decodeVarVectorSlice(
+        const nonce_r = try codec.decode_var_vector_slice(
             data,
             p,
         );
@@ -238,12 +238,12 @@ pub fn derivePskSecret(
 
         pos = psk.id.encode(&label_buf, pos) catch
             return error.InvalidKeyPackage;
-        pos = codec.encodeUint16(
+        pos = codec.encode_uint16(
             &label_buf,
             pos,
             @intCast(idx),
         ) catch return error.InvalidKeyPackage;
-        pos = codec.encodeUint16(
+        pos = codec.encode_uint16(
             &label_buf,
             pos,
             count,

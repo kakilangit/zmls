@@ -62,8 +62,8 @@ pub const SenderData = struct {
         pos: u32,
     ) EncodeError!u32 {
         var p = pos;
-        p = try codec.encodeUint32(buf, p, self.leaf_index);
-        p = try codec.encodeUint32(buf, p, self.generation);
+        p = try codec.encode_uint32(buf, p, self.leaf_index);
+        p = try codec.encode_uint32(buf, p, self.generation);
         if (p + 4 > buf.len) return error.BufferTooSmall;
         @memcpy(buf[p..][0..4], &self.reuse_guard);
         return p + 4;
@@ -74,9 +74,9 @@ pub const SenderData = struct {
         pos: u32,
     ) DecodeError!struct { value: SenderData, pos: u32 } {
         var p = pos;
-        const li = try codec.decodeUint32(buf, p);
+        const li = try codec.decode_uint32(buf, p);
         p = li.pos;
-        const gen = try codec.decodeUint32(buf, p);
+        const gen = try codec.decode_uint32(buf, p);
         p = gen.pos;
         if (p + 4 > buf.len) return error.Truncated;
         var rg: [4]u8 = undefined;
@@ -110,28 +110,28 @@ pub const PrivateMessage = struct {
         pos: u32,
     ) EncodeError!u32 {
         var p = pos;
-        p = try codec.encodeVarVector(
+        p = try codec.encode_var_vector(
             buf,
             p,
             self.group_id,
         );
-        p = try codec.encodeUint64(buf, p, self.epoch);
-        p = try codec.encodeUint8(
+        p = try codec.encode_uint64(buf, p, self.epoch);
+        p = try codec.encode_uint8(
             buf,
             p,
             @intFromEnum(self.content_type),
         );
-        p = try codec.encodeVarVector(
+        p = try codec.encode_var_vector(
             buf,
             p,
             self.authenticated_data,
         );
-        p = try codec.encodeVarVector(
+        p = try codec.encode_var_vector(
             buf,
             p,
             self.encrypted_sender_data,
         );
-        p = try codec.encodeVarVector(
+        p = try codec.encode_var_vector(
             buf,
             p,
             self.ciphertext,
@@ -145,17 +145,17 @@ pub const PrivateMessage = struct {
         pos: u32,
     ) DecodeError!struct { value: PrivateMessage, pos: u32 } {
         var p = pos;
-        const gid = try codec.decodeVarVectorSlice(buf, p);
+        const gid = try codec.decode_var_vector_slice(buf, p);
         p = gid.pos;
-        const ep = try codec.decodeUint64(buf, p);
+        const ep = try codec.decode_uint64(buf, p);
         p = ep.pos;
-        const ct = try codec.decodeUint8(buf, p);
+        const ct = try codec.decode_uint8(buf, p);
         p = ct.pos;
-        const ad = try codec.decodeVarVectorSlice(buf, p);
+        const ad = try codec.decode_var_vector_slice(buf, p);
         p = ad.pos;
-        const esd = try codec.decodeVarVectorSlice(buf, p);
+        const esd = try codec.decode_var_vector_slice(buf, p);
         p = esd.pos;
-        const ciph = try codec.decodeVarVectorSlice(buf, p);
+        const ciph = try codec.decode_var_vector_slice(buf, p);
         p = ciph.pos;
 
         return .{
@@ -221,9 +221,9 @@ pub fn buildSenderDataAad(
     content_type: ContentType,
 ) EncodeError!u32 {
     var p: u32 = 0;
-    p = try codec.encodeVarVector(buf, p, group_id);
-    p = try codec.encodeUint64(buf, p, epoch);
-    p = try codec.encodeUint8(buf, p, @intFromEnum(content_type));
+    p = try codec.encode_var_vector(buf, p, group_id);
+    p = try codec.encode_uint64(buf, p, epoch);
+    p = try codec.encode_uint8(buf, p, @intFromEnum(content_type));
     return p;
 }
 
@@ -364,10 +364,10 @@ pub fn buildPrivateContentAad(
     authenticated_data: []const u8,
 ) EncodeError!u32 {
     var p: u32 = 0;
-    p = try codec.encodeVarVector(buf, p, group_id);
-    p = try codec.encodeUint64(buf, p, epoch);
-    p = try codec.encodeUint8(buf, p, @intFromEnum(content_type));
-    p = try codec.encodeVarVector(buf, p, authenticated_data);
+    p = try codec.encode_var_vector(buf, p, group_id);
+    p = try codec.encode_uint64(buf, p, epoch);
+    p = try codec.encode_uint8(buf, p, @intFromEnum(content_type));
+    p = try codec.encode_var_vector(buf, p, authenticated_data);
     return p;
 }
 
@@ -416,7 +416,7 @@ pub fn encodePrivateMessageContent(
     // raw bytes for proposal/commit.
     switch (content_type) {
         .application => {
-            p = try codec.encodeVarVector(buf, p, content);
+            p = try codec.encode_var_vector(buf, p, content);
         },
         .proposal, .commit => {
             const clen: u32 = @intCast(content.len);
@@ -468,7 +468,7 @@ pub fn decodePrivateMessageContent(
     var p: u32 = 0;
     switch (content_type) {
         .application => {
-            const cv = try codec.decodeVarVectorSlice(
+            const cv = try codec.decode_var_vector_slice(
                 plaintext,
                 0,
             );

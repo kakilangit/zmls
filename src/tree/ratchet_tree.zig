@@ -412,7 +412,7 @@ pub fn decodeRatchetTree(
     var node_count: u32 = 0;
     while (pos < end) {
         if (node_count >= max_nodes_decode) return error.VectorTooLarge;
-        const presence = try codec.decodeUint8(data, pos);
+        const presence = try codec.decode_uint8(data, pos);
         pos = presence.pos;
         if (presence.value == 1) {
             const nr = try Node.decode(allocator, data, pos);
@@ -470,10 +470,10 @@ pub fn encodeRatchetTree(
     ni = 0;
     while (ni < trim_width) : (ni += 1) {
         if (tree.nodes[ni]) |*n| {
-            pos = try codec.encodeUint8(out, pos, 1);
+            pos = try codec.encode_uint8(out, pos, 1);
             pos = try n.encode(out, pos);
         } else {
-            pos = try codec.encodeUint8(out, pos, 0);
+            pos = try codec.encode_uint8(out, pos, 0);
         }
     }
     std.debug.assert(pos == total);

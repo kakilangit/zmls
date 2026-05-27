@@ -155,16 +155,16 @@ pub fn Serializer(comptime P: type) type {
             if (p + 4 > buf.len) return error.BufferTooSmall;
             @memcpy(buf[p..][0..4], &magic);
             p += 4;
-            p = try codec.encodeUint8(buf, p, format_version);
-            p = try codec.encodeUint8(buf, p, @intCast(P.nh));
-            p = try codec.encodeUint8(buf, p, @intCast(P.nk));
-            p = try codec.encodeUint8(buf, p, @intCast(P.nn));
-            p = try codec.encodeUint8(
+            p = try codec.encode_uint8(buf, p, format_version);
+            p = try codec.encode_uint8(buf, p, @intCast(P.nh));
+            p = try codec.encode_uint8(buf, p, @intCast(P.nk));
+            p = try codec.encode_uint8(buf, p, @intCast(P.nn));
+            p = try codec.encode_uint8(
                 buf,
                 p,
                 @intFromEnum(gs.wire_format_policy),
             );
-            p = try codec.encodeUint32(
+            p = try codec.encode_uint32(
                 buf,
                 p,
                 gs.my_leaf_index.toU32(),
@@ -235,7 +235,7 @@ pub fn Serializer(comptime P: type) type {
             pos: u32,
             gs: *const GS,
         ) EncodeError!u32 {
-            var p = try codec.encodeUint32(
+            var p = try codec.encode_uint32(
                 buf,
                 pos,
                 gs.tree.leaf_count,
@@ -256,14 +256,14 @@ pub fn Serializer(comptime P: type) type {
             maybe_node: ?Node,
         ) EncodeError!u32 {
             const node = maybe_node orelse {
-                return codec.encodeUint8(buf, pos, 0);
+                return codec.encode_uint8(buf, pos, 0);
             };
             var p = pos;
             const tag: u8 = switch (node.node_type) {
                 .leaf => 1,
                 .parent => 2,
             };
-            p = try codec.encodeUint8(buf, p, tag);
+            p = try codec.encode_uint8(buf, p, tag);
             var tmp: [max_node_encode]u8 = undefined;
             const n_end = try node.encode(&tmp, 0);
             p = try varintPrefixedCopy(
@@ -301,22 +301,22 @@ pub fn Serializer(comptime P: type) type {
                 return error.InvalidEnumValue;
             }
             p += 4;
-            const ver = try codec.decodeUint8(data, p);
+            const ver = try codec.decode_uint8(data, p);
             if (ver.value != format_version) {
                 return error.InvalidEnumValue;
             }
             p = ver.pos;
-            const nh_r = try codec.decodeUint8(data, p);
+            const nh_r = try codec.decode_uint8(data, p);
             if (nh_r.value != P.nh) {
                 return error.InvalidEnumValue;
             }
             p = nh_r.pos;
-            const nk_r = try codec.decodeUint8(data, p);
+            const nk_r = try codec.decode_uint8(data, p);
             if (nk_r.value != P.nk) {
                 return error.InvalidEnumValue;
             }
             p = nk_r.pos;
-            const nn_r = try codec.decodeUint8(data, p);
+            const nn_r = try codec.decode_uint8(data, p);
             if (nn_r.value != P.nn) {
                 return error.InvalidEnumValue;
             }
@@ -333,8 +333,8 @@ pub fn Serializer(comptime P: type) type {
             data: []const u8,
             pos: u32,
         ) DecodeError!FieldHeader {
-            const wfp_r = try codec.decodeUint8(data, pos);
-            const li_r = try codec.decodeUint32(
+            const wfp_r = try codec.decode_uint8(data, pos);
+            const li_r = try codec.decode_uint32(
                 data,
                 wfp_r.pos,
             );
@@ -441,7 +441,7 @@ pub fn Serializer(comptime P: type) type {
             value: RatchetTree,
             pos: u32,
         } {
-            const lc_r = try codec.decodeUint32(data, pos);
+            const lc_r = try codec.decode_uint32(data, pos);
             const leaf_count = lc_r.value;
             var p = lc_r.pos;
             var tree = try RatchetTree.init(
@@ -468,7 +468,7 @@ pub fn Serializer(comptime P: type) type {
             value: ?Node,
             pos: u32,
         } {
-            const tag_r = try codec.decodeUint8(data, pos);
+            const tag_r = try codec.decode_uint8(data, pos);
             if (tag_r.value == 0) {
                 return .{ .value = null, .pos = tag_r.pos };
             }

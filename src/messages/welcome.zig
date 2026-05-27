@@ -70,7 +70,7 @@ pub const GroupSecrets = struct {
         var p = pos;
 
         // opaque joiner_secret<V>.
-        p = try codec.encodeVarVector(
+        p = try codec.encode_var_vector(
             buf,
             p,
             self.joiner_secret,
@@ -78,10 +78,10 @@ pub const GroupSecrets = struct {
 
         // optional<PathSecret> path_secret.
         if (self.path_secret) |ps| {
-            p = try codec.encodeUint8(buf, p, 1);
-            p = try codec.encodeVarVector(buf, p, ps);
+            p = try codec.encode_uint8(buf, p, 1);
+            p = try codec.encode_var_vector(buf, p, ps);
         } else {
-            p = try codec.encodeUint8(buf, p, 0);
+            p = try codec.encode_uint8(buf, p, 0);
         }
 
         // PreSharedKeyID psks<V> — varint-prefixed list.
@@ -101,7 +101,7 @@ pub const GroupSecrets = struct {
         var p = pos;
 
         // joiner_secret<V>.
-        const js_r = try codec.decodeVarVectorLimited(
+        const js_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
@@ -110,12 +110,12 @@ pub const GroupSecrets = struct {
         p = js_r.pos;
 
         // optional<PathSecret>.
-        const opt_r = try codec.decodeUint8(data, p);
+        const opt_r = try codec.decode_uint8(data, p);
         p = opt_r.pos;
 
         var path_secret: ?[]const u8 = null;
         if (opt_r.value == 1) {
-            const ps_r = try codec.decodeVarVectorLimited(
+            const ps_r = try codec.decode_var_vector_limited(
                 allocator,
                 data,
                 p,
@@ -182,7 +182,7 @@ pub const EncryptedGroupSecrets = struct {
         var p = pos;
 
         // opaque new_member<V> (KeyPackageRef).
-        p = try codec.encodeVarVector(
+        p = try codec.encode_var_vector(
             buf,
             p,
             self.new_member,
@@ -202,7 +202,7 @@ pub const EncryptedGroupSecrets = struct {
         value: EncryptedGroupSecrets,
         pos: u32,
     } {
-        const nm_r = try codec.decodeVarVectorLimited(
+        const nm_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             pos,
@@ -257,7 +257,7 @@ pub const Welcome = struct {
         var p = pos;
 
         // CipherSuite cipher_suite (u16).
-        p = try codec.encodeUint16(
+        p = try codec.encode_uint16(
             buf,
             p,
             @intFromEnum(self.cipher_suite),
@@ -271,7 +271,7 @@ pub const Welcome = struct {
         );
 
         // opaque encrypted_group_info<V>.
-        p = try codec.encodeVarVector(
+        p = try codec.encode_var_vector(
             buf,
             p,
             self.encrypted_group_info,
@@ -291,7 +291,7 @@ pub const Welcome = struct {
         var p = pos;
 
         // CipherSuite (u16).
-        const cs_r = try codec.decodeUint16(data, p);
+        const cs_r = try codec.decode_uint16(data, p);
         p = cs_r.pos;
 
         // EncryptedGroupSecrets secrets<V>.
@@ -303,7 +303,7 @@ pub const Welcome = struct {
         p = sec_r.pos;
 
         // opaque encrypted_group_info<V>.
-        const egi_r = try codec.decodeVarVector(
+        const egi_r = try codec.decode_var_vector(
             allocator,
             data,
             p,
@@ -462,7 +462,7 @@ fn encodePskIdList(
     pos: u32,
     items: []const PreSharedKeyId,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         PreSharedKeyId,
         buf,
         pos,
@@ -516,7 +516,7 @@ fn encodeEncryptedSecretsList(
     pos: u32,
     items: []const EncryptedGroupSecrets,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         EncryptedGroupSecrets,
         buf,
         pos,

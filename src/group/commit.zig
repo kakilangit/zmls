@@ -1345,7 +1345,7 @@ pub fn buildConfirmedHash(
     var pos: u32 = 0;
 
     // WireFormat (u16).
-    pos = codec.encodeUint16(
+    pos = codec.encode_uint16(
         &input_buf,
         pos,
         @intFromEnum(wire_format),
@@ -1358,7 +1358,7 @@ pub fn buildConfirmedHash(
     ) catch return error.IndexOutOfRange;
 
     // opaque signature<V>.
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         &input_buf,
         pos,
         signature,

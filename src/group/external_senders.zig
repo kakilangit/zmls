@@ -127,7 +127,7 @@ pub fn parseExternalSenders(
         }
 
         // Decode signature_key<V> (zero-copy slice).
-        const sig_r = try codec.decodeVarVectorSlice(
+        const sig_r = try codec.decode_var_vector_slice(
             data,
             pos,
         );
@@ -183,14 +183,14 @@ fn decodeCredentialSlice(
     pos: u32,
     cert_buf: []Certificate,
 ) DecodeError!struct { value: Credential, pos: u32, cert_count: u32 } {
-    const type_r = try codec.decodeUint16(data, pos);
+    const type_r = try codec.decode_uint16(data, pos);
     const cred_type: types.CredentialType = @enumFromInt(
         type_r.value,
     );
 
     switch (cred_type) {
         .basic => {
-            const id_r = try codec.decodeVarVectorSlice(
+            const id_r = try codec.decode_var_vector_slice(
                 data,
                 type_r.pos,
             );
@@ -252,7 +252,7 @@ fn decodeCertChainSlice(
             return error.VectorTooLarge;
         }
         // Each certificate is: opaque cert_data<V>
-        const cert_r = try codec.decodeVarVectorSlice(
+        const cert_r = try codec.decode_var_vector_slice(
             data,
             p,
         );
@@ -376,7 +376,7 @@ pub fn encodeExternalSender(
     buf: []u8,
     pos: u32,
 ) EncodeError!u32 {
-    var p = try codec.encodeVarVector(
+    var p = try codec.encode_var_vector(
         buf,
         pos,
         sender.signature_key,
@@ -472,15 +472,15 @@ test "parseExternalSenders single basic entry" {
     var p: u32 = 0;
 
     // signature_key<V> = "sig-key-1"
-    p = try codec.encodeVarVector(
+    p = try codec.encode_var_vector(
         &inner_buf,
         p,
         "sig-key-1",
     );
 
     // Credential: basic type (u16 = 1) + identity<V> = "alice"
-    p = try codec.encodeUint16(&inner_buf, p, 1); // basic
-    p = try codec.encodeVarVector(&inner_buf, p, "alice");
+    p = try codec.encode_uint16(&inner_buf, p, 1); // basic
+    p = try codec.encode_var_vector(&inner_buf, p, "alice");
 
     // Now wrap in outer varint length.
     const inner_len = p;
