@@ -2650,10 +2650,11 @@ pub fn Client(comptime P: type) type {
             group_id: []const u8,
             wire_bytes: []const u8,
         ) ProcessIncomingError!ProcessingResult {
-            const decoded = decodePublicProposal(
+            var decoded = decodePublicProposal(
                 allocator,
                 wire_bytes,
             ) catch return error.WireDecodeFailed;
+            defer decoded.proposal.deinit(allocator);
 
             // Load group state for cryptographic verification.
             var bundle = try self.loadBundle(io, group_id);
