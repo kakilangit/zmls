@@ -357,6 +357,7 @@ test "encryptContent/decryptContent round-trip (application)" {
         default_padding_block,
         &key,
         &nonce,
+        &[_]u8{ 0, 0, 0, 0 },
         aad_buf[0..aad_len],
         &ct_buf,
     );
@@ -419,6 +420,7 @@ test "encryptContent/decryptContent round-trip (commit)" {
         default_padding_block,
         &key,
         &nonce,
+        &[_]u8{ 0, 0, 0, 0 },
         aad_buf[0..aad_len],
         &ct_buf,
     );
@@ -476,6 +478,7 @@ test "decryptContent rejects wrong key" {
         0,
         &key1,
         &nonce,
+        &[_]u8{ 0, 0, 0, 0 },
         aad_buf[0..aad_len],
         &ct_buf,
     );
@@ -521,6 +524,7 @@ test "encryptContent with no padding" {
         0, // padding_block = 0 → no padding
         &key,
         &nonce,
+        &[_]u8{ 0, 0, 0, 0 },
         aad_buf[0..aad_len],
         &ct_buf,
     );

@@ -308,6 +308,7 @@ pub fn GroupState(comptime P: type) type {
                 opts.padding_block,
                 opts.key,
                 opts.nonce,
+                opts.reuse_guard,
                 opts.aad,
                 out,
             );

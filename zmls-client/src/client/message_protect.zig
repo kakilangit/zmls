@@ -90,12 +90,6 @@ pub fn MessageProtect(comptime P: type) type {
             ) catch return error.KeyExhausted;
             defer key_nonce.zeroize();
 
-            zmls.private_msg.applyReuseGuard(
-                P,
-                &key_nonce.nonce,
-                reuse_guard,
-            );
-
             // Encrypt content into stack buffer.
             var ciphertext_buffer: [wire_buffer_max]u8 =
                 undefined;
@@ -105,6 +99,7 @@ pub fn MessageProtect(comptime P: type) type {
                 &auth,
                 padding_block,
                 &key_nonce,
+                reuse_guard,
                 authenticated_data,
                 &ciphertext_buffer,
             ) catch return error.EncodingFailed;
@@ -166,6 +161,7 @@ pub fn MessageProtect(comptime P: type) type {
             auth: *const Auth,
             padding_block: u32,
             key_nonce: *const KN,
+            reuse_guard: *const [4]u8,
             authenticated_data: []const u8,
             output: *[wire_buffer_max]u8,
         ) !u32 {
@@ -188,6 +184,7 @@ pub fn MessageProtect(comptime P: type) type {
                 padding_block,
                 &key_nonce.key,
                 &key_nonce.nonce,
+                reuse_guard,
                 aad_buffer[0..aad_length],
                 output,
             );

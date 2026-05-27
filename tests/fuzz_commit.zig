@@ -222,6 +222,7 @@ fn fuzzPrivateMessageRoundTrip(
         0,
         &key,
         &nonce,
+        &[_]u8{ 0, 0, 0, 0 },
         aad,
         &ct_buf,
     ) catch return;
