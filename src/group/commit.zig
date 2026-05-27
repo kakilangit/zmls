@@ -453,6 +453,15 @@ pub fn createCommit(
         &apply_result,
         group_context,
     );
+    evolution.validateGceRequiredCapabilities(
+        &new_tree,
+        new_extensions,
+    ) catch |e| switch (e) {
+        error.InvalidLeafNode => return error.InvalidLeafNode,
+        error.UnsupportedCapability,
+        => return error.UnsupportedCapability,
+        else => return error.InvalidProposalList,
+    };
 
     // Generate UpdatePath if needed. leaf_sig must outlive
     // new_tree because the tree leaf points into it.
@@ -633,6 +642,15 @@ pub fn processCommit(
         new_tree.leaf_count > 1) return error.MissingPath;
     // 8. Process UpdatePath if present.
     const new_ext = resolveExtensions(&apply_result, group_context);
+    evolution.validateGceRequiredCapabilities(
+        &new_tree,
+        new_ext,
+    ) catch |e| switch (e) {
+        error.InvalidLeafNode => return error.InvalidLeafNode,
+        error.UnsupportedCapability,
+        => return error.UnsupportedCapability,
+        else => return error.InvalidProposalList,
+    };
     var path_out = processUpdatePath(
         P,
         allocator,

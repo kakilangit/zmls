@@ -1093,6 +1093,30 @@ pub fn validateUpdatesRequiredCapabilities(
     }
 }
 
+/// Validate that all non-blank leaves in the tree satisfy the
+/// required_capabilities extension present in GroupContext
+/// extensions (if any).
+pub fn validateGceRequiredCapabilities(
+    tree: *const RatchetTree,
+    group_extensions: []const Extension,
+) (ValidationError || DecodeError)!void {
+    const req = try findRequiredCapabilities(
+        group_extensions,
+    ) orelse return;
+
+    var li: u32 = 0;
+    while (li < tree.leaf_count) : (li += 1) {
+        const idx = LeafIndex.fromU32(li).toNodeIndex().toUsize();
+        if (idx >= tree.nodes.len) continue;
+        const node = tree.nodes[idx] orelse continue;
+        if (node.node_type != .leaf) continue;
+        try validateLeafMeetsRequired(
+            &node.payload.leaf.capabilities,
+            &req,
+        );
+    }
+}
+
 // -- validateNonDefaultProposalCaps -------------------------------------------
 
 /// RFC 9420 S12.2: Non-default proposal types (tag > 7) must
