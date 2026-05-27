@@ -26,6 +26,9 @@ const Default = @import(
 const Credential = @import(
     "../credential/credential.zig",
 ).Credential;
+const CredentialValidator = @import(
+    "../credential/validator.zig",
+).CredentialValidator;
 const KeyPackage = @import(
     "../messages/key_package.zig",
 ).KeyPackage;
@@ -46,6 +49,7 @@ const max_gc_encode = context_mod.max_gc_encode;
 const GroupState = state_mod.GroupState;
 const createGroup = state_mod.createGroup;
 const createCommit = commit.createCommit;
+const createCommitWithValidator = commit.createCommitWithValidator;
 const processCommit = commit.processCommit;
 const CommitResult = commit.CommitResult;
 const ProcessResult = commit.ProcessResult;
@@ -296,6 +300,57 @@ test "createCommit with Add proposal advances epoch" {
         @as(u32, 1),
         result.apply_result.added_count,
     );
+}
+
+test "createCommitWithValidator rejects invalid Add credential" {
+    const RejectAll = struct {
+        fn check(
+            _: *const anyopaque,
+            _: *const Credential,
+        ) errors.ValidationError!void {
+            return error.InvalidCredential;
+        }
+        fn validator() CredentialValidator {
+            return .{
+                .context = undefined,
+                .validate_fn = &check,
+            };
+        }
+    };
+
+    const alloc = testing.allocator;
+    var tg: TestGroup = undefined;
+    try tg.init(alloc);
+    defer tg.deinit();
+
+    var bob_kp: TestKP = undefined;
+    try bob_kp.init(0xB0, 0xB1, 0xB2);
+    const add_prop = Proposal{
+        .tag = .add,
+        .payload = .{
+            .add = .{
+                .key_package = bob_kp.kp,
+            },
+        },
+    };
+    const proposals = [_]Proposal{add_prop};
+
+    const result = createCommitWithValidator(
+        Default,
+        testing.allocator,
+        &tg.gs.group_context,
+        &tg.gs.tree,
+        tg.gs.my_leaf_index,
+        &proposals,
+        &tg.sign_sk,
+        &tg.gs.interim_transcript_hash,
+        &tg.gs.epoch_secrets.init_secret,
+        null,
+        null,
+        RejectAll.validator(),
+        .mls_public_message,
+    );
+    try testing.expectError(error.InvalidCredential, result);
 }
 
 test "createCommit produces non-zero confirmation tag" {
