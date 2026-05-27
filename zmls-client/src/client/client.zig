@@ -2129,7 +2129,7 @@ pub fn Client(comptime P: type) type {
             self: *Self,
             io: Io,
             key_package: *const KeyPackage,
-        ) KS.Error!void {
+        ) (KS.Error || error{KeyPackageAlreadyUsed})!void {
             if (key_package.isLastResort()) return;
             const kp_ref = key_package.makeRef(P) catch
                 return error.StorageFault;

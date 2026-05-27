@@ -1151,7 +1151,7 @@ fn writeTreeFile(
     ni = 0;
     while (ni < width) : (ni += 1) {
         if (tree.nodes[ni]) |*n| {
-            pos = zmls.codec.encodeUint8(
+            pos = zmls.codec.encode_uint8(
                 &buf,
                 pos,
                 1,
@@ -1161,7 +1161,7 @@ fn writeTreeFile(
                 pos,
             ) catch return error.InvalidArguments;
         } else {
-            pos = zmls.codec.encodeUint8(
+            pos = zmls.codec.encode_uint8(
                 &buf,
                 pos,
                 0,
@@ -1197,7 +1197,7 @@ fn loadTreeFile(
 
     while (pos < end) {
         if (node_count >= max_nodes) return null;
-        const presence = zmls.codec.decodeUint8(
+        const presence = zmls.codec.decode_uint8(
             data,
             pos,
         ) catch return null;
