@@ -573,7 +573,7 @@ test "crypto basics: DeriveTreeSecret (cipher suite 1)" {
 
         // Encode generation as 4-byte big-endian context.
         var gen_buf: [4]u8 = undefined;
-        _ = codec.encodeUint32(&gen_buf, 0, generation) catch
+        _ = codec.encode_uint32(&gen_buf, 0, generation) catch
             unreachable;
 
         const out = try testing.allocator.alloc(u8, length);
@@ -2002,7 +2002,7 @@ fn decodeRatchetTree(
 
     while (pos < end) {
         if (node_count >= max_nodes) return error.Truncated;
-        const presence = try codec.decodeUint8(data, pos);
+        const presence = try codec.decode_uint8(data, pos);
         pos = presence.pos;
         if (presence.value == 1) {
             const nr = try Node.decode(
@@ -2075,10 +2075,10 @@ fn encodeRatchetTree(
     ni = 0;
     while (ni < trim_width) : (ni += 1) {
         if (tree.nodes[ni]) |*n| {
-            pos = try codec.encodeUint8(out, pos, 1);
+            pos = try codec.encode_uint8(out, pos, 1);
             pos = try n.encode(out, pos);
         } else {
-            pos = try codec.encodeUint8(out, pos, 0);
+            pos = try codec.encode_uint8(out, pos, 0);
         }
     }
 
@@ -3698,6 +3698,7 @@ fn verifyPassiveWelcome(entry: PassiveWelcomeEntry) !void {
         .{ .prebuilt = tree },
         my_leaf,
         resolver,
+        null,
     );
     defer join_result.deinit();
 
@@ -3846,7 +3847,7 @@ fn processEpoch(
         // ProposalRef = RefHash of this blob (RFC 9420 12.4).
         var ac_buf: [65536]u8 = undefined;
         var ac_pos: u32 = 0;
-        ac_pos = try codec.encodeUint16(
+        ac_pos = try codec.encode_uint16(
             &ac_buf,
             ac_pos,
             @intFromEnum(zmls.WireFormat.mls_public_message),
@@ -4116,6 +4117,7 @@ fn verifyPassiveHandlingCommit(
         .{ .prebuilt = tree },
         my_leaf,
         resolver,
+        null,
     );
     defer join_result.deinit();
 

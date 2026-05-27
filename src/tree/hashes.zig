@@ -241,13 +241,13 @@ fn hashLeafNode(
     var pos: u32 = 0;
 
     // NodeType = leaf (1).
-    pos = codec.encodeUint8(&buf, pos, @intFromEnum(
+    pos = codec.encode_uint8(&buf, pos, @intFromEnum(
         NodeType.leaf,
     )) catch return error.IndexOutOfRange;
 
     // leaf_index (u32).
     const leaf_index: u32 = idx.toU32() / 2;
-    pos = codec.encodeUint32(
+    pos = codec.encode_uint32(
         &buf,
         pos,
         leaf_index,
@@ -257,7 +257,7 @@ fn hashLeafNode(
     const i = idx.toUsize();
     if (i < tree.nodes.len and tree.nodes[i] != null) {
         // Present: 1 byte + encoded LeafNode.
-        pos = codec.encodeUint8(
+        pos = codec.encode_uint8(
             &buf,
             pos,
             1,
@@ -269,7 +269,7 @@ fn hashLeafNode(
         ) catch return error.IndexOutOfRange;
     } else {
         // Absent: 0 byte.
-        pos = codec.encodeUint8(
+        pos = codec.encode_uint8(
             &buf,
             pos,
             0,
@@ -288,7 +288,7 @@ fn hashBlankLeaf(
     var pos: u32 = 0;
 
     // NodeType = leaf (1).
-    pos = codec.encodeUint8(
+    pos = codec.encode_uint8(
         &buf,
         pos,
         @intFromEnum(NodeType.leaf),
@@ -296,14 +296,14 @@ fn hashBlankLeaf(
 
     // leaf_index (u32).
     const leaf_index: u32 = node_idx / 2;
-    pos = codec.encodeUint32(
+    pos = codec.encode_uint32(
         &buf,
         pos,
         leaf_index,
     ) catch return error.IndexOutOfRange;
 
     // optional<LeafNode> = absent.
-    pos = codec.encodeUint8(
+    pos = codec.encode_uint8(
         &buf,
         pos,
         0,
@@ -331,27 +331,27 @@ fn hashParentNode(
     var pos: u32 = 0;
 
     // NodeType = parent (2).
-    pos = codec.encodeUint8(&buf, pos, @intFromEnum(
+    pos = codec.encode_uint8(&buf, pos, @intFromEnum(
         NodeType.parent,
     )) catch return error.IndexOutOfRange;
 
     const i = idx.toUsize();
     if (i < tree.nodes.len and tree.nodes[i] != null) {
         // Present: 1 byte + encoded ParentNode.
-        pos = codec.encodeUint8(
+        pos = codec.encode_uint8(
             &buf,
             pos,
             1,
         ) catch return error.IndexOutOfRange;
         const pn = &tree.nodes[i].?.payload.parent;
         // encryption_key<V>.
-        pos = codec.encodeVarVector(
+        pos = codec.encode_var_vector(
             &buf,
             pos,
             pn.encryption_key,
         ) catch return error.IndexOutOfRange;
         // parent_hash<V>.
-        pos = codec.encodeVarVector(
+        pos = codec.encode_var_vector(
             &buf,
             pos,
             pn.parent_hash,
@@ -364,7 +364,7 @@ fn hashParentNode(
         ) catch return error.IndexOutOfRange;
     } else {
         // Absent: 0 byte.
-        pos = codec.encodeUint8(
+        pos = codec.encode_uint8(
             &buf,
             pos,
             0,
@@ -372,14 +372,14 @@ fn hashParentNode(
     }
 
     // left_hash<V>.
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         &buf,
         pos,
         left_hash,
     ) catch return error.IndexOutOfRange;
 
     // right_hash<V>.
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         &buf,
         pos,
         right_hash,
@@ -424,13 +424,13 @@ pub fn parentHash(
         if (n.node_type != .parent) return error.WrongNodeType;
         const pn = &n.payload.parent;
         // encryption_key<V>.
-        pos = codec.encodeVarVector(
+        pos = codec.encode_var_vector(
             &buf,
             pos,
             pn.encryption_key,
         ) catch return error.IndexOutOfRange;
         // parent_hash<V>.
-        pos = codec.encodeVarVector(
+        pos = codec.encode_var_vector(
             &buf,
             pos,
             pn.parent_hash,
@@ -440,7 +440,7 @@ pub fn parentHash(
     }
 
     // original_sibling_tree_hash<V>.
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         &buf,
         pos,
         sibling_tree_hash,
@@ -957,27 +957,27 @@ fn hashParentNodeFiltered(
     var pos: u32 = 0;
 
     // NodeType = parent (2).
-    pos = codec.encodeUint8(&buf, pos, @intFromEnum(
+    pos = codec.encode_uint8(&buf, pos, @intFromEnum(
         NodeType.parent,
     )) catch return error.IndexOutOfRange;
 
     const i = idx.toUsize();
     if (i < tree.nodes.len and tree.nodes[i] != null) {
         // Present: 1 byte + encoded ParentNode.
-        pos = codec.encodeUint8(
+        pos = codec.encode_uint8(
             &buf,
             pos,
             1,
         ) catch return error.IndexOutOfRange;
         const pn = &tree.nodes[i].?.payload.parent;
         // encryption_key<V>.
-        pos = codec.encodeVarVector(
+        pos = codec.encode_var_vector(
             &buf,
             pos,
             pn.encryption_key,
         ) catch return error.IndexOutOfRange;
         // parent_hash<V>.
-        pos = codec.encodeVarVector(
+        pos = codec.encode_var_vector(
             &buf,
             pos,
             pn.parent_hash,
@@ -991,7 +991,7 @@ fn hashParentNodeFiltered(
         );
     } else {
         // Absent: 0 byte.
-        pos = codec.encodeUint8(
+        pos = codec.encode_uint8(
             &buf,
             pos,
             0,
@@ -999,14 +999,14 @@ fn hashParentNodeFiltered(
     }
 
     // left_hash<V>.
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         &buf,
         pos,
         left_hash,
     ) catch return error.IndexOutOfRange;
 
     // right_hash<V>.
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         &buf,
         pos,
         right_hash,
@@ -1050,7 +1050,7 @@ fn encodeFilteredLeafIndexList(
             }
         }
         if (!skip) {
-            p = codec.encodeUint32(buf, p, item.toU32()) catch
+            p = codec.encode_uint32(buf, p, item.toU32()) catch
                 return error.IndexOutOfRange;
         }
     }
@@ -1069,7 +1069,7 @@ fn encodeLeafIndexList(
     const byte_len: u32 = @intCast(items.len * 4);
     var p = try varint.encode(buf, pos, byte_len);
     for (items) |item| {
-        p = try codec.encodeUint32(buf, p, item.toU32());
+        p = try codec.encode_uint32(buf, p, item.toU32());
     }
     return p;
 }

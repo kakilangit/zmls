@@ -284,7 +284,7 @@ pub fn SecretTree(comptime P: type) type {
         ) KeyNonce(P) {
             _ = self;
             var gen_buf: [4]u8 = undefined;
-            _ = codec.encodeUint32(
+            _ = codec.encode_uint32(
                 &gen_buf,
                 0,
                 state.generation,
@@ -332,7 +332,7 @@ pub fn SecretTree(comptime P: type) type {
         ) void {
             _ = self;
             var gen_buf: [4]u8 = undefined;
-            _ = codec.encodeUint32(
+            _ = codec.encode_uint32(
                 &gen_buf,
                 0,
                 state.generation,

@@ -32,11 +32,13 @@ const proposal_mod = @import("../messages/proposal.zig");
 const key_package_mod = @import("../messages/key_package.zig");
 const psk_mod = @import("../key_schedule/psk.zig");
 const framing = @import("../framing/content_type.zig");
+const grease = @import("../common/grease.zig");
 
 const LeafIndex = types.LeafIndex;
 const ProposalType = types.ProposalType;
 const SenderType = types.SenderType;
 const Sender = framing.Sender;
+const ProtocolVersion = types.ProtocolVersion;
 const CipherSuite = types.CipherSuite;
 const ContentType = types.ContentType;
 const WireFormat = types.WireFormat;
@@ -59,6 +61,9 @@ const ReInit = proposal_mod.ReInit;
 const ExternalInit = proposal_mod.ExternalInit;
 const GroupContextExtensions = proposal_mod.GroupContextExtensions;
 const PreSharedKeyId = psk_mod.PreSharedKeyId;
+const CredentialValidator = @import(
+    "../credential/validator.zig",
+).CredentialValidator;
 const CryptoError = errors.CryptoError;
 const ValidationError = errors.ValidationError;
 const TreeError = errors.TreeError;
@@ -255,7 +260,15 @@ fn categorizeProposal(
             result.psk_ids_len += 1;
         },
         else => {
-            // Unknown/GREASE: silently skip per Section 13.
+            // RFC 9420 S13.4: GREASE MUST NOT appear in
+            // Proposal.proposal_type — reject outright.
+            if (grease.isGreaseProposal(prop.tag)) {
+                return error.InvalidProposalList;
+            }
+            // Unknown non-default proposal: silently skip.
+            // Capability enforcement for non-default proposals
+            // is handled separately by
+            // validateNonDefaultProposalCaps.
         },
     }
 }
@@ -400,6 +413,14 @@ fn isKnownSenderAllowed(
 /// Stack usage: ~50 KiB due to inline arrays of up to 256
 /// added/removed leaves and 64 PSK IDs.
 pub const ProposalApplyResult = struct {
+    /// ReInit parameters (when a ReInit proposal is present).
+    pub const ReInitOutcome = struct {
+        group_id: []const u8,
+        version: ProtocolVersion,
+        cipher_suite: CipherSuite,
+        extensions: []const Extension,
+    };
+
     /// New group extensions (if GCE was applied).
     new_extensions: ?[]const Extension,
     /// Leaf indices of newly added members.
@@ -413,6 +434,8 @@ pub const ProposalApplyResult = struct {
     psk_ids_len: u32,
     /// Whether a ReInit was proposed.
     has_reinit: bool,
+    /// ReInit parameters copied from the proposal.
+    reinit_outcome: ?ReInitOutcome,
     /// Whether an ExternalInit was proposed.
     has_external_init: bool,
 };
@@ -429,6 +452,7 @@ pub fn validateAddKeyPackages(
     comptime P: type,
     validated: *const ValidatedProposals,
     expected_suite: CipherSuite,
+    credential_validator: ?CredentialValidator,
 ) (ValidationError || CryptoError)!void {
     const n = validated.adds_len;
     for (validated.adds[0..n]) |*add| {
@@ -442,6 +466,11 @@ pub fn validateAddKeyPackages(
         ) catch {
             return error.SignatureVerifyFailed;
         };
+        if (credential_validator) |cv| {
+            try cv.validate(
+                &add.key_package.leaf_node.credential,
+            );
+        }
     }
 }
 
@@ -490,6 +519,7 @@ pub fn validateAddsAgainstTree(
     expected_suite: CipherSuite,
 ) ValidationError!void {
     const n = validated.adds_len;
+    assert(n <= max_affected);
     const adds = validated.adds[0..n];
 
     for (adds) |*add| {
@@ -678,6 +708,7 @@ pub fn validateUpdatesAgainstTree(
     validated: *const ValidatedProposals,
     tree: *const RatchetTree,
     sender: CommitSender,
+    credential_validator: ?CredentialValidator,
 ) ValidationError!void {
     const n = validated.updates_len;
     const updates = validated.updates[0..n];
@@ -735,6 +766,9 @@ pub fn validateUpdatesAgainstTree(
         // Encryption/signature key must not duplicate any
         // other Update in this commit.
         try checkUpdateKeyUniqueness(updates, entry, new_ek, new_sk);
+        if (credential_validator) |cv| {
+            try cv.validate(&entry.leaf_node.credential);
+        }
     }
 }
 
@@ -906,10 +940,16 @@ pub fn validateGceAgainstTree(
 
 /// Check that every non-blank leaf in the tree advertises
 /// support for the given extension type.
+///
+/// Default extension types (1-5) are implicitly supported
+/// per RFC 9420 Section 7.2 and MUST NOT appear in
+/// capabilities — skip the check for them.
 fn checkAllLeavesSupport(
     tree: *const RatchetTree,
     ext_type: ExtensionType,
 ) ValidationError!void {
+    const v = @intFromEnum(ext_type);
+    if (v >= 1 and v <= 5) return;
     var li: u32 = 0;
     while (li < tree.leaf_count) : (li += 1) {
         const node_idx = LeafIndex.fromU32(li).toNodeIndex();
@@ -963,11 +1003,11 @@ pub fn parseRequiredCapabilities(
 ) DecodeError!RequiredCapabilities {
     var pos: u32 = 0;
 
-    const ext_r = try codec.decodeVarVectorSlice(data, pos);
+    const ext_r = try codec.decode_var_vector_slice(data, pos);
     pos = ext_r.pos;
-    const prop_r = try codec.decodeVarVectorSlice(data, pos);
+    const prop_r = try codec.decode_var_vector_slice(data, pos);
     pos = prop_r.pos;
-    const cred_r = try codec.decodeVarVectorSlice(data, pos);
+    const cred_r = try codec.decode_var_vector_slice(data, pos);
 
     return .{
         .extension_types = ext_r.value,
@@ -1078,6 +1118,85 @@ pub fn validateUpdatesRequiredCapabilities(
     }
 }
 
+/// Validate that all non-blank leaves in the tree satisfy the
+/// required_capabilities extension present in GroupContext
+/// extensions (if any).
+pub fn validateGceRequiredCapabilities(
+    tree: *const RatchetTree,
+    group_extensions: []const Extension,
+) (ValidationError || DecodeError)!void {
+    const req = try findRequiredCapabilities(
+        group_extensions,
+    ) orelse return;
+
+    var li: u32 = 0;
+    while (li < tree.leaf_count) : (li += 1) {
+        const idx = LeafIndex.fromU32(li).toNodeIndex().toUsize();
+        if (idx >= tree.nodes.len) continue;
+        const node = tree.nodes[idx] orelse continue;
+        if (node.node_type != .leaf) continue;
+        try validateLeafMeetsRequired(
+            &node.payload.leaf.capabilities,
+            &req,
+        );
+    }
+}
+
+/// Validate RFC 9420 Section 7.3 Step 4:
+/// every non-blank leaf must advertise support for every
+/// credential type currently used by any non-blank leaf.
+pub fn validateCredentialTypeSupport(
+    tree: *const RatchetTree,
+) ValidationError!void {
+    var in_use: [16]CredentialType = undefined;
+    var in_use_len: usize = 0;
+
+    // Collect unique credential types present in the tree.
+    var li: u32 = 0;
+    while (li < tree.leaf_count) : (li += 1) {
+        const idx = LeafIndex.fromU32(li).toNodeIndex().toUsize();
+        if (idx >= tree.nodes.len) continue;
+        const node = tree.nodes[idx] orelse continue;
+        if (node.node_type != .leaf) continue;
+        const ct = node.payload.leaf.credential.tag;
+
+        var seen = false;
+        for (in_use[0..in_use_len]) |have| {
+            if (have == ct) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) {
+            if (in_use_len >= in_use.len)
+                return error.InvalidLeafNode;
+            in_use[in_use_len] = ct;
+            in_use_len += 1;
+        }
+    }
+
+    // Each leaf must advertise support for all in-use types.
+    li = 0;
+    while (li < tree.leaf_count) : (li += 1) {
+        const idx = LeafIndex.fromU32(li).toNodeIndex().toUsize();
+        if (idx >= tree.nodes.len) continue;
+        const node = tree.nodes[idx] orelse continue;
+        if (node.node_type != .leaf) continue;
+
+        const caps = node.payload.leaf.capabilities.credentials;
+        for (in_use[0..in_use_len]) |needed| {
+            var found = false;
+            for (caps) |supported| {
+                if (supported == needed) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return error.InvalidLeafNode;
+        }
+    }
+}
+
 // -- validateNonDefaultProposalCaps -------------------------------------------
 
 /// RFC 9420 S12.2: Non-default proposal types (tag > 7) must
@@ -1164,12 +1283,20 @@ pub fn applyProposals(
     validated: *const ValidatedProposals,
     tree: *RatchetTree,
 ) (TreeError || error{OutOfMemory})!ProposalApplyResult {
+    assert(validated.adds_len <= max_affected);
+    assert(validated.removes_len <= max_affected);
     var result: ProposalApplyResult = undefined;
     result.new_extensions = null;
     result.added_count = 0;
     result.removed_count = 0;
     result.psk_ids_len = 0;
     result.has_reinit = validated.reinit != null;
+    result.reinit_outcome = if (validated.reinit) |ri| .{
+        .group_id = ri.group_id,
+        .version = ri.version,
+        .cipher_suite = ri.cipher_suite,
+        .extensions = ri.extensions,
+    } else null;
     result.has_external_init = validated.external_init != null;
 
     // 1. Apply GroupContextExtensions.

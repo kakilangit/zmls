@@ -50,11 +50,17 @@ pub fn MemoryKeyStore(comptime P: type, comptime capacity: u32) type {
             key_hash: KeyHash = .{0} ** 32,
             secret: [P.nsk]u8 = .{0} ** P.nsk,
         };
+        const UsedKpEntry = struct {
+            occupied: bool = false,
+            key_hash: KeyHash = .{0} ** 32,
+        };
 
         sig_entries: [capacity]SigEntry =
             [_]SigEntry{.{}} ** capacity,
         enc_entries: [capacity]EncEntry =
             [_]EncEntry{.{}} ** capacity,
+        used_kp_entries: [capacity]UsedKpEntry =
+            [_]UsedKpEntry{.{}} ** capacity,
 
         pub fn init() Self {
             return .{};
@@ -67,6 +73,9 @@ pub fn MemoryKeyStore(comptime P: type, comptime capacity: u32) type {
             }
             for (&self.enc_entries) |*e| {
                 secureZeroSlice(&e.secret);
+                e.* = .{};
+            }
+            for (&self.used_kp_entries) |*e| {
                 e.* = .{};
             }
         }
@@ -200,12 +209,57 @@ pub fn MemoryKeyStore(comptime P: type, comptime capacity: u32) type {
             slot.* = .{};
         }
 
+        fn findUsedKp(
+            self: *Self,
+            kh: KeyHash,
+        ) ?*UsedKpEntry {
+            for (&self.used_kp_entries) |*e| {
+                if (e.occupied and
+                    std.mem.eql(u8, &e.key_hash, &kh))
+                    return e;
+            }
+            return null;
+        }
+
+        fn findFreeUsedKp(self: *Self) ?*UsedKpEntry {
+            for (&self.used_kp_entries) |*e| {
+                if (!e.occupied) return e;
+            }
+            return null;
+        }
+
+        fn markKpUsedFn(
+            ctx: *anyopaque,
+            _: Io,
+            kp_ref: []const u8,
+        ) KS.Error!void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            const kh = hashId(kp_ref);
+            const slot = self.findUsedKp(kh) orelse
+                self.findFreeUsedKp() orelse
+                return error.StorageFault;
+            slot.occupied = true;
+            slot.key_hash = kh;
+        }
+
+        fn isKpUsedFn(
+            ctx: *anyopaque,
+            _: Io,
+            kp_ref: []const u8,
+        ) KS.Error!bool {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            const kh = hashId(kp_ref);
+            return self.findUsedKp(kh) != null;
+        }
+
         const vtable: KS.VTable = .{
             .store_signature_key = &storeSigFn,
             .load_signature_key = &loadSigFn,
             .store_encryption_key = &storeEncFn,
             .load_encryption_key = &loadEncFn,
             .delete_encryption_key = &deleteEncFn,
+            .mark_key_package_used = &markKpUsedFn,
+            .is_key_package_used = &isKpUsedFn,
         };
     };
 }
@@ -329,4 +383,16 @@ test "MemoryKeyStore: delete is idempotent" {
 
     // Delete non-existent key — no error.
     try ks.deleteEncryptionKey(io, "group-1", 99);
+}
+
+test "MemoryKeyStore: key package used tracking" {
+    var store = MemoryKeyStore(StubP, 4).init();
+    defer store.deinit();
+    const ks = store.keyStore();
+    const io = testIo();
+
+    const kp_ref = "kp-ref-1";
+    try testing.expect(!(try ks.isKeyPackageUsed(io, kp_ref)));
+    try ks.markKeyPackageUsed(io, kp_ref);
+    try testing.expect(try ks.isKeyPackageUsed(io, kp_ref));
 }

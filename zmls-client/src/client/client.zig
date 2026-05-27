@@ -239,6 +239,7 @@ pub fn Client(comptime P: type) type {
             };
 
         pub const InviteError = GroupStore.Error ||
+            KS.Error ||
             Allocator.Error || error{
             ClientClosed,
             GroupNotFound,
@@ -250,6 +251,7 @@ pub fn Client(comptime P: type) type {
             KeyGenerationFailed,
             BundleSerializeFailed,
             CredentialValidationFailed,
+            KeyPackageAlreadyUsed,
         };
 
         pub const JoinError = GroupStore.Error ||
@@ -302,6 +304,7 @@ pub fn Client(comptime P: type) type {
             CommitProc.ProcessError;
 
         pub const ProposeError = GroupStore.Error ||
+            KS.Error ||
             Allocator.Error || error{
             ClientClosed,
             GroupNotFound,
@@ -309,6 +312,7 @@ pub fn Client(comptime P: type) type {
             BundleSerializeFailed,
             ProposalEncodeFailed,
             ProposalCacheFailed,
+            KeyPackageAlreadyUsed,
         };
 
         pub const GroupInfoError = GroupStore.Error ||
@@ -717,6 +721,10 @@ pub fn Client(comptime P: type) type {
             self.credential_validator.validate(
                 &key_package.leaf_node.credential,
             ) catch return error.CredentialValidationFailed;
+            try self.rejectUsedKeyPackage(
+                io,
+                &key_package,
+            );
 
             var bundle = try self.loadBundle(
                 io,
@@ -808,6 +816,7 @@ pub fn Client(comptime P: type) type {
                 .fdp_nodes = &commit_output.fdp_nodes,
                 .tree_size = commit_output.group_state
                     .tree.leaf_count,
+                .ratchet_tree = &commit_output.group_state.tree,
             }) catch return error.WelcomeBuildFailed;
             defer welcome_result.deinit(allocator);
 
@@ -818,6 +827,7 @@ pub fn Client(comptime P: type) type {
                 pre_commit_state,
                 commit_output,
                 &welcome_result,
+                key_package,
             );
         }
 
@@ -830,6 +840,7 @@ pub fn Client(comptime P: type) type {
             commit_output: *GS.CommitOutput,
             welcome_result: *const zmls.group_welcome
                 .WelcomeResult,
+            invited_key_package: *const KeyPackage,
         ) InviteError!InviteResult {
             const commit_data = encodeCommitAsWireMessage(
                 allocator,
@@ -862,6 +873,7 @@ pub fn Client(comptime P: type) type {
                 &commit_output.group_state,
                 &secret_tree,
             );
+            try self.markKeyPackageUsed(io, invited_key_package);
 
             return .{
                 .commit = commit_data,
@@ -1289,7 +1301,7 @@ pub fn Client(comptime P: type) type {
             var pos: u32 = hdr_end;
             const end: u32 = hdr_end + payload_len;
             while (pos < end) {
-                const pres = zmls.codec.decodeUint8(
+                const pres = zmls.codec.decode_uint8(
                     data,
                     pos,
                 ) catch return error.Truncated;
@@ -1641,6 +1653,7 @@ pub fn Client(comptime P: type) type {
             ) catch return error.ProposalEncodeFailed;
             var key_package = decoded.value;
             defer key_package.deinit(allocator);
+            try self.rejectUsedKeyPackage(io, &key_package);
 
             const proposal = zmls.Proposal{
                 .tag = .add,
@@ -2112,6 +2125,46 @@ pub fn Client(comptime P: type) type {
             };
         }
 
+        fn rejectUsedKeyPackage(
+            self: *Self,
+            io: Io,
+            key_package: *const KeyPackage,
+        ) (KS.Error || error{KeyPackageAlreadyUsed})!void {
+            if (key_package.isLastResort()) return;
+            const kp_ref = key_package.makeRef(P) catch
+                return error.StorageFault;
+            const used = try self.key_store.isKeyPackageUsed(
+                io,
+                &kp_ref,
+            );
+            if (used) return error.KeyPackageAlreadyUsed;
+        }
+
+        fn markKeyPackageUsed(
+            self: *Self,
+            io: Io,
+            key_package: *const KeyPackage,
+        ) KS.Error!void {
+            if (key_package.isLastResort()) return;
+            const kp_ref = key_package.makeRef(P) catch
+                return error.StorageFault;
+            try self.key_store.markKeyPackageUsed(io, &kp_ref);
+        }
+
+        fn markAddProposalsUsed(
+            self: *Self,
+            io: Io,
+            proposals: []const zmls.Proposal,
+        ) KS.Error!void {
+            for (proposals) |*prop| {
+                if (prop.tag != .add) continue;
+                try self.markKeyPackageUsed(
+                    io,
+                    &prop.payload.add.key_package,
+                );
+            }
+        }
+
         /// Shared commit-and-persist for removeMember.
         fn commitWithProposals(
             self: *Self,
@@ -2156,6 +2209,10 @@ pub fn Client(comptime P: type) type {
                 group_id,
                 &commit_output.group_state,
                 &secret_tree,
+            );
+            try self.markAddProposalsUsed(
+                io,
+                proposals,
             );
 
             return wire_bytes;
@@ -2593,10 +2650,11 @@ pub fn Client(comptime P: type) type {
             group_id: []const u8,
             wire_bytes: []const u8,
         ) ProcessIncomingError!ProcessingResult {
-            const decoded = decodePublicProposal(
+            var decoded = decodePublicProposal(
                 allocator,
                 wire_bytes,
             ) catch return error.WireDecodeFailed;
+            defer decoded.proposal.deinit(allocator);
 
             // Load group state for cryptographic verification.
             var bundle = try self.loadBundle(io, group_id);
@@ -2604,8 +2662,13 @@ pub fn Client(comptime P: type) type {
 
             const fc = &decoded.framed_content;
             const sender = fc.sender;
+            zmls.validateWireFormat(
+                .mls_public_message,
+                fc.content_type,
+                bundle.group_state.wire_format_policy,
+            ) catch return error.WireDecodeFailed;
 
-            // Verify sender is a valid group member.
+            // Verify signature according to sender type.
             if (sender.sender_type == .member) {
                 const sender_leaf = zmls.types.LeafIndex
                     .fromU32(sender.leaf_index);
@@ -2651,6 +2714,35 @@ pub fn Client(comptime P: type) type {
                     // Member proposals require a tag.
                     return error.WireDecodeFailed;
                 }
+            } else if (sender.sender_type == .new_member_proposal) {
+                // RFC 9420 §6.1: new_member_proposal signatures
+                // are verified with Add.KeyPackage.LeafNode.signature_key.
+                if (decoded.proposal.tag != .add)
+                    return error.WireDecodeFailed;
+                if (decoded.membership_tag != null)
+                    return error.WireDecodeFailed;
+
+                const sig_key = decoded.proposal.payload.add
+                    .key_package.leaf_node.signature_key;
+                if (sig_key.len != P.sign_pk_len)
+                    return error.WireDecodeFailed;
+
+                var gc_buf: [max_group_context_encode]u8 =
+                    undefined;
+                const gc_bytes = bundle.group_state
+                    .serializeContext(&gc_buf) catch
+                    return error.WireDecodeFailed;
+
+                zmls.verifyFramedContent(
+                    P,
+                    fc,
+                    .mls_public_message,
+                    gc_bytes,
+                    sig_key[0..P.sign_pk_len],
+                    &decoded.auth,
+                ) catch return error.WireDecodeFailed;
+            } else {
+                return error.WireDecodeFailed;
             }
 
             // Build AuthenticatedContent for ref hash.
@@ -3076,7 +3168,7 @@ pub fn Client(comptime P: type) type {
             var pos: u32 = 0;
 
             // WireFormat (u16)
-            pos = zmls.codec.encodeUint16(
+            pos = zmls.codec.encode_uint16(
                 &result.data,
                 pos,
                 @intFromEnum(
@@ -3332,7 +3424,7 @@ pub fn Client(comptime P: type) type {
             var ni: u32 = 0;
             while (ni < trim_width) : (ni += 1) {
                 if (tree.nodes[ni]) |*n| {
-                    pos = zmls.codec.encodeUint8(
+                    pos = zmls.codec.encode_uint8(
                         &tmp,
                         pos,
                         1,
@@ -3342,7 +3434,7 @@ pub fn Client(comptime P: type) type {
                         pos,
                     ) catch return error.EncodingFailed;
                 } else {
-                    pos = zmls.codec.encodeUint8(
+                    pos = zmls.codec.encode_uint8(
                         &tmp,
                         pos,
                         0,

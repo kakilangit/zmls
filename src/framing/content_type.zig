@@ -74,7 +74,7 @@ pub const Sender = struct {
         buf: []u8,
         pos: u32,
     ) EncodeError!u32 {
-        var p = try codec.encodeUint8(
+        var p = try codec.encode_uint8(
             buf,
             pos,
             @intFromEnum(self.sender_type),
@@ -82,7 +82,7 @@ pub const Sender = struct {
 
         switch (self.sender_type) {
             .member, .external => {
-                p = try codec.encodeUint32(
+                p = try codec.encode_uint32(
                     buf,
                     p,
                     self.leaf_index,
@@ -94,7 +94,7 @@ pub const Sender = struct {
             else => {
                 // Unknown sender type — encode the u32 anyway
                 // for forward compatibility.
-                p = try codec.encodeUint32(
+                p = try codec.encode_uint32(
                     buf,
                     p,
                     self.leaf_index,
@@ -110,13 +110,13 @@ pub const Sender = struct {
         buf: []const u8,
         pos: u32,
     ) DecodeError!struct { value: Sender, pos: u32 } {
-        const st_raw = try codec.decodeUint8(buf, pos);
+        const st_raw = try codec.decode_uint8(buf, pos);
         const st: SenderType = @enumFromInt(st_raw.value);
         const p = st_raw.pos;
 
         switch (st) {
             .member, .external => {
-                const idx = try codec.decodeUint32(buf, p);
+                const idx = try codec.decode_uint32(buf, p);
                 return .{
                     .value = .{
                         .sender_type = st,

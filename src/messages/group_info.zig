@@ -20,6 +20,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("../codec/codec.zig");
 const varint = @import("../codec/varint.zig");
+const grease = @import("../common/grease.zig");
 const types = @import("../common/types.zig");
 const errors = @import("../common/errors.zig");
 const node_mod = @import("../tree/node.zig");
@@ -62,7 +63,7 @@ pub const GroupInfo = struct {
         );
 
         // opaque signature<V>.
-        p = try codec.encodeVarVector(buf, p, self.signature);
+        p = try codec.encode_var_vector(buf, p, self.signature);
 
         return p;
     }
@@ -92,10 +93,36 @@ pub const GroupInfo = struct {
             data,
             p,
         );
+        // RFC 9420 S13: GroupInfo extensions must be known.
+        // Valid types: ratchet_tree (2), external_pub (4), plus
+        // any valid GroupContext extension type.
+        for (ext_r.value) |ext| {
+            if (grease.isGreaseExtension(ext.extension_type)) {
+                freeDecodedExts(
+                    allocator,
+                    @constCast(ext_r.value),
+                );
+                allocator.free(@constCast(ext_r.value));
+                return error.GreaseNotAllowed;
+            }
+            const v = @intFromEnum(ext.extension_type);
+            if (v != 2 and v != 4 and
+                !types.isGroupContextExtension(
+                    ext.extension_type,
+                ))
+            {
+                freeDecodedExts(
+                    allocator,
+                    @constCast(ext_r.value),
+                );
+                allocator.free(@constCast(ext_r.value));
+                return error.UnknownExtension;
+            }
+        }
         p = ext_r.pos;
 
         // opaque confirmation_tag<V>.
-        const ct_r = try codec.decodeVarVectorLimited(
+        const ct_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
@@ -104,11 +131,11 @@ pub const GroupInfo = struct {
         p = ct_r.pos;
 
         // uint32 signer.
-        const s_r = try codec.decodeUint32(data, p);
+        const s_r = try codec.decode_uint32(data, p);
         p = s_r.pos;
 
         // opaque signature<V>.
-        const sig_r = try codec.decodeVarVectorLimited(
+        const sig_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
@@ -325,10 +352,10 @@ fn encodeTbs(
     p = try encodeExtensionList(buf, p, extensions);
 
     // opaque confirmation_tag<V>.
-    p = try codec.encodeVarVector(buf, p, confirmation_tag);
+    p = try codec.encode_var_vector(buf, p, confirmation_tag);
 
     // uint32 signer.
-    p = try codec.encodeUint32(buf, p, signer);
+    p = try codec.encode_uint32(buf, p, signer);
 
     return p;
 }
@@ -340,7 +367,7 @@ fn encodeExtensionList(
     pos: u32,
     items: []const Extension,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         Extension,
         buf,
         pos,
@@ -437,20 +464,20 @@ fn skipGroupContext(
     p += 4;
 
     // opaque group_id<V>.
-    p = try codec.skipVarVector(data, p);
+    p = try codec.skip_var_vector(data, p);
 
     // uint64 epoch.
     if (p + 8 > data.len) return error.Truncated;
     p += 8;
 
     // opaque tree_hash<V>.
-    p = try codec.skipVarVector(data, p);
+    p = try codec.skip_var_vector(data, p);
 
     // opaque confirmed_transcript_hash<V>.
-    p = try codec.skipVarVector(data, p);
+    p = try codec.skip_var_vector(data, p);
 
     // Extension extensions<V>.
-    p = try codec.skipVarVector(data, p);
+    p = try codec.skip_var_vector(data, p);
 
     return p;
 }
@@ -563,7 +590,7 @@ test "GroupInfo with extensions round-trip" {
     const gc = gc_buf[0..gc_len];
 
     const ext = Extension{
-        .extension_type = @enumFromInt(0xFE01),
+        .extension_type = .external_pub,
         .data = "some-ext-data",
     };
     const exts = [_]Extension{ext};

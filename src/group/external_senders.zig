@@ -127,7 +127,7 @@ pub fn parseExternalSenders(
         }
 
         // Decode signature_key<V> (zero-copy slice).
-        const sig_r = try codec.decodeVarVectorSlice(
+        const sig_r = try codec.decode_var_vector_slice(
             data,
             pos,
         );
@@ -183,14 +183,14 @@ fn decodeCredentialSlice(
     pos: u32,
     cert_buf: []Certificate,
 ) DecodeError!struct { value: Credential, pos: u32, cert_count: u32 } {
-    const type_r = try codec.decodeUint16(data, pos);
+    const type_r = try codec.decode_uint16(data, pos);
     const cred_type: types.CredentialType = @enumFromInt(
         type_r.value,
     );
 
     switch (cred_type) {
         .basic => {
-            const id_r = try codec.decodeVarVectorSlice(
+            const id_r = try codec.decode_var_vector_slice(
                 data,
                 type_r.pos,
             );
@@ -252,7 +252,7 @@ fn decodeCertChainSlice(
             return error.VectorTooLarge;
         }
         // Each certificate is: opaque cert_data<V>
-        const cert_r = try codec.decodeVarVectorSlice(
+        const cert_r = try codec.decode_var_vector_slice(
             data,
             p,
         );
@@ -335,7 +335,35 @@ pub fn validateExternalSenderProposal(
         try cv.validate(&sender.credential);
     }
 
+    // RFC 9420 §12.1.8.1: for X.509 credentials, bind the
+    // declared signature_key to the credential key material.
+    try validateExternalSenderSignatureKey(&sender);
+
     return sender;
+}
+
+fn validateExternalSenderSignatureKey(
+    sender: *const ExternalSender,
+) ValidationError!void {
+    switch (sender.credential.tag) {
+        .x509 => {
+            const certs = sender.credential.payload.x509;
+            if (certs.len == 0) return error.SignatureKeyMismatch;
+            // This implementation stores raw cert bytes only.
+            // We treat the first certificate blob as the key
+            // binding source for structural equality checks.
+            if (!std.mem.eql(
+                u8,
+                sender.signature_key,
+                certs[0].data,
+            )) return error.SignatureKeyMismatch;
+        },
+        .basic => {
+            // No structural binding for basic credentials.
+            // Applications may enforce policy via validator.
+        },
+        else => return error.InvalidCredential,
+    }
 }
 
 // -- Encoding ----------------------------------------------------------------
@@ -348,7 +376,7 @@ pub fn encodeExternalSender(
     buf: []u8,
     pos: u32,
 ) EncodeError!u32 {
-    var p = try codec.encodeVarVector(
+    var p = try codec.encode_var_vector(
         buf,
         pos,
         sender.signature_key,
@@ -444,15 +472,15 @@ test "parseExternalSenders single basic entry" {
     var p: u32 = 0;
 
     // signature_key<V> = "sig-key-1"
-    p = try codec.encodeVarVector(
+    p = try codec.encode_var_vector(
         &inner_buf,
         p,
         "sig-key-1",
     );
 
     // Credential: basic type (u16 = 1) + identity<V> = "alice"
-    p = try codec.encodeUint16(&inner_buf, p, 1); // basic
-    p = try codec.encodeVarVector(&inner_buf, p, "alice");
+    p = try codec.encode_uint16(&inner_buf, p, 1); // basic
+    p = try codec.encode_var_vector(&inner_buf, p, "alice");
 
     // Now wrap in outer varint length.
     const inner_len = p;
@@ -1004,7 +1032,7 @@ test "parseExternalSenders mixed basic and x509" {
 
 test "validateExternalSenderProposal accepts x509 sender" {
     var certs = [_]Certificate{
-        .{ .data = "leaf-cert" },
+        .{ .data = "x509-key" },
     };
     const senders = [_]ExternalSender{
         .{
@@ -1030,4 +1058,31 @@ test "validateExternalSenderProposal accepts x509 sender" {
         types.CredentialType.x509,
         es.credential.tag,
     );
+}
+
+test "validateExternalSenderProposal rejects x509 signature key mismatch" {
+    var certs = [_]Certificate{
+        .{ .data = "leaf-cert" },
+    };
+    const senders = [_]ExternalSender{
+        .{
+            .signature_key = "x509-key",
+            .credential = Credential.initX509(&certs),
+        },
+    };
+
+    var ext_buf: [1024]u8 = undefined;
+    const ext = try makeExternalSendersExtension(
+        &senders,
+        &ext_buf,
+    );
+    const exts = [_]Extension{ext};
+
+    const result = validateExternalSenderProposal(
+        &exts,
+        0,
+        .add,
+        AcceptAllValidator.validator(),
+    );
+    try testing.expectError(error.SignatureKeyMismatch, result);
 }

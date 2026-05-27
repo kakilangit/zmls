@@ -1,14 +1,14 @@
 # zmls
 
-A Zig implementation of the Messaging Layer Security (MLS) protocol,
-[RFC 9420](https://www.rfc-editor.org/rfc/rfc9420.html).
+A full implementation of the Messaging Layer Security (MLS) protocol,
+[RFC 9420](https://www.rfc-editor.org/rfc/rfc9420.html), in Zig.
 
 Zero external dependencies. All cryptographic primitives from `std.crypto`
 or implemented in-tree.
 
 ## Requirements
 
-- Zig `0.16.0-dev.3039+b490412cd` or compatible.
+- Zig `0.16.0` or compatible.
 
 ## Build and Test
 

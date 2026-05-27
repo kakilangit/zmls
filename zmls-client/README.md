@@ -10,7 +10,7 @@ adapters as defaults for testing and development.
 
 ## Requirements
 
-- Zig `0.16.0-dev.3039+b490412cd` or compatible.
+- Zig `0.16.0` or compatible.
 - The `zmls` protocol core (resolved automatically via `build.zig.zon`).
 
 ## Build and Test

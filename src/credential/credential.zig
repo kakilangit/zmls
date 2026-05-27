@@ -16,6 +16,7 @@ const codec = @import("../codec/codec.zig");
 const varint = @import("../codec/varint.zig");
 const types = @import("../common/types.zig");
 const errors = @import("../common/errors.zig");
+const grease = @import("../common/grease.zig");
 
 const CredentialType = types.CredentialType;
 const DecodeError = errors.DecodeError;
@@ -41,7 +42,7 @@ pub const Certificate = struct {
         buf: []u8,
         pos: u32,
     ) EncodeError!u32 {
-        return codec.encodeVarVector(buf, pos, self.data);
+        return codec.encode_var_vector(buf, pos, self.data);
     }
 
     pub fn decode(
@@ -52,7 +53,7 @@ pub const Certificate = struct {
         value: Certificate,
         pos: u32,
     } {
-        const r = try codec.decodeVarVectorLimited(
+        const r = try codec.decode_var_vector_limited(
             allocator,
             data,
             pos,
@@ -127,7 +128,7 @@ pub const Credential = struct {
         pos: u32,
     ) EncodeError!u32 {
         // Write credential_type as u16.
-        var p = try codec.encodeUint16(
+        var p = try codec.encode_uint16(
             buf,
             pos,
             @intFromEnum(self.tag),
@@ -135,7 +136,7 @@ pub const Credential = struct {
 
         switch (self.tag) {
             .basic => {
-                p = try codec.encodeVarVector(
+                p = try codec.encode_var_vector(
                     buf,
                     p,
                     self.payload.basic,
@@ -149,7 +150,7 @@ pub const Credential = struct {
                 );
             },
             else => {
-                p = try codec.encodeVarVector(
+                p = try codec.encode_var_vector(
                     buf,
                     p,
                     self.payload.unknown,
@@ -169,14 +170,16 @@ pub const Credential = struct {
         value: Credential,
         pos: u32,
     } {
-        const type_r = try codec.decodeUint16(data, pos);
+        const type_r = try codec.decode_uint16(data, pos);
         const cred_type: CredentialType = @enumFromInt(
             type_r.value,
         );
+        if (grease.isGreaseCredential(cred_type))
+            return error.GreaseNotAllowed;
 
         switch (cred_type) {
             .basic => {
-                const id_r = try codec.decodeVarVectorLimited(
+                const id_r = try codec.decode_var_vector_limited(
                     allocator,
                     data,
                     type_r.pos,
@@ -205,7 +208,7 @@ pub const Credential = struct {
                 };
             },
             else => {
-                const raw_r = try codec.decodeVarVectorLimited(
+                const raw_r = try codec.decode_var_vector_limited(
                     allocator,
                     data,
                     type_r.pos,
@@ -342,7 +345,7 @@ fn encodeCertChain(
     pos: u32,
     certs: []const Certificate,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         Certificate,
         buf,
         pos,
@@ -485,8 +488,8 @@ test "decode accepts unknown credential type" {
 
     // Write a credential with type = 0xFFFF and empty body.
     var buf: [8]u8 = undefined;
-    var p = try codec.encodeUint16(&buf, 0, 0xFFFF);
-    p = try codec.encodeVarVector(&buf, p, "");
+    var p = try codec.encode_uint16(&buf, 0, 0xFFFF);
+    p = try codec.encode_var_vector(&buf, p, "");
 
     const dec_r = try Credential.decode(alloc, buf[0..p], 0);
     var decoded = dec_r.value;
@@ -581,4 +584,18 @@ test "Credential unknown type round-trips correctly" {
         "opaque-data",
         decoded.payload.unknown,
     );
+}
+
+test "decode rejects GREASE credential type" {
+    // credential_type = 0x0A0A (GREASE), body = empty vector.
+    const bytes = [_]u8{
+        0x0A, 0x0A,
+        0x00,
+    };
+    const result = Credential.decode(
+        testing.allocator,
+        &bytes,
+        0,
+    );
+    try testing.expectError(error.GreaseNotAllowed, result);
 }

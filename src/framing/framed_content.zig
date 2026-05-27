@@ -60,23 +60,23 @@ pub const FramedContent = struct {
         var p = pos;
 
         // opaque group_id<V>
-        p = try codec.encodeVarVector(buf, p, self.group_id);
+        p = try codec.encode_var_vector(buf, p, self.group_id);
 
         // uint64 epoch
-        p = try codec.encodeUint64(buf, p, self.epoch);
+        p = try codec.encode_uint64(buf, p, self.epoch);
 
         // Sender sender
         p = try self.sender.encode(buf, p);
 
         // opaque authenticated_data<V>
-        p = try codec.encodeVarVector(
+        p = try codec.encode_var_vector(
             buf,
             p,
             self.authenticated_data,
         );
 
         // ContentType content_type
-        p = try codec.encodeUint8(
+        p = try codec.encode_uint8(
             buf,
             p,
             @intFromEnum(self.content_type),
@@ -88,7 +88,7 @@ pub const FramedContent = struct {
         // directly (no length prefix).
         switch (self.content_type) {
             .application => {
-                p = try codec.encodeVarVector(
+                p = try codec.encode_var_vector(
                     buf,
                     p,
                     self.content,
@@ -124,11 +124,11 @@ pub const FramedContent = struct {
         var p = pos;
 
         // opaque group_id<V>
-        const gid = try codec.decodeVarVectorSlice(buf, p);
+        const gid = try codec.decode_var_vector_slice(buf, p);
         p = gid.pos;
 
         // uint64 epoch
-        const ep = try codec.decodeUint64(buf, p);
+        const ep = try codec.decode_uint64(buf, p);
         p = ep.pos;
 
         // Sender
@@ -136,11 +136,11 @@ pub const FramedContent = struct {
         p = sender.pos;
 
         // opaque authenticated_data<V>
-        const ad = try codec.decodeVarVectorSlice(buf, p);
+        const ad = try codec.decode_var_vector_slice(buf, p);
         p = ad.pos;
 
         // ContentType
-        const ct_raw = try codec.decodeUint8(buf, p);
+        const ct_raw = try codec.decode_uint8(buf, p);
         p = ct_raw.pos;
         const ct: ContentType = @enumFromInt(ct_raw.value);
 
@@ -151,7 +151,7 @@ pub const FramedContent = struct {
         var content: []const u8 = undefined;
         switch (ct) {
             .application => {
-                const cv = try codec.decodeVarVectorSlice(
+                const cv = try codec.decode_var_vector_slice(
                     buf,
                     p,
                 );
@@ -215,14 +215,14 @@ pub const FramedContentTBS = struct {
         var p = pos;
 
         // ProtocolVersion version = mls10 (u16)
-        p = try codec.encodeUint16(
+        p = try codec.encode_uint16(
             buf,
             p,
             @intFromEnum(ProtocolVersion.mls10),
         );
 
         // WireFormat wire_format (u16)
-        p = try codec.encodeUint16(
+        p = try codec.encode_uint16(
             buf,
             p,
             @intFromEnum(self.wire_format),

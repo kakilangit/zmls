@@ -20,6 +20,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("../codec/codec.zig");
 const varint = @import("../codec/varint.zig");
+const grease = @import("../common/grease.zig");
 const types = @import("../common/types.zig");
 const errors = @import("../common/errors.zig");
 const node_mod = @import("../tree/node.zig");
@@ -124,14 +125,14 @@ pub const Remove = struct {
         buf: []u8,
         pos: u32,
     ) EncodeError!u32 {
-        return codec.encodeUint32(buf, pos, self.removed);
+        return codec.encode_uint32(buf, pos, self.removed);
     }
 
     pub fn decode(
         data: []const u8,
         pos: u32,
     ) DecodeError!struct { value: Remove, pos: u32 } {
-        const r = try codec.decodeUint32(data, pos);
+        const r = try codec.decode_uint32(data, pos);
         return .{
             .value = .{ .removed = r.value },
             .pos = r.pos,
@@ -183,13 +184,13 @@ pub const ReInit = struct {
         pos: u32,
     ) EncodeError!u32 {
         var p = pos;
-        p = try codec.encodeVarVector(buf, p, self.group_id);
-        p = try codec.encodeUint16(
+        p = try codec.encode_var_vector(buf, p, self.group_id);
+        p = try codec.encode_uint16(
             buf,
             p,
             @intFromEnum(self.version),
         );
-        p = try codec.encodeUint16(
+        p = try codec.encode_uint16(
             buf,
             p,
             @intFromEnum(self.cipher_suite),
@@ -207,16 +208,16 @@ pub const ReInit = struct {
         pos: u32,
     } {
         var p = pos;
-        const gid_r = try codec.decodeVarVectorLimited(
+        const gid_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
             types.max_public_key_length,
         );
         p = gid_r.pos;
-        const ver_r = try codec.decodeUint16(data, p);
+        const ver_r = try codec.decode_uint16(data, p);
         p = ver_r.pos;
-        const cs_r = try codec.decodeUint16(data, p);
+        const cs_r = try codec.decode_uint16(data, p);
         p = cs_r.pos;
         const ext_r = try decodeExtensionList(
             allocator,
@@ -265,7 +266,7 @@ pub const ExternalInit = struct {
         buf: []u8,
         pos: u32,
     ) EncodeError!u32 {
-        return codec.encodeVarVector(buf, pos, self.kem_output);
+        return codec.encode_var_vector(buf, pos, self.kem_output);
     }
 
     pub fn decode(
@@ -276,7 +277,7 @@ pub const ExternalInit = struct {
         value: ExternalInit,
         pos: u32,
     } {
-        const r = try codec.decodeVarVectorLimited(
+        const r = try codec.decode_var_vector_limited(
             allocator,
             data,
             pos,
@@ -325,6 +326,28 @@ pub const GroupContextExtensions = struct {
             data,
             pos,
         );
+        // RFC 9420 S13: GroupContextExtensions extensions
+        // are mandatory — reject unknown types.
+        for (ext_r.value) |ext| {
+            if (grease.isGreaseExtension(ext.extension_type)) {
+                freeDecodedExts(
+                    allocator,
+                    ext_r.value,
+                );
+                allocator.free(ext_r.value);
+                return error.GreaseNotAllowed;
+            }
+            if (!types.isGroupContextExtension(
+                ext.extension_type,
+            )) {
+                freeDecodedExts(
+                    allocator,
+                    ext_r.value,
+                );
+                allocator.free(ext_r.value);
+                return error.UnknownExtension;
+            }
+        }
         return .{
             .value = .{
                 .extensions = @as(
@@ -378,7 +401,7 @@ pub const Proposal = struct {
         buf: []u8,
         pos: u32,
     ) EncodeError!u32 {
-        var p = try codec.encodeUint16(
+        var p = try codec.encode_uint16(
             buf,
             pos,
             @intFromEnum(self.tag),
@@ -431,8 +454,10 @@ pub const Proposal = struct {
         value: Proposal,
         pos: u32,
     } {
-        const type_r = try codec.decodeUint16(data, pos);
+        const type_r = try codec.decode_uint16(data, pos);
         const tag: ProposalType = @enumFromInt(type_r.value);
+        if (grease.isGreaseProposal(tag))
+            return error.GreaseNotAllowed;
         var p = type_r.pos;
 
         switch (tag) {
@@ -590,7 +615,7 @@ pub const Proposal = struct {
         data: []const u8,
         pos: u32,
     ) DecodeError!u32 {
-        const type_r = try codec.decodeUint16(data, pos);
+        const type_r = try codec.decode_uint16(data, pos);
         const tag: ProposalType = @enumFromInt(type_r.value);
         var p = type_r.pos;
         switch (tag) {
@@ -610,16 +635,16 @@ pub const Proposal = struct {
             .reinit => {
                 // group_id<V>, version u16, cipher_suite u16,
                 // extensions<V>
-                p = try codec.skipVarVector(data, p);
+                p = try codec.skip_var_vector(data, p);
                 if (p + 4 > data.len) return error.Truncated;
                 p += 4; // version + cipher_suite
-                p = try codec.skipVarVector(data, p);
+                p = try codec.skip_var_vector(data, p);
             },
             .external_init => {
-                p = try codec.skipVarVector(data, p);
+                p = try codec.skip_var_vector(data, p);
             },
             .group_context_extensions => {
-                p = try codec.skipVarVector(data, p);
+                p = try codec.skip_var_vector(data, p);
             },
             else => {
                 // Unknown/GREASE: assume zero-length body.
@@ -669,7 +694,7 @@ fn encodeExtensionList(
     pos: u32,
     exts: []const Extension,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         Extension,
         buf,
         pos,
@@ -749,8 +774,8 @@ fn skipCredential(
 ) DecodeError!u32 {
     // u16 credential_type, then variant body.
     // Both basic and x509 bodies are a single <V> vector.
-    const ct = try codec.decodeUint16(data, pos);
-    return codec.skipVarVector(data, ct.pos);
+    const ct = try codec.decode_uint16(data, pos);
+    return codec.skip_var_vector(data, ct.pos);
 }
 
 /// Skip over encoded Capabilities.
@@ -762,11 +787,11 @@ fn skipCapabilities(
 ) DecodeError!u32 {
     var p = pos;
     // Five varint-prefixed lists.
-    p = try codec.skipVarVector(data, p);
-    p = try codec.skipVarVector(data, p);
-    p = try codec.skipVarVector(data, p);
-    p = try codec.skipVarVector(data, p);
-    p = try codec.skipVarVector(data, p);
+    p = try codec.skip_var_vector(data, p);
+    p = try codec.skip_var_vector(data, p);
+    p = try codec.skip_var_vector(data, p);
+    p = try codec.skip_var_vector(data, p);
+    p = try codec.skip_var_vector(data, p);
     return p;
 }
 
@@ -779,11 +804,11 @@ pub fn skipLeafNode(
     pos: u32,
 ) DecodeError!u32 {
     var p = pos;
-    p = try codec.skipVarVector(data, p); // encryption_key
-    p = try codec.skipVarVector(data, p); // signature_key
+    p = try codec.skip_var_vector(data, p); // encryption_key
+    p = try codec.skip_var_vector(data, p); // signature_key
     p = try skipCredential(data, p);
     p = try skipCapabilities(data, p);
-    const src = try codec.decodeUint8(data, p);
+    const src = try codec.decode_uint8(data, p);
     p = src.pos;
     if (src.value == 0x01) {
         // key_package source: Lifetime = u64 + u64.
@@ -791,11 +816,11 @@ pub fn skipLeafNode(
         p += 16;
     } else if (src.value == 0x03) {
         // Commit source: parent_hash<V>.
-        p = try codec.skipVarVector(data, p);
+        p = try codec.skip_var_vector(data, p);
     }
     // update(0x02) has no extra fields.
-    p = try codec.skipVarVector(data, p); // extensions
-    p = try codec.skipVarVector(data, p); // signature
+    p = try codec.skip_var_vector(data, p); // extensions
+    p = try codec.skip_var_vector(data, p); // signature
     return p;
 }
 
@@ -809,10 +834,10 @@ fn skipKeyPackage(
     var p = pos;
     if (p + 4 > data.len) return error.Truncated;
     p += 4; // version + cipher_suite
-    p = try codec.skipVarVector(data, p); // init_key
+    p = try codec.skip_var_vector(data, p); // init_key
     p = try skipLeafNode(data, p);
-    p = try codec.skipVarVector(data, p); // extensions
-    p = try codec.skipVarVector(data, p); // signature
+    p = try codec.skip_var_vector(data, p); // extensions
+    p = try codec.skip_var_vector(data, p); // signature
     return p;
 }
 
@@ -823,21 +848,21 @@ fn skipPreSharedKeyId(
     pos: u32,
 ) DecodeError!u32 {
     var p = pos;
-    const psk_type = try codec.decodeUint8(data, p);
+    const psk_type = try codec.decode_uint8(data, p);
     p = psk_type.pos;
     switch (psk_type.value) {
         0x01 => { // external
-            p = try codec.skipVarVector(data, p); // psk_id
+            p = try codec.skip_var_vector(data, p); // psk_id
         },
         0x02 => { // resumption
             if (p + 1 > data.len) return error.Truncated;
             p += 1; // usage u8
-            p = try codec.skipVarVector(data, p); // group_id
+            p = try codec.skip_var_vector(data, p); // group_id
             if (p + 8 > data.len) return error.Truncated;
             p += 8; // epoch u64
         },
         else => return error.InvalidEnumValue,
     }
-    p = try codec.skipVarVector(data, p); // psk_nonce
+    p = try codec.skip_var_vector(data, p); // psk_nonce
     return p;
 }

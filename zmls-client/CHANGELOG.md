@@ -2,7 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.2] - 2026-04-10
+## [0.1.4] - 2026-05-27
+
+### Added
+
+- **ReInit support** -- `client.reinitGroup()` and `processReInitCommit()`
+  for group reinitialization (RFC 9420 §11.2).
+- **Credential matching for resync** -- `ExternalJoinOpts.credential_matcher`
+  callback for verifying the joiner's credential matches a removed member.
+- **KeyPackage reuse tracking** -- `KeyStore.markKeyPackageUsed()` /
+  `isKeyPackageUsed()` ports with `MemoryKeyStore` implementation.
+- **Reuse guard from CSPRNG** -- `encryptContent` generates a fresh
+  4-byte reuse guard from the OS CSPRNG per RFC 9420 §9.3.
+- **RatchetTree extension** -- ratchet tree is now serialized into a
+  `ratchet_tree` GroupInfo extension for Welcome recipients.
+
+### Changed
+
+- **GroupInfo with ratchet_tree extension** -- joined groups now receive
+  the full ratchet tree via the `ratchet_tree` extension instead of
+  external tree data.
+- **New member proposal signature verification** -- `new_member_proposal`
+  framed content signatures are verified against the Add proposal's
+  KeyPackage leaf signature key.
+
+## [0.1.3] - 2026-04-10
 
 ### Fixed
 

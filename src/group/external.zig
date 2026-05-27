@@ -51,6 +51,7 @@ const primitives = @import("../crypto/primitives.zig");
 const secureZero = primitives.secureZero;
 const psk_mod = @import("../key_schedule/psk.zig");
 const psk_lookup_mod = @import("../key_schedule/psk_lookup.zig");
+const credential_mod = @import("../credential/credential.zig");
 
 const Extension = node_mod.Extension;
 const ExtensionType = types.ExtensionType;
@@ -75,6 +76,7 @@ const CryptoError = errors.CryptoError;
 const ValidationError = errors.ValidationError;
 const GroupError = errors.GroupError;
 const TreeError = errors.TreeError;
+const Credential = credential_mod.Credential;
 
 /// Error set for external commit operations.
 pub const ExternalCommitError =
@@ -354,14 +356,7 @@ fn ExternalSetupResult(comptime P: type) type {
         new_tree: RatchetTree,
         joiner_leaf: LeafIndex,
         init_secret: [P.nh]u8,
-        ext_init_proposal: Proposal,
         kem_output_buf: [P.npk]u8,
-
-        /// Fix kem_output pointer after struct relocation.
-        fn fixPointers(self: *@This()) void {
-            self.ext_init_proposal.payload
-                .external_init.kem_output = &self.kem_output_buf;
-        }
     };
 }
 
@@ -381,7 +376,6 @@ fn setupExternalTree(
         &result.kem_output_buf,
     );
     result.init_secret = ext_init.init_secret;
-    result.ext_init_proposal = ext_init.proposal;
 
     var new_tree = try tree.clone();
     errdefer new_tree.deinit();
@@ -686,9 +680,16 @@ pub fn createExternalCommit(
         gi_extensions,
         &params,
     );
-    setup.fixPointers();
     errdefer setup.new_tree.deinit();
     defer secureZero(&setup.init_secret);
+    const ext_init_proposal = Proposal{
+        .tag = .external_init,
+        .payload = .{
+            .external_init = ExternalInit{
+                .kem_output = &setup.kem_output_buf,
+            },
+        },
+    };
 
     // 4-9. Path, encode, sign, confirmed transcript hash.
     var bc = try buildExternalCommitContent(
@@ -696,7 +697,7 @@ pub fn createExternalCommit(
         allocator,
         &setup.new_tree,
         setup.joiner_leaf,
-        setup.ext_init_proposal,
+        ext_init_proposal,
         &params,
         group_context,
         interim_transcript_hash,
@@ -1150,6 +1151,10 @@ pub fn processExternalCommit(
     receiver: LeafIndex,
     receiver_sk: *const [P.nsk]u8,
     receiver_pk: *const [P.npk]u8,
+    credential_matcher: ?*const fn (
+        joiner: *const Credential,
+        removed: *const Credential,
+    ) bool,
     wire_format: WireFormat,
 ) ExternalCommitError!ProcessExternalResult(P) {
     // 1-3. Verify sender, epoch, signature.
@@ -1164,6 +1169,12 @@ pub fn processExternalCommit(
 
     // 4. Validate external commit proposals.
     try validateExternalProposals(proposals);
+    try enforceExternalResyncCredentialMatch(
+        proposals,
+        tree,
+        &update_path.leaf_node.credential,
+        credential_matcher,
+    );
 
     // 5. Find ExternalInit and recover init_secret.
     var init_secret = try findAndProcessExternalInit(
@@ -1212,6 +1223,60 @@ pub fn processExternalCommit(
         confirmation_tag,
         joiner_leaf,
     );
+}
+
+/// Enforce credential matching for resync (RFC 9420 §12.4.3.2).
+///
+/// When an external commit includes a Remove proposal to replace
+/// an existing member, the joiner's credential must match the
+/// removed member's credential (verified via application-defined
+/// `credential_matcher` callback).
+///
+/// # Resync PSK (advanced)
+///
+/// For higher security, the joiner may also include a `PreSharedKey`
+/// proposal with a resumption PSK derived from the removed member's
+/// prior epoch. This allows the new member to prove they previously
+/// held the removed leaf. Derivation:
+///
+/// ```text
+/// psk = ExpandWithLabel(resumption_secret, "resync", context, KDF.Nh)
+/// ```
+///
+/// where `context` = `confirmed_transcript_hash` of the epoch being
+/// referenced, and the PSK usage is `.application` (not `.reinit` or
+/// `.branch`).
+///
+/// This is an advanced, application-level concern. The library does
+/// not automatically derive or inject resync PSKs — the caller is
+/// responsible for providing them via the `psk_resolver` parameter
+/// in `ProcessExternalCommitOpts`.
+fn enforceExternalResyncCredentialMatch(
+    proposals: []const Proposal,
+    tree: *const RatchetTree,
+    joiner_credential: *const Credential,
+    credential_matcher: ?*const fn (
+        joiner: *const Credential,
+        removed: *const Credential,
+    ) bool,
+) ValidationError!void {
+    const matcher = credential_matcher orelse return;
+    for (proposals) |*prop| {
+        if (prop.tag != .remove) continue;
+        const removed_idx = prop.payload.remove.removed;
+        if (removed_idx >= tree.leaf_count) return error.UnknownMember;
+        const node_idx = LeafIndex.fromU32(removed_idx)
+            .toNodeIndex()
+            .toUsize();
+        if (node_idx >= tree.nodes.len) return error.UnknownMember;
+        const node = tree.nodes[node_idx] orelse return error.UnknownMember;
+        if (node.node_type != .leaf) return error.UnknownMember;
+        const removed_credential = &node.payload.leaf.credential;
+        if (!matcher(joiner_credential, removed_credential)) {
+            return error.CredentialMismatch;
+        }
+        return;
+    }
 }
 
 /// Result of processExternalCommit.
@@ -1376,5 +1441,94 @@ test "validateExternalProposals rejects missing ExternalInit" {
     try testing.expectError(
         error.InvalidProposalList,
         result,
+    );
+}
+
+fn makeMatcherTestLeaf(id: []const u8) LeafNode {
+    return .{
+        .encryption_key = id,
+        .signature_key = id,
+        .credential = Credential.initBasic(id),
+        .capabilities = .{
+            .versions = &.{},
+            .cipher_suites = &.{},
+            .extensions = &.{},
+            .proposals = &.{},
+            .credentials = &.{},
+        },
+        .source = .commit,
+        .lifetime = null,
+        .parent_hash = null,
+        .extensions = &.{},
+        .signature = id,
+    };
+}
+
+test "enforceExternalResyncCredentialMatch rejects mismatch" {
+    var tree = try RatchetTree.init(testing.allocator, 1);
+    defer tree.deinit();
+    try tree.setLeaf(LeafIndex.fromU32(0), makeMatcherTestLeaf("removed"));
+
+    const proposals = [_]Proposal{
+        .{
+            .tag = .remove,
+            .payload = .{ .remove = .{ .removed = 0 } },
+        },
+    };
+    const joiner = Credential.initBasic("joiner");
+
+    const Matcher = struct {
+        fn match(
+            joiner_cred: *const Credential,
+            removed_cred: *const Credential,
+        ) bool {
+            return std.mem.eql(
+                u8,
+                joiner_cred.payload.basic,
+                removed_cred.payload.basic,
+            );
+        }
+    };
+
+    const result = enforceExternalResyncCredentialMatch(
+        &proposals,
+        &tree,
+        &joiner,
+        &Matcher.match,
+    );
+    try testing.expectError(error.CredentialMismatch, result);
+}
+
+test "enforceExternalResyncCredentialMatch accepts match" {
+    var tree = try RatchetTree.init(testing.allocator, 1);
+    defer tree.deinit();
+    try tree.setLeaf(LeafIndex.fromU32(0), makeMatcherTestLeaf("same"));
+
+    const proposals = [_]Proposal{
+        .{
+            .tag = .remove,
+            .payload = .{ .remove = .{ .removed = 0 } },
+        },
+    };
+    const joiner = Credential.initBasic("same");
+
+    const Matcher = struct {
+        fn match(
+            joiner_cred: *const Credential,
+            removed_cred: *const Credential,
+        ) bool {
+            return std.mem.eql(
+                u8,
+                joiner_cred.payload.basic,
+                removed_cred.payload.basic,
+            );
+        }
+    };
+
+    try enforceExternalResyncCredentialMatch(
+        &proposals,
+        &tree,
+        &joiner,
+        &Matcher.match,
     );
 }

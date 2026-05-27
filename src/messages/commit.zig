@@ -79,7 +79,7 @@ pub const ProposalOrRef = struct {
         buf: []u8,
         pos: u32,
     ) EncodeError!u32 {
-        var p = try codec.encodeUint8(
+        var p = try codec.encode_uint8(
             buf,
             pos,
             @intFromEnum(self.tag),
@@ -89,7 +89,7 @@ pub const ProposalOrRef = struct {
                 p = try self.payload.proposal.encode(buf, p);
             },
             .reference => {
-                p = try codec.encodeVarVector(
+                p = try codec.encode_var_vector(
                     buf,
                     p,
                     self.payload.reference,
@@ -108,7 +108,7 @@ pub const ProposalOrRef = struct {
         value: ProposalOrRef,
         pos: u32,
     } {
-        const type_r = try codec.decodeUint8(data, pos);
+        const type_r = try codec.decode_uint8(data, pos);
         const tag: ProposalOrRefType = @enumFromInt(
             type_r.value,
         );
@@ -130,7 +130,7 @@ pub const ProposalOrRef = struct {
                 };
             },
             .reference => {
-                const r = try codec.decodeVarVectorLimited(
+                const r = try codec.decode_var_vector_limited(
                     allocator,
                     data,
                     p,
@@ -191,10 +191,10 @@ pub const Commit = struct {
         p = try encodeProposalOrRefList(buf, p, self.proposals);
         // optional<UpdatePath> path.
         if (self.path) |*up| {
-            p = try codec.encodeUint8(buf, p, 1);
+            p = try codec.encode_uint8(buf, p, 1);
             p = try up.encode(buf, p);
         } else {
-            p = try codec.encodeUint8(buf, p, 0);
+            p = try codec.encode_uint8(buf, p, 0);
         }
         return p;
     }
@@ -217,7 +217,7 @@ pub const Commit = struct {
         p = props_r.pos;
 
         // optional<UpdatePath>
-        const opt_r = try codec.decodeUint8(data, p);
+        const opt_r = try codec.decode_uint8(data, p);
         p = opt_r.pos;
 
         var path: ?UpdatePath = null;
@@ -258,14 +258,14 @@ pub const Commit = struct {
     ) DecodeError!u32 {
         var p = pos;
         // proposals<V> — skip entire vector.
-        p = try codec.skipVarVector(data, p);
+        p = try codec.skip_var_vector(data, p);
         // optional<UpdatePath>
-        const opt = try codec.decodeUint8(data, p);
+        const opt = try codec.decode_uint8(data, p);
         p = opt.pos;
         if (opt.value == 1) {
             // UpdatePath: LeafNode + nodes<V>.
             p = try skipLeafNode(data, p);
-            p = try codec.skipVarVector(data, p); // nodes
+            p = try codec.skip_var_vector(data, p); // nodes
         } else if (opt.value != 0) {
             return error.InvalidOptionalPrefix;
         }
@@ -296,7 +296,7 @@ fn encodeProposalOrRefList(
     pos: u32,
     items: []const ProposalOrRef,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         ProposalOrRef,
         buf,
         pos,
@@ -514,7 +514,7 @@ test "Commit with UpdatePath present" {
 test "ProposalOrRef decode rejects unknown type" {
     const alloc = testing.allocator;
     var buf: [1]u8 = undefined;
-    _ = try codec.encodeUint8(&buf, 0, 0xFF);
+    _ = try codec.encode_uint8(&buf, 0, 0xFF);
     const result = ProposalOrRef.decode(alloc, &buf, 0);
     try testing.expectError(error.InvalidEnumValue, result);
 }

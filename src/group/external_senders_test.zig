@@ -47,15 +47,15 @@ test "parseExternalSenders single basic entry" {
     var p: u32 = 0;
 
     // signature_key<V> = "sig-key-1"
-    p = try codec.encodeVarVector(
+    p = try codec.encode_var_vector(
         &inner_buf,
         p,
         "sig-key-1",
     );
 
     // Credential: basic type (u16 = 1) + identity<V> = "alice"
-    p = try codec.encodeUint16(&inner_buf, p, 1); // basic
-    p = try codec.encodeVarVector(&inner_buf, p, "alice");
+    p = try codec.encode_uint16(&inner_buf, p, 1); // basic
+    p = try codec.encode_var_vector(&inner_buf, p, "alice");
 
     // Now wrap in outer varint length.
     const inner_len = p;
@@ -607,7 +607,7 @@ test "parseExternalSenders mixed basic and x509" {
 
 test "validateExternalSenderProposal accepts x509 sender" {
     var certs = [_]Certificate{
-        .{ .data = "leaf-cert" },
+        .{ .data = "x509-key" },
     };
     const senders = [_]ExternalSender{
         .{

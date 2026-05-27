@@ -377,6 +377,10 @@ pub const validateProposalList =
 /// Apply validated proposals to produce tree mutations.
 pub const applyProposals = group_evolution.applyProposals;
 
+/// Validate wire format policy constraints for content.
+pub const validateWireFormat =
+    group_evolution.validateWireFormat;
+
 /// Derive epoch secrets from the key schedule.
 pub const deriveEpochSecrets =
     key_schedule.deriveEpochSecrets;

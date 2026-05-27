@@ -162,6 +162,23 @@ pub const ExtensionType = enum(u16) {
     _,
 };
 
+/// Check whether an ExtensionType is a known GroupContext
+/// extension per RFC 9420 Section 13.
+///
+/// GroupContext extensions are mandatory to implement. Unknown
+/// extension types in GroupContext MUST be rejected.
+pub fn isGroupContextExtension(et: ExtensionType) bool {
+    return switch (et) {
+        .application_id,
+        .ratchet_tree,
+        .required_capabilities,
+        .external_pub,
+        .external_senders,
+        => true,
+        else => false,
+    };
+}
+
 /// Leaf node source discriminator. Per RFC 9420 Section 7.2.
 pub const LeafNodeSource = enum(u8) {
     reserved = 0,
@@ -186,6 +203,7 @@ pub const max_vec_length: u32 = 1 << 20; // 1 MiB.
 
 /// Per-field decode limits for known-bounded MLS fields.
 pub const max_public_key_length: u32 = 256;
+pub const max_group_id_length: u32 = 255;
 pub const max_signature_length: u32 = 512;
 pub const max_hash_length: u32 = 128;
 pub const max_credential_length: u32 = 1 << 16; // 64 KiB.

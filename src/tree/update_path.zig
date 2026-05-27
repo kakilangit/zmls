@@ -38,12 +38,12 @@ pub const HPKECiphertext = struct {
         buf: []u8,
         pos: u32,
     ) EncodeError!u32 {
-        var p = try codec.encodeVarVector(
+        var p = try codec.encode_var_vector(
             buf,
             pos,
             self.kem_output,
         );
-        p = try codec.encodeVarVector(
+        p = try codec.encode_var_vector(
             buf,
             p,
             self.ciphertext,
@@ -59,13 +59,13 @@ pub const HPKECiphertext = struct {
         value: HPKECiphertext,
         pos: u32,
     } {
-        const kem_r = try codec.decodeVarVectorLimited(
+        const kem_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             pos,
             types.max_public_key_length,
         );
-        const ct_r = try codec.decodeVarVector(
+        const ct_r = try codec.decode_var_vector(
             allocator,
             data,
             kem_r.pos,
@@ -111,7 +111,7 @@ pub const UpdatePathNode = struct {
         buf: []u8,
         pos: u32,
     ) EncodeError!u32 {
-        var p = try codec.encodeVarVector(
+        var p = try codec.encode_var_vector(
             buf,
             pos,
             self.encryption_key,
@@ -133,7 +133,7 @@ pub const UpdatePathNode = struct {
         value: UpdatePathNode,
         pos: u32,
     } {
-        const ek_r = try codec.decodeVarVectorLimited(
+        const ek_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             pos,
@@ -244,7 +244,7 @@ pub fn encodeHpkeCiphertextList(
     pos: u32,
     items: []const HPKECiphertext,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         HPKECiphertext,
         buf,
         pos,
@@ -306,7 +306,7 @@ pub fn encodeUpdatePathNodeList(
     pos: u32,
     items: []const UpdatePathNode,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         UpdatePathNode,
         buf,
         pos,

@@ -465,6 +465,7 @@ test "createExternalCommit and processExternalCommit round-trip" {
         gs.my_leaf_index, // Alice = leaf 0
         &alice_enc_kp.sk,
         &alice_enc_kp.pk,
+        null,
         .mls_public_message,
     );
     defer proc_result.tree.deinit();

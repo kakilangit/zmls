@@ -122,6 +122,13 @@ pub fn StagedCommit(comptime P: type) type {
         ) ProposalApplyResult {
             return self.result.apply_result;
         }
+
+        /// Get ReInit outcome material, if present.
+        pub fn reinitOutcome(
+            self: *const Self,
+        ) ?commit_mod.ReInitOutcome(P) {
+            return self.result.reinit_outcome;
+        }
     };
 }
 
@@ -559,4 +566,95 @@ test "apply retains past-epoch sender_data_secret in ring" {
 
     // Current epoch (1) is NOT in the ring — it is live.
     try testing.expect(tg.gs.epoch_key_ring.lookup(1) == null);
+}
+
+test "stageCommit exposes reinit outcome" {
+    const alloc = testing.allocator;
+    var tg: TestGroup = undefined;
+    try tg.init(alloc);
+    defer tg.deinit();
+
+    var bob_kp: TestKP = undefined;
+    try bob_kp.init(0xB0, 0xB1, 0xB2);
+    const add_prop = Proposal{
+        .tag = .add,
+        .payload = .{ .add = .{ .key_package = bob_kp.kp } },
+    };
+    var cr_add = try commit_mod.createCommit(
+        Default,
+        alloc,
+        &tg.gs.group_context,
+        &tg.gs.tree,
+        tg.gs.my_leaf_index,
+        &[_]Proposal{add_prop},
+        &tg.sign_sk,
+        &tg.gs.interim_transcript_hash,
+        &tg.gs.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr_add.tree.deinit();
+    defer cr_add.deinit(alloc);
+
+    const reinit_prop = Proposal{
+        .tag = .reinit,
+        .payload = .{
+            .reinit = .{
+                .group_id = "reinit-next",
+                .version = .mls10,
+                .cipher_suite = .mls_128_dhkemx25519_aes128gcm_sha256_ed25519,
+                .extensions = &.{},
+            },
+        },
+    };
+    var cr_ri = try commit_mod.createCommit(
+        Default,
+        alloc,
+        &cr_add.group_context,
+        &cr_add.tree,
+        tg.gs.my_leaf_index,
+        &[_]Proposal{reinit_prop},
+        &tg.sign_sk,
+        &cr_add.interim_transcript_hash,
+        &cr_add.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr_ri.tree.deinit();
+    defer cr_ri.deinit(alloc);
+
+    const fc = FramedContent{
+        .group_id = cr_add.group_context.group_id,
+        .epoch = cr_add.group_context.epoch,
+        .sender = Sender.member(tg.gs.my_leaf_index),
+        .authenticated_data = "",
+        .content_type = .commit,
+        .content = cr_ri.commit_bytes[0..cr_ri.commit_len],
+    };
+
+    var staged = try stageCommit(
+        Default,
+        alloc,
+        .{
+            .fc = &fc,
+            .signature = &cr_ri.signature,
+            .confirmation_tag = &cr_ri.confirmation_tag,
+            .proposals = &[_]Proposal{reinit_prop},
+            .sender_verify_key = &tg.sign_pk,
+            .current_resumption_psk = &cr_add.epoch_secrets.resumption_psk,
+        },
+        &cr_add.group_context,
+        &cr_add.tree,
+        &cr_add.interim_transcript_hash,
+        &cr_add.epoch_secrets.init_secret,
+    );
+    defer staged.discard(testing.allocator) catch |err|
+        @panic(@errorName(err));
+
+    try testing.expect(staged.reinitOutcome() != null);
+    const out = staged.reinitOutcome().?;
+    try testing.expectEqual(.reinit, out.psk_usage);
+    try testing.expectEqualStrings("reinit-next", out.group_id);
 }

@@ -224,7 +224,7 @@ pub fn ProposalEncode(comptime P: type) type {
             var pos: u32 = 0;
 
             // WireFormat (u16)
-            pos = try zmls.codec.encodeUint16(
+            pos = try zmls.codec.encode_uint16(
                 &buffer,
                 pos,
                 @intFromEnum(

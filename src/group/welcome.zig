@@ -43,6 +43,9 @@ const psk_mod = @import("../key_schedule/psk.zig");
 const commit_mod = @import("commit.zig");
 const path_mod = @import("../tree/path.zig");
 const path_secrets_mod = @import("../tree/path_secrets.zig");
+const CredentialValidator = @import(
+    "../credential/validator.zig",
+).CredentialValidator;
 const secureZero = primitives.secureZero;
 
 const CipherSuite = types.CipherSuite;
@@ -177,6 +180,11 @@ pub fn ProcessWelcomeOpts(comptime P: type) type {
         my_leaf_index: LeafIndex,
         /// PSK resolver.
         psk_resolver: ?commit_mod.PskResolver(P) = null,
+        /// Application-level credential validation for the
+        /// GroupInfo signer. When provided, the signer's
+        /// credential is validated after the signature key
+        /// check (RFC 9420 §12.4.3.2).
+        credential_validator: ?CredentialValidator = null,
     };
 }
 
@@ -213,6 +221,8 @@ pub fn BuildWelcomeOpts(comptime P: type) type {
         /// Leaf count of the post-commit tree (needed for
         /// direct path computation).
         tree_size: u32 = 0,
+        /// Optional full ratchet tree to embed in GroupInfo.
+        ratchet_tree: ?*const RatchetTree = null,
     };
 }
 
@@ -253,7 +263,12 @@ pub fn processWelcome(
     tree_data: TreeInput,
     my_leaf_index: LeafIndex,
     psk_resolver: ?commit_mod.PskResolver(P),
+    credential_validator: ?CredentialValidator,
 ) WelcomeError!WelcomeJoinResult(P) {
+    assert(my_leaf_index.toU32() < 1 << 32);
+    assert(kp_ref.len > 0);
+    assert(init_sk.len == P.nsk);
+
     // 1-2. Decrypt GroupSecrets, derive welcome_secret.
     var ws = try decryptWelcomeSecrets(
         P,
@@ -279,7 +294,11 @@ pub fn processWelcome(
     defer gi.deinit(allocator);
 
     // 6-7b. Build tree, verify tree hash, decode GroupContext.
-    var tree = try buildTree(allocator, tree_data);
+    var tree = try buildTree(
+        allocator,
+        tree_data,
+        gi.extensions,
+    );
     errdefer tree.deinit();
     var gc = try verifyTreeAndDecodeContext(
         P,
@@ -296,31 +315,16 @@ pub fn processWelcome(
     // Validate tree leaf nodes and structural invariants.
     try validateWelcomeTree(P, &tree, gc.cipher_suite);
 
-    // RFC 9420 §12.4.3.1: verify that the caller-provided
-    // signer_verify_key matches the signer's leaf in the
-    // tree. The GroupInfo signer is at leaf index gi.signer.
-    const signer_leaf_idx = LeafIndex.fromU32(gi.signer);
-    const signer_leaf = tree.getLeaf(signer_leaf_idx) catch
-        return error.IndexOutOfRange;
-    if (signer_leaf) |sl| {
-        if (sl.signature_key.len != P.sign_pk_len or
-            !primitives.constantTimeEql(
-                P.sign_pk_len,
-                sl.signature_key[0..P.sign_pk_len],
-                signer_verify_key,
-            ))
-            return error.SignatureVerifyFailed;
-    } else {
-        return error.InvalidLeafNode;
-    }
-
-    // 7c. Verify joiner's leaf is present at my_leaf_index.
-    const my_leaf = tree.getLeaf(my_leaf_index) catch
-        return error.IndexOutOfRange;
-    if (my_leaf == null) return error.InvalidLeafNode;
-
-    // RFC 9420 S13.4: joiner must support all group extensions.
-    try validateJoinerExtSupport(my_leaf.?.*, gc.extensions);
+    // Verify signer and joiner leaf.
+    try verifyWelcomeSignerAndJoiner(
+        P,
+        &tree,
+        &gi,
+        signer_verify_key,
+        credential_validator,
+        my_leaf_index,
+        gc.extensions,
+    );
 
     // Derive path keys from Welcome path_secret
     // (RFC 9420 §12.4.3.1).
@@ -359,6 +363,42 @@ pub fn processWelcome(
         .path_keys = path_keys,
         .path_key_count = path_key_count,
     };
+}
+
+/// Verify that the signer's leaf matches the expected verify
+/// key and that the joiner's leaf is present.
+fn verifyWelcomeSignerAndJoiner(
+    comptime P: type,
+    tree: *const RatchetTree,
+    gi: *const GroupInfo,
+    signer_verify_key: *const [P.sign_pk_len]u8,
+    credential_validator: ?CredentialValidator,
+    my_leaf_index: LeafIndex,
+    group_extensions: []const Extension,
+) WelcomeError!void {
+    const signer_leaf_idx = LeafIndex.fromU32(gi.signer);
+    assert(signer_leaf_idx.toU32() < tree.leaf_count);
+    const signer_leaf = tree.getLeaf(signer_leaf_idx) catch
+        return error.IndexOutOfRange;
+    if (signer_leaf) |sl| {
+        if (sl.signature_key.len != P.sign_pk_len or
+            !primitives.constantTimeEql(
+                P.sign_pk_len,
+                sl.signature_key[0..P.sign_pk_len],
+                signer_verify_key,
+            ))
+            return error.SignatureVerifyFailed;
+        if (credential_validator) |cv| {
+            try cv.validate(&sl.credential);
+        }
+    } else {
+        return error.InvalidLeafNode;
+    }
+
+    const my_leaf = tree.getLeaf(my_leaf_index) catch
+        return error.IndexOutOfRange;
+    if (my_leaf == null) return error.InvalidLeafNode;
+    try validateJoinerExtSupport(my_leaf.?.*, group_extensions);
 }
 
 /// Result of decryptWelcomeSecrets.
@@ -870,7 +910,17 @@ pub const TreeInput = union(enum) {
 fn buildTree(
     allocator: std.mem.Allocator,
     input: TreeInput,
+    gi_extensions: []const Extension,
 ) (TreeError || error{OutOfMemory})!RatchetTree {
+    for (gi_extensions) |ext| {
+        if (ext.extension_type == .ratchet_tree) {
+            return ratchet_tree_mod.decodeRatchetTree(
+                allocator,
+                ext.data,
+            ) catch return error.MalformedUpdatePath;
+        }
+    }
+
     switch (input) {
         .prebuilt => |*t| {
             // Deep-clone so caller retains ownership of original.
@@ -973,15 +1023,18 @@ pub fn buildWelcome(
     path_secret_count: u32,
     fdp_nodes: ?*const [path_mod.max_path_nodes]NodeIndex,
     tree_size: u32,
+    ratchet_tree: ?*const RatchetTree,
 ) WelcomeError!WelcomeResult {
     // 1. Sign and encode GroupInfo.
     var gi_buf: [max_gi_buf]u8 = undefined;
     const gi_end = try signAndEncodeGroupInfo(
         P,
+        allocator,
         gc_bytes,
         confirmation_tag,
         sign_key,
         signer,
+        ratchet_tree,
         &gi_buf,
     );
 
@@ -1021,16 +1074,30 @@ pub fn buildWelcome(
 /// Sign GroupInfo and encode to a stack buffer.
 fn signAndEncodeGroupInfo(
     comptime P: type,
+    allocator: std.mem.Allocator,
     gc_bytes: []const u8,
     confirmation_tag: *const [P.nh]u8,
     sign_key: *const [P.sign_sk_len]u8,
     signer: u32,
+    ratchet_tree: ?*const RatchetTree,
     gi_buf: *[max_gi_buf]u8,
 ) WelcomeError!u32 {
+    var ext_storage: [1]Extension = undefined;
+    var tree_ext_data: ?[]const u8 = null;
+    defer if (tree_ext_data) |d| allocator.free(d);
+    const exts: []const Extension = if (ratchet_tree) |rt| blk: {
+        const tree_ext = ratchet_tree_mod
+            .encodeRatchetTreeExtension(allocator, rt) catch
+            return error.OutOfMemory;
+        tree_ext_data = tree_ext.data;
+        ext_storage[0] = tree_ext;
+        break :blk ext_storage[0..1];
+    } else &.{};
+
     const sig = group_info_mod.signGroupInfo(
         P,
         gc_bytes,
-        &.{},
+        exts,
         confirmation_tag,
         signer,
         sign_key,
@@ -1038,7 +1105,7 @@ fn signAndEncodeGroupInfo(
 
     const gi = GroupInfo{
         .group_context = gc_bytes,
-        .extensions = &.{},
+        .extensions = exts,
         .confirmation_tag = confirmation_tag,
         .signer = signer,
         .signature = &sig,

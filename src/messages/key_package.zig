@@ -58,7 +58,7 @@ pub const KeyPackage = struct {
     ) EncodeError!u32 {
         var p = try self.encodeTbs(buf, pos);
         // signature<V>
-        p = try codec.encodeVarVector(buf, p, self.signature);
+        p = try codec.encode_var_vector(buf, p, self.signature);
         return p;
     }
 
@@ -70,19 +70,19 @@ pub const KeyPackage = struct {
     ) EncodeError!u32 {
         var p = pos;
         // ProtocolVersion (u16)
-        p = try codec.encodeUint16(
+        p = try codec.encode_uint16(
             buf,
             p,
             @intFromEnum(self.version),
         );
         // CipherSuite (u16)
-        p = try codec.encodeUint16(
+        p = try codec.encode_uint16(
             buf,
             p,
             @intFromEnum(self.cipher_suite),
         );
         // init_key<V>
-        p = try codec.encodeVarVector(buf, p, self.init_key);
+        p = try codec.encode_var_vector(buf, p, self.init_key);
         // leaf_node
         p = try self.leaf_node.encode(buf, p);
         // extensions<V> — varint-prefixed list of Extension
@@ -103,15 +103,15 @@ pub const KeyPackage = struct {
         var p = pos;
 
         // ProtocolVersion (u16)
-        const ver_r = try codec.decodeUint16(data, p);
+        const ver_r = try codec.decode_uint16(data, p);
         p = ver_r.pos;
 
         // CipherSuite (u16)
-        const cs_r = try codec.decodeUint16(data, p);
+        const cs_r = try codec.decode_uint16(data, p);
         p = cs_r.pos;
 
         // init_key<V>
-        const ik_r = try codec.decodeVarVectorLimited(
+        const ik_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
@@ -132,7 +132,7 @@ pub const KeyPackage = struct {
         p = ext_r.pos;
 
         // signature<V>
-        const sig_r = try codec.decodeVarVectorLimited(
+        const sig_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
@@ -384,7 +384,7 @@ fn encodeExtensionList(
     pos: u32,
     exts: []const Extension,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         Extension,
         buf,
         pos,
@@ -490,7 +490,9 @@ const TestKeyPackage = struct {
 };
 
 /// Build a minimal valid KeyPackage for testing.
-fn makeTestKeyPackage() CryptoError!TestKeyPackage {
+/// Accepts an out-parameter to avoid interior-pointer invalidation
+/// on move (Rule 0).
+fn makeTestKeyPackage(t: *TestKeyPackage) CryptoError!void {
     // Generate signing key pair.
     const sign_seed = [_]u8{0x01} ** 32;
     const sign_kp = try Default.signKeypairFromSeed(&sign_seed);
@@ -509,7 +511,7 @@ fn makeTestKeyPackage() CryptoError!TestKeyPackage {
     const prop_types = comptime [_]types.ProposalType{};
     const cred_types = comptime [_]CredentialType{.basic};
 
-    var result = TestKeyPackage{
+    t.* = TestKeyPackage{
         .sign_sk = sign_kp.sk,
         .sig_buf = undefined,
         .init_pk = init_kp.pk,
@@ -545,11 +547,12 @@ fn makeTestKeyPackage() CryptoError!TestKeyPackage {
     };
 
     // Point slices at the owned backing storage.
-    result.kp.init_key = &result.init_pk;
-    result.kp.leaf_node.encryption_key = &result.enc_pk;
-    result.kp.leaf_node.signature_key = &result.sign_pk;
+    t.kp.init_key = &t.init_pk;
+    t.kp.leaf_node.encryption_key = &t.enc_pk;
+    t.kp.leaf_node.signature_key = &t.sign_pk;
 
-    return result;
+    // Sign the KeyPackage (signature stored in t.sig_buf).
+    try t.kp.signKeyPackage(Default, &t.sign_sk, &t.sig_buf);
 }
 
 /// Fix internal slice pointers after makeTestKeyPackage returns.
@@ -569,8 +572,8 @@ fn fixTestKeyPackage(t: *TestKeyPackage) CryptoError!void {
 
 test "KeyPackage encode/decode round-trip" {
     const alloc = testing.allocator;
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
     const kp = &t.kp;
 
     // Encode.
@@ -608,8 +611,8 @@ test "KeyPackage encode/decode round-trip" {
 }
 
 test "KeyPackage sign and verify round-trip" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
     const kp = &t.kp;
 
     // Verify succeeds.
@@ -617,8 +620,8 @@ test "KeyPackage sign and verify round-trip" {
 }
 
 test "KeyPackage validate succeeds for valid package" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
     const kp = &t.kp;
     try kp.validate(
         Default,
@@ -628,8 +631,8 @@ test "KeyPackage validate succeeds for valid package" {
 }
 
 test "KeyPackage validate rejects wrong protocol version" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
     t.kp.version = .reserved;
 
     // Re-sign with modified version.
@@ -644,8 +647,8 @@ test "KeyPackage validate rejects wrong protocol version" {
 }
 
 test "KeyPackage validate rejects init_key == encryption_key" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
 
     // Make init_key equal to encryption_key.
     t.kp.init_key = t.kp.leaf_node.encryption_key;
@@ -662,8 +665,8 @@ test "KeyPackage validate rejects init_key == encryption_key" {
 }
 
 test "KeyPackage validate rejects wrong cipher suite" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
     const result = t.kp.validate(
         Default,
         .mls_128_dhkemx25519_chacha20poly1305_sha256_ed25519,
@@ -673,8 +676,8 @@ test "KeyPackage validate rejects wrong cipher suite" {
 }
 
 test "KeyPackage makeRef produces deterministic hash" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
     const ref1 = try t.kp.makeRef(Default);
     const ref2 = try t.kp.makeRef(Default);
     try testing.expectEqualSlices(u8, &ref1, &ref2);
@@ -692,8 +695,8 @@ test "KeyPackage makeRef produces deterministic hash" {
 }
 
 test "KeyPackage validate rejects non-key_package source" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
     t.kp.leaf_node.source = .update;
     t.kp.leaf_node.lifetime = null;
 
@@ -709,8 +712,8 @@ test "KeyPackage validate rejects non-key_package source" {
 }
 
 test "KeyPackage validate rejects expired lifetime" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
 
     // Set lifetime to [1000, 2000].
     t.kp.leaf_node.lifetime = .{
@@ -753,14 +756,14 @@ test "KeyPackage validate rejects expired lifetime" {
 }
 
 test "KeyPackage isLastResort false by default" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
     try testing.expect(!t.kp.isLastResort());
 }
 
 test "KeyPackage isLastResort true with extension" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
 
     const lr_ext = [_]Extension{last_resort_extension};
     t.kp.extensions = &lr_ext;
@@ -780,8 +783,8 @@ test "last_resort_extension encodes empty data" {
 }
 
 test "KeyPackage validate rejects invalid init_key" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
 
     // Replace init_key with all-zeros (invalid for X25519).
     t.init_pk = [_]u8{0x00} ** Default.npk;
@@ -799,8 +802,8 @@ test "KeyPackage validate rejects invalid init_key" {
 }
 
 test "KeyPackage validate rejects extension not in capabilities" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
 
     // Add a non-default extension (0xBEEF) to KeyPackage but NOT
     // to leaf_node.capabilities.extensions.
@@ -824,8 +827,8 @@ test "KeyPackage validate rejects extension not in capabilities" {
 }
 
 test "KeyPackage validate rejects missing mls10 in capabilities" {
-    var t = try makeTestKeyPackage();
-    try fixTestKeyPackage(&t);
+    var t: TestKeyPackage = undefined;
+    try makeTestKeyPackage(&t);
 
     // Override capabilities.versions to exclude mls10.
     const empty_versions = [_]ProtocolVersion{};

@@ -71,14 +71,14 @@ pub const MLSMessage = struct {
         var p = pos;
 
         // ProtocolVersion (u16)
-        p = try codec.encodeUint16(
+        p = try codec.encode_uint16(
             buf,
             p,
             @intFromEnum(self.version),
         );
 
         // WireFormat (u16)
-        p = try codec.encodeUint16(
+        p = try codec.encode_uint16(
             buf,
             p,
             @intFromEnum(self.wire_format),
@@ -118,11 +118,11 @@ pub const MLSMessage = struct {
         var p = pos;
 
         // ProtocolVersion (u16)
-        const ver = try codec.decodeUint16(buf, p);
+        const ver = try codec.decode_uint16(buf, p);
         p = ver.pos;
 
         // WireFormat (u16)
-        const wf_raw = try codec.decodeUint16(buf, p);
+        const wf_raw = try codec.decode_uint16(buf, p);
         p = wf_raw.pos;
 
         const version: ProtocolVersion = @enumFromInt(ver.value);

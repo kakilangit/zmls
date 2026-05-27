@@ -9,6 +9,7 @@ const proposal_mod = @import("../messages/proposal.zig");
 const key_package_mod = @import("../messages/key_package.zig");
 const psk_mod = @import("../key_schedule/psk.zig");
 const credential_mod = @import("../credential/credential.zig");
+const validator_mod = @import("../credential/validator.zig");
 const evolution = @import("evolution.zig");
 
 const LeafIndex = types.LeafIndex;
@@ -21,6 +22,8 @@ const RatchetTree = ratchet_tree_mod.RatchetTree;
 const Proposal = proposal_mod.Proposal;
 const PreSharedKeyId = psk_mod.PreSharedKeyId;
 const Credential = credential_mod.Credential;
+const Certificate = credential_mod.Certificate;
+const CredentialValidator = validator_mod.CredentialValidator;
 const KeyPackage = key_package_mod.KeyPackage;
 
 const CommitSender = evolution.CommitSender;
@@ -32,6 +35,8 @@ const validateGceAgainstTree = evolution.validateGceAgainstTree;
 const parseRequiredCapabilities = evolution.parseRequiredCapabilities;
 const validateLeafMeetsRequired = evolution.validateLeafMeetsRequired;
 const validateAddsRequiredCapabilities = evolution.validateAddsRequiredCapabilities;
+const validateGceRequiredCapabilities = evolution.validateGceRequiredCapabilities;
+const validateCredentialTypeSupport = evolution.validateCredentialTypeSupport;
 const validateWireFormat = evolution.validateWireFormat;
 const validateNonDefaultProposalCaps = evolution.validateNonDefaultProposalCaps;
 const validateReInitVersion = evolution.validateReInitVersion;
@@ -787,6 +792,7 @@ test "validateUpdatesAgainstTree rejects committer self-update" {
         validated,
         &tree,
         makeCommitSender(0),
+        null,
     );
     try testing.expectError(
         error.InvalidProposalList,
@@ -831,6 +837,7 @@ test "validateUpdatesAgainstTree rejects wrong source" {
         validated,
         &tree,
         makeCommitSender(0),
+        null,
     );
     try testing.expectError(error.InvalidLeafNode, result);
 }
@@ -874,6 +881,7 @@ test "validateUpdatesAgainstTree rejects duplicate encryption key" {
         validated,
         &tree,
         makeCommitSender(0),
+        null,
     );
     try testing.expectError(error.InvalidLeafNode, result);
 }
@@ -913,7 +921,56 @@ test "validateUpdatesAgainstTree accepts valid update" {
         validated,
         &tree,
         makeCommitSender(0),
+        null,
     );
+}
+
+test "validateUpdatesAgainstTree applies optional credential validator" {
+    const RejectAll = struct {
+        fn check(
+            _: *const anyopaque,
+            _: *const Credential,
+        ) errors.ValidationError!void {
+            return error.InvalidCredential;
+        }
+        fn validator() CredentialValidator {
+            return .{
+                .context = undefined,
+                .validate_fn = &check,
+            };
+        }
+    };
+
+    const alloc = testing.allocator;
+    var tree = try RatchetTree.init(alloc, 4);
+    defer tree.deinit();
+
+    try tree.setLeaf(LeafIndex.fromU32(0), makeTestLeaf("alice"));
+    try tree.setLeaf(LeafIndex.fromU32(1), makeTestLeaf("bob"));
+
+    var up_leaf = makeTestLeaf("bob-new");
+    up_leaf.source = .update;
+    const up_prop = Proposal{
+        .tag = .update,
+        .payload = .{ .update = .{ .leaf_node = up_leaf } },
+    };
+
+    const proposals = [_]Proposal{up_prop};
+    const validated = try validateProposalList(
+        testing.allocator,
+        &proposals,
+        makeCommitSender(1),
+        null,
+    );
+    defer validated.destroy(testing.allocator);
+
+    const result = validateUpdatesAgainstTree(
+        validated,
+        &tree,
+        makeCommitSender(0),
+        RejectAll.validator(),
+    );
+    try testing.expectError(error.InvalidCredential, result);
 }
 
 // -- Phase 14.3: PSK proposal validation tests -------------------------------
@@ -1058,7 +1115,7 @@ test "validateGceAgainstTree rejects unsupported extension" {
     var tree = try RatchetTree.init(alloc, 2);
     defer tree.deinit();
 
-    // Leaf 0 supports no extensions.
+    // Leaf 0 and 1 support no non-default extensions.
     try tree.setLeaf(
         LeafIndex.fromU32(0),
         makeTestLeaf("alice"),
@@ -1068,10 +1125,12 @@ test "validateGceAgainstTree rejects unsupported extension" {
         makeTestLeaf("bob"),
     );
 
-    // GCE proposes an application_id extension.
+    // GCE proposes external_senders (type 5) — a default type
+    // that is implicitly supported by all members, so this
+    // must pass regardless of capabilities.
     const ext = Extension{
-        .extension_type = .application_id,
-        .data = "app-id",
+        .extension_type = .external_senders,
+        .data = "sender-data",
     };
     const gce_prop = Proposal{
         .tag = .group_context_extensions,
@@ -1094,11 +1153,7 @@ test "validateGceAgainstTree rejects unsupported extension" {
     );
     defer validated.destroy(testing.allocator);
 
-    const result = validateGceAgainstTree(validated, &tree);
-    try testing.expectError(
-        error.UnsupportedCapability,
-        result,
-    );
+    try validateGceAgainstTree(validated, &tree);
 }
 
 test "validateGceAgainstTree accepts when all support extension" {
@@ -1334,6 +1389,104 @@ test "validateAddsRequiredCapabilities accepts compliant add" {
         validated,
         &group_exts,
     );
+}
+
+test "validateGceRequiredCapabilities rejects existing non-compliant leaf" {
+    const alloc = testing.allocator;
+    var tree = try RatchetTree.init(alloc, 2);
+    defer tree.deinit();
+
+    // Both leaves have empty capabilities.
+    try tree.setLeaf(LeafIndex.fromU32(0), makeTestLeaf("alice"));
+    try tree.setLeaf(LeafIndex.fromU32(1), makeTestLeaf("bob"));
+
+    // Require application_id extension support.
+    const data = [_]u8{
+        0x02, 0x00, 0x01, // ext_types: [application_id=1]
+        0x00, // prop_types: []
+        0x00, // cred_types: []
+    };
+    const ext = Extension{
+        .extension_type = .required_capabilities,
+        .data = &data,
+    };
+    const group_exts = [_]Extension{ext};
+
+    const result = validateGceRequiredCapabilities(&tree, &group_exts);
+    try testing.expectError(error.UnsupportedCapability, result);
+}
+
+test "validateGceRequiredCapabilities accepts compliant existing leaves" {
+    const alloc = testing.allocator;
+    var tree = try RatchetTree.init(alloc, 2);
+    defer tree.deinit();
+
+    const supported = [_]ExtensionType{.application_id};
+    try tree.setLeaf(
+        LeafIndex.fromU32(0),
+        makeTestLeafWithCaps("alice", &supported),
+    );
+    try tree.setLeaf(
+        LeafIndex.fromU32(1),
+        makeTestLeafWithCaps("bob", &supported),
+    );
+
+    const data = [_]u8{
+        0x02, 0x00, 0x01, // ext_types: [application_id=1]
+        0x00, // prop_types: []
+        0x00, // cred_types: []
+    };
+    const ext = Extension{
+        .extension_type = .required_capabilities,
+        .data = &data,
+    };
+    const group_exts = [_]Extension{ext};
+
+    try validateGceRequiredCapabilities(&tree, &group_exts);
+}
+
+test "validateCredentialTypeSupport rejects missing cross-member credential support" {
+    const alloc = testing.allocator;
+    var tree = try RatchetTree.init(alloc, 2);
+    defer tree.deinit();
+
+    const basic_only = [_]CredentialType{.basic};
+    const basic_and_x509 = [_]CredentialType{ .basic, .x509 };
+
+    var alice = makeTestLeaf("alice");
+    alice.capabilities.credentials = &basic_only;
+    const alice_certs = [_]Certificate{};
+    alice.credential = Credential.initX509(&alice_certs);
+    try tree.setLeaf(LeafIndex.fromU32(0), alice);
+
+    var bob = makeTestLeaf("bob");
+    bob.capabilities.credentials = &basic_and_x509;
+    bob.credential = Credential.initBasic("bob");
+    try tree.setLeaf(LeafIndex.fromU32(1), bob);
+
+    const result = validateCredentialTypeSupport(&tree);
+    try testing.expectError(error.InvalidLeafNode, result);
+}
+
+test "validateCredentialTypeSupport accepts when all leaves support in-use credential types" {
+    const alloc = testing.allocator;
+    var tree = try RatchetTree.init(alloc, 2);
+    defer tree.deinit();
+
+    const basic_and_x509 = [_]CredentialType{ .basic, .x509 };
+
+    var alice = makeTestLeaf("alice");
+    alice.capabilities.credentials = &basic_and_x509;
+    const alice_certs = [_]Certificate{};
+    alice.credential = Credential.initX509(&alice_certs);
+    try tree.setLeaf(LeafIndex.fromU32(0), alice);
+
+    var bob = makeTestLeaf("bob");
+    bob.capabilities.credentials = &basic_and_x509;
+    bob.credential = Credential.initBasic("bob");
+    try tree.setLeaf(LeafIndex.fromU32(1), bob);
+
+    try validateCredentialTypeSupport(&tree);
 }
 
 // -- Phase 14.6: Wire format policy tests ------------------------------------

@@ -97,7 +97,7 @@ Design goals, in order: **correct, simple, foolproof, fast**.
 
 ## 7. Functions
 
-- Hard limit: **70 lines per function**. If it does not fit, split it.
+- Hard limit: **120 lines per function**. If it does not fit, split it.
 - Good function shape: few parameters, simple return type, dense logic in the body.
 - **One function does one thing.** A function either computes a value or performs
   an effect, not both. If a function loads state, transforms it, and persists

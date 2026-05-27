@@ -736,6 +736,7 @@ fn benchEncrypt1KB() void {
     const key = [_]u8{0x01} ** Default.nk;
     const nonce = [_]u8{0x02} ** Default.nn;
     const aad = [_]u8{0x03} ** 32;
+    const reuse_guard = [_]u8{0} ** 4;
     var out: [2048]u8 = undefined;
     const n = mls.encryptContent(
         Default,
@@ -745,6 +746,7 @@ fn benchEncrypt1KB() void {
         0,
         &key,
         &nonce,
+        &reuse_guard,
         &aad,
         &out,
     ) catch return;
@@ -761,6 +763,7 @@ fn benchDecrypt1KB() void {
     const key = [_]u8{0x01} ** Default.nk;
     const nonce = [_]u8{0x02} ** Default.nn;
     const aad = [_]u8{0x03} ** 32;
+    const reuse_guard = [_]u8{0} ** 4;
     var ct: [2048]u8 = undefined;
     const n = mls.encryptContent(
         Default,
@@ -770,6 +773,7 @@ fn benchDecrypt1KB() void {
         0,
         &key,
         &nonce,
+        &reuse_guard,
         &aad,
         &ct,
     ) catch return;
@@ -795,6 +799,7 @@ fn benchEncrypt64B() void {
     const key = [_]u8{0x01} ** Default.nk;
     const nonce = [_]u8{0x02} ** Default.nn;
     const aad = [_]u8{0x03} ** 32;
+    const reuse_guard = [_]u8{0} ** 4;
     var out: [512]u8 = undefined;
     const n = mls.encryptContent(
         Default,
@@ -804,6 +809,7 @@ fn benchEncrypt64B() void {
         0,
         &key,
         &nonce,
+        &reuse_guard,
         &aad,
         &out,
     ) catch return;
@@ -820,6 +826,7 @@ fn benchDecrypt64B() void {
     const key = [_]u8{0x01} ** Default.nk;
     const nonce = [_]u8{0x02} ** Default.nn;
     const aad = [_]u8{0x03} ** 32;
+    const reuse_guard = [_]u8{0} ** 4;
     var ct: [512]u8 = undefined;
     const n = mls.encryptContent(
         Default,
@@ -829,6 +836,7 @@ fn benchDecrypt64B() void {
         0,
         &key,
         &nonce,
+        &reuse_guard,
         &aad,
         &ct,
     ) catch return;
@@ -1525,6 +1533,7 @@ fn benchProcessWelcome() void {
         0,
         null,
         0,
+        null,
     ) catch {
         cr.deinit(alloc);
         gs.deinit();
@@ -1542,6 +1551,7 @@ fn benchProcessWelcome() void {
         &a_sign.pk,
         .{ .prebuilt = cr.tree },
         mls.LeafIndex.fromU32(1),
+        null,
         null,
     ) catch {
         wr.deinit(alloc);
@@ -1790,6 +1800,7 @@ fn benchProcessExternalCommit() void {
         gs.my_leaf_index,
         &a_enc.sk,
         &a_enc.pk,
+        null,
         .mls_public_message,
     ) catch return;
     pr.tree.deinit();

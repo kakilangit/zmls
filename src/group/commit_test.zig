@@ -26,6 +26,9 @@ const Default = @import(
 const Credential = @import(
     "../credential/credential.zig",
 ).Credential;
+const CredentialValidator = @import(
+    "../credential/validator.zig",
+).CredentialValidator;
 const KeyPackage = @import(
     "../messages/key_package.zig",
 ).KeyPackage;
@@ -46,6 +49,7 @@ const max_gc_encode = context_mod.max_gc_encode;
 const GroupState = state_mod.GroupState;
 const createGroup = state_mod.createGroup;
 const createCommit = commit.createCommit;
+const createCommitWithValidator = commit.createCommitWithValidator;
 const processCommit = commit.processCommit;
 const CommitResult = commit.CommitResult;
 const ProcessResult = commit.ProcessResult;
@@ -296,6 +300,58 @@ test "createCommit with Add proposal advances epoch" {
         @as(u32, 1),
         result.apply_result.added_count,
     );
+}
+
+test "createCommitWithValidator rejects invalid Add credential" {
+    const RejectAll = struct {
+        fn check(
+            _: *const anyopaque,
+            _: *const Credential,
+        ) errors.ValidationError!void {
+            return error.InvalidCredential;
+        }
+        fn validator() CredentialValidator {
+            return .{
+                .context = undefined,
+                .validate_fn = &check,
+            };
+        }
+    };
+
+    const alloc = testing.allocator;
+    var tg: TestGroup = undefined;
+    try tg.init(alloc);
+    defer tg.deinit();
+
+    var bob_kp: TestKP = undefined;
+    try bob_kp.init(0xB0, 0xB1, 0xB2);
+    const add_prop = Proposal{
+        .tag = .add,
+        .payload = .{
+            .add = .{
+                .key_package = bob_kp.kp,
+            },
+        },
+    };
+    const proposals = [_]Proposal{add_prop};
+
+    const result = createCommitWithValidator(
+        Default,
+        testing.allocator,
+        &tg.gs.group_context,
+        &tg.gs.tree,
+        tg.gs.my_leaf_index,
+        &proposals,
+        &tg.sign_sk,
+        &tg.gs.interim_transcript_hash,
+        &tg.gs.epoch_secrets.init_secret,
+        null,
+        null,
+        null,
+        RejectAll.validator(),
+        .mls_public_message,
+    );
+    try testing.expectError(error.InvalidCredential, result);
 }
 
 test "createCommit produces non-zero confirmation tag" {
@@ -774,6 +830,84 @@ test "processCommit round-trip with createCommit" {
         cr.tree.leaf_count,
         pr.tree.leaf_count,
     );
+}
+
+test "processCommit rejects Add when credential validator fails" {
+    const RejectAll = struct {
+        fn check(
+            _: *const anyopaque,
+            _: *const Credential,
+        ) errors.ValidationError!void {
+            return error.InvalidCredential;
+        }
+        fn validator() CredentialValidator {
+            return .{
+                .context = undefined,
+                .validate_fn = &check,
+            };
+        }
+    };
+
+    const alloc = testing.allocator;
+    var tg: TestGroup = undefined;
+    try tg.init(alloc);
+    defer tg.deinit();
+
+    var bob_kp: TestKP = undefined;
+    try bob_kp.init(0xB0, 0xB1, 0xB2);
+    const add_prop = Proposal{
+        .tag = .add,
+        .payload = .{
+            .add = .{
+                .key_package = bob_kp.kp,
+            },
+        },
+    };
+    const proposals = [_]Proposal{add_prop};
+
+    var cr = try createCommit(
+        Default,
+        testing.allocator,
+        &tg.gs.group_context,
+        &tg.gs.tree,
+        tg.gs.my_leaf_index,
+        &proposals,
+        &tg.sign_sk,
+        &tg.gs.interim_transcript_hash,
+        &tg.gs.epoch_secrets.init_secret,
+        null,
+        null,
+        .mls_public_message,
+    );
+    defer cr.tree.deinit();
+    defer cr.deinit(testing.allocator);
+
+    const fc = FramedContent{
+        .group_id = tg.gs.group_context.group_id,
+        .epoch = tg.gs.group_context.epoch,
+        .sender = Sender.member(tg.gs.my_leaf_index),
+        .authenticated_data = "",
+        .content_type = .commit,
+        .content = cr.commit_bytes[0..cr.commit_len],
+    };
+
+    const result = processCommit(
+        Default,
+        testing.allocator,
+        .{
+            .fc = &fc,
+            .signature = &cr.signature,
+            .confirmation_tag = &cr.confirmation_tag,
+            .proposals = &proposals,
+            .sender_verify_key = &tg.sign_pk,
+            .credential_validator = RejectAll.validator(),
+        },
+        &tg.gs.group_context,
+        &tg.gs.tree,
+        &tg.gs.interim_transcript_hash,
+        &tg.gs.epoch_secrets.init_secret,
+    );
+    try testing.expectError(error.InvalidCredential, result);
 }
 
 test "processCommit rejects wrong epoch" {
@@ -2252,6 +2386,26 @@ test "processCommit rejects duplicate path node key" {
             @memcpy(@constCast(dst), bob_ek);
         }
     }
+
+    const result = context.process();
+    try testing.expectError(error.InvalidLeafNode, result);
+}
+
+test "processCommit rejects duplicate committer signature_key" {
+    var context: PathTestCtx = undefined;
+    try context.init();
+    defer context.deinit();
+
+    // Reuse Bob's signature key in committer leaf.
+    const bob_idx =
+        LeafIndex.fromU32(1).toNodeIndex().toUsize();
+    const bob_sig =
+        context.add_cr.tree.nodes[bob_idx].?.payload.leaf
+            .signature_key;
+    const dst = @constCast(
+        context.path_commit.path.?.leaf_node.signature_key,
+    );
+    @memcpy(dst, bob_sig);
 
     const result = context.process();
     try testing.expectError(error.InvalidLeafNode, result);

@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.4] - 2026-05-27
+
+### Added
+
+- **ReInit full flow (RFC 9420 §11.2)** -- `ReInitOutcome` struct in
+  `src/group/evolution.zig`, outcome extraction in `createCommit`/
+  `processCommit`, `GroupState.reinitGroup()` constructor at epoch 1
+  with resumption-PSK injection, staged commit exposure.
+- **Subgroup branching (RFC 9420 §11.3)** -- `BranchOutcome` struct and
+  `GroupState.createBranch()` method. Creates a new one-member group at
+  epoch 1 with branch-usage resumption PSK injected into the key schedule.
+- **GroupContext extension validation (RFC 9420 §13)** -- `isGroupContextExtension()`
+  in `src/common/types.zig`. Unknown extension types in GroupContext, GCE,
+  and GroupInfo are now rejected with `error.UnknownExtension`. GREASE
+  extension types are also rejected.
+- **LeafNode source-specific structural invariants (RFC 9420 §7.2)** --
+  `LeafNode.validate()` enforces `.key_package` must have `lifetime` and
+  `.commit` must have `parent_hash`.
+- **GREASE proposal rejection** -- GREASE proposal types are now rejected
+  (return `error.UnknownProposal`) in `categorizeProposal`, not silently
+  skipped.
+- **Epoch overflow protection** -- `std.math.add` with `EpochOverflow`
+  error in all epoch increment paths.
+- **GCE RequiredCapabilities validation** -- `validateGceRequiredCapabilities`
+  checks that all existing leaves support the capabilities declared in a
+  GroupContextExtensions proposal.
+- **Credential validator pass-through** -- `validateAddKeyPackages` and
+  `validateUpdatesAgainstTree` accept an optional `CredentialValidator`.
+- **Reuse guard in encryptContent** -- `encryptContent` accepts an explicit
+  `reuse_guard` parameter (RFC 9420 §9.3).
+- **KeyPackage usage tracking** -- `KeyStore.markKeyPackageUsed` /
+  `KeyStore.isKeyPackageUsed` ports, `MemoryKeyStore` implementation.
+- **Credential type support validation** -- `validateCredentialTypeSupport`
+  checks that existing leaves support a new Add's credential type.
+- **External sender signature key validation** -- `validateExternalSenderSignatureKey`
+  checks that the ExternalSenders extension's signature key matches the
+  sender's credential with `SignatureKeyMismatch` error.
+- **RatchetTree extension encoding** -- `encodeRatchetTreeExtension`/
+  `decodeRatchetTreeExtension` for the `ratchet_tree` GroupInfo extension
+  (RFC 9420 §12.4.3.2).
+- **Signature key uniqueness** -- checked in `validatePathKeyFreshness`.
+
+### Changed
+
+- **Known extensions skip capability check (RFC 9420 §7.2)** --
+  `checkAllLeavesSupport` skips default extension types (1-5) since they
+  are implicitly supported.
+- **Unknown extension rejection in decode** -- GroupContext, GCE, and
+  GroupInfo decode now return `error.UnknownExtension` for unrecognized
+  types.
+- **Commit/Process result types** -- `CommitResult` and `ProcessResult`
+  carry optional `reinit_outcome: ?ReInitOutcome`.
+
 ## [0.1.3] - 2026-04-10
 
 ### Fixed

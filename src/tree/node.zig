@@ -69,12 +69,12 @@ pub const Extension = struct {
         buf: []u8,
         pos: u32,
     ) EncodeError!u32 {
-        var p = try codec.encodeUint16(
+        var p = try codec.encode_uint16(
             buf,
             pos,
             @intFromEnum(self.extension_type),
         );
-        p = try codec.encodeVarVector(buf, p, self.data);
+        p = try codec.encode_var_vector(buf, p, self.data);
         return p;
     }
 
@@ -86,11 +86,11 @@ pub const Extension = struct {
         value: Extension,
         pos: u32,
     } {
-        const type_r = try codec.decodeUint16(data, pos);
+        const type_r = try codec.decode_uint16(data, pos);
         const ext_type: ExtensionType = @enumFromInt(
             type_r.value,
         );
-        const data_r = try codec.decodeVarVectorLimited(
+        const data_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             type_r.pos,
@@ -300,12 +300,12 @@ pub const Lifetime = struct {
         buf: []u8,
         pos: u32,
     ) EncodeError!u32 {
-        var p = try codec.encodeUint64(
+        var p = try codec.encode_uint64(
             buf,
             pos,
             self.not_before,
         );
-        p = try codec.encodeUint64(buf, p, self.not_after);
+        p = try codec.encode_uint64(buf, p, self.not_after);
         return p;
     }
 
@@ -313,8 +313,8 @@ pub const Lifetime = struct {
         data: []const u8,
         pos: u32,
     ) DecodeError!struct { value: Lifetime, pos: u32 } {
-        const nb_r = try codec.decodeUint64(data, pos);
-        const na_r = try codec.decodeUint64(data, nb_r.pos);
+        const nb_r = try codec.decode_uint64(data, pos);
+        const na_r = try codec.decode_uint64(data, nb_r.pos);
         return .{
             .value = .{
                 .not_before = nb_r.value,
@@ -366,7 +366,7 @@ pub const LeafNode = struct {
         assert(self.encryption_key.len > 0);
         var p = try self.encodeTbs(buf, pos);
         // signature<V>.
-        p = try codec.encodeVarVector(buf, p, self.signature);
+        p = try codec.encode_var_vector(buf, p, self.signature);
         return p;
     }
 
@@ -381,15 +381,15 @@ pub const LeafNode = struct {
     ) EncodeError!u32 {
         var p = pos;
         // encryption_key<V>.
-        p = try codec.encodeVarVector(buf, p, self.encryption_key);
+        p = try codec.encode_var_vector(buf, p, self.encryption_key);
         // signature_key<V>.
-        p = try codec.encodeVarVector(buf, p, self.signature_key);
+        p = try codec.encode_var_vector(buf, p, self.signature_key);
         // credential.
         p = try self.credential.encode(buf, p);
         // capabilities.
         p = try self.capabilities.encode(buf, p);
         // leaf_node_source (u8).
-        p = try codec.encodeUint8(
+        p = try codec.encode_uint8(
             buf,
             p,
             @intFromEnum(self.source),
@@ -405,7 +405,7 @@ pub const LeafNode = struct {
         } else if (self.source == .commit) {
             // parent_hash<V> per RFC 9420 Section 7.2.
             const ph = self.parent_hash orelse &.{};
-            p = try codec.encodeVarVector(buf, p, ph);
+            p = try codec.encode_var_vector(buf, p, ph);
         }
         // extensions<V> — varint-prefixed list of Extension.
         p = try encodeExtensionList(buf, p, self.extensions);
@@ -431,8 +431,8 @@ pub const LeafNode = struct {
                 return error.BufferTooSmall;
             const li = leaf_index orelse
                 return error.BufferTooSmall;
-            p = try codec.encodeVarVector(buf, p, gid);
-            p = try codec.encodeUint32(buf, p, li.toU32());
+            p = try codec.encode_var_vector(buf, p, gid);
+            p = try codec.encode_uint32(buf, p, li.toU32());
         }
         return p;
     }
@@ -519,6 +519,18 @@ pub const LeafNode = struct {
         expected_suite: CipherSuite,
         current_time: ?u64,
     ) ValidationError!void {
+        try self.validateLeafNodeProperties(expected_suite, current_time);
+        try self.validateSelfRequiredCaps();
+        try self.validateSourceInvariants();
+    }
+
+    /// Validate capability, credential, and lifetime properties
+    /// (RFC 9420 §7.2–7.3).
+    fn validateLeafNodeProperties(
+        self: *const LeafNode,
+        expected_suite: CipherSuite,
+        current_time: ?u64,
+    ) ValidationError!void {
         // 1. Credential type must be in capabilities.
         const cred_type = self.credential.tag;
         if (!capsContains(
@@ -549,8 +561,6 @@ pub const LeafNode = struct {
         }
 
         // 3. Non-default extensions must be in capabilities.
-        //    Default extension types (1-5) are implicitly
-        //    supported per RFC 9420 Section 7.2.
         for (self.extensions) |ext| {
             const v = @intFromEnum(ext.extension_type);
             if (v >= 1 and v <= 5) continue;
@@ -563,16 +573,14 @@ pub const LeafNode = struct {
             }
         }
 
-        // 4. capabilities.proposals MUST NOT list default
-        //    proposal types (1-7) per RFC 9420 Section 7.2.
+        // 4. capabilities.proposals MUST NOT list default types.
         for (self.capabilities.proposals) |pt| {
             const v = @intFromEnum(pt);
             if (v >= 1 and v <= 7)
                 return error.InvalidLeafNode;
         }
 
-        // 5. capabilities.extensions MUST NOT list default
-        //    extension types (1-5) per RFC 9420 Section 7.2.
+        // 5. capabilities.extensions MUST NOT list default types.
         for (self.capabilities.extensions) |et| {
             const v = @intFromEnum(et);
             if (v >= 1 and v <= 5)
@@ -586,10 +594,25 @@ pub const LeafNode = struct {
                     return error.InvalidLeafNode;
             }
         }
+    }
 
-        // 7. If required_capabilities extension present, the leaf's
-        //    own capabilities must satisfy it (RFC 9420 S7.3).
-        try self.validateSelfRequiredCaps();
+    /// Validate source-specific structural invariants
+    /// (RFC 9420 §7.3).
+    fn validateSourceInvariants(
+        self: *const LeafNode,
+    ) ValidationError!void {
+        switch (self.source) {
+            .key_package => {
+                if (self.lifetime == null)
+                    return error.InvalidLeafNode;
+            },
+            .update => {},
+            .commit => {
+                if (self.parent_hash == null)
+                    return error.InvalidLeafNode;
+            },
+            else => return error.InvalidLeafNode,
+        }
     }
 
     /// Validate that encryption_key is a valid HPKE public
@@ -616,15 +639,15 @@ pub const LeafNode = struct {
                 continue;
             const data = ext.data;
             // Parse three var-vectors of u16 values.
-            const ext_r = codec.decodeVarVectorSlice(
+            const ext_r = codec.decode_var_vector_slice(
                 data,
                 0,
             ) catch return error.InvalidLeafNode;
-            const prop_r = codec.decodeVarVectorSlice(
+            const prop_r = codec.decode_var_vector_slice(
                 data,
                 ext_r.pos,
             ) catch return error.InvalidLeafNode;
-            const cred_r = codec.decodeVarVectorSlice(
+            const cred_r = codec.decode_var_vector_slice(
                 data,
                 prop_r.pos,
             ) catch return error.InvalidLeafNode;
@@ -662,7 +685,7 @@ pub const LeafNode = struct {
         data: []const u8,
         pos: u32,
     ) (DecodeError || error{OutOfMemory})!SourceFields {
-        const src_r = try codec.decodeUint8(data, pos);
+        const src_r = try codec.decode_uint8(data, pos);
         const source: LeafNodeSource = @enumFromInt(
             src_r.value,
         );
@@ -683,7 +706,7 @@ pub const LeafNode = struct {
                 .pos = p,
             },
             .commit => {
-                const ph_r = try codec.decodeVarVectorLimited(
+                const ph_r = try codec.decode_var_vector_limited(
                     allocator,
                     data,
                     p,
@@ -716,7 +739,7 @@ pub const LeafNode = struct {
     ) (DecodeError || error{OutOfMemory})!IdentityFields {
         var p = pos;
 
-        const ek_r = try codec.decodeVarVectorLimited(
+        const ek_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
@@ -725,7 +748,7 @@ pub const LeafNode = struct {
         errdefer allocator.free(ek_r.value);
         p = ek_r.pos;
 
-        const sk_r = try codec.decodeVarVectorLimited(
+        const sk_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
@@ -804,15 +827,19 @@ pub const LeafNode = struct {
             allocator.free(ext_r.value);
         }
         p = ext_r.pos;
-        const sig_r = try codec.decodeVarVectorLimited(
+        const sig_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
             types.max_signature_length,
         );
 
-        const source: LeafNodeSource =
-            if (src_r.lifetime != null) .key_package else if (src_r.parent_hash != null) .commit else .update;
+        const source: LeafNodeSource = if (src_r.lifetime != null)
+            .key_package
+        else if (src_r.parent_hash != null)
+            .commit
+        else
+            .update;
 
         return .{ .value = .{
             .encryption_key = id.encryption_key,
@@ -916,12 +943,12 @@ pub const ParentNode = struct {
         pos: u32,
     ) EncodeError!u32 {
         var p = pos;
-        p = try codec.encodeVarVector(
+        p = try codec.encode_var_vector(
             buf,
             p,
             self.encryption_key,
         );
-        p = try codec.encodeVarVector(
+        p = try codec.encode_var_vector(
             buf,
             p,
             self.parent_hash,
@@ -940,7 +967,7 @@ pub const ParentNode = struct {
         pos: u32,
     } {
         var p = pos;
-        const ek_r = try codec.decodeVarVectorLimited(
+        const ek_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
@@ -949,7 +976,7 @@ pub const ParentNode = struct {
         errdefer allocator.free(ek_r.value);
         p = ek_r.pos;
 
-        const ph_r = try codec.decodeVarVectorLimited(
+        const ph_r = try codec.decode_var_vector_limited(
             allocator,
             data,
             p,
@@ -1059,7 +1086,7 @@ pub const Node = struct {
         buf: []u8,
         pos: u32,
     ) EncodeError!u32 {
-        var p = try codec.encodeUint8(
+        var p = try codec.encode_uint8(
             buf,
             pos,
             @intFromEnum(self.node_type),
@@ -1084,7 +1111,7 @@ pub const Node = struct {
         value: Node,
         pos: u32,
     } {
-        const type_r = try codec.decodeUint8(data, pos);
+        const type_r = try codec.decode_uint8(data, pos);
         const node_type: NodeType = switch (type_r.value) {
             1 => .leaf,
             2 => .parent,
@@ -1167,9 +1194,9 @@ fn encodeEnumList(
     for (items) |item| {
         const val: IntType = @intFromEnum(item);
         if (IntType == u16) {
-            p = try codec.encodeUint16(buf, p, val);
+            p = try codec.encode_uint16(buf, p, val);
         } else if (IntType == u8) {
-            p = try codec.encodeUint8(buf, p, val);
+            p = try codec.encode_uint8(buf, p, val);
         } else {
             @compileError("unsupported enum int type");
         }
@@ -1210,11 +1237,11 @@ fn decodeEnumList(
     for (items, 0..) |*item, i| {
         _ = i;
         if (IntType == u16) {
-            const r = try codec.decodeUint16(data, p);
+            const r = try codec.decode_uint16(data, p);
             item.* = @enumFromInt(r.value);
             p = r.pos;
         } else if (IntType == u8) {
-            const r = try codec.decodeUint8(data, p);
+            const r = try codec.decode_uint8(data, p);
             item.* = @enumFromInt(r.value);
             p = r.pos;
         }
@@ -1229,7 +1256,7 @@ pub fn encodeExtensionList(
     pos: u32,
     exts: []const Extension,
 ) EncodeError!u32 {
-    return codec.encodeVarPrefixedList(
+    return codec.encode_var_prefixed_list(
         Extension,
         buf,
         pos,
@@ -1313,7 +1340,7 @@ fn encodeU32List(
     const byte_len: u32 = @intCast(items.len * 4);
     var p = try varint.encode(buf, pos, byte_len);
     for (items) |item| {
-        p = try codec.encodeUint32(buf, p, item.toU32());
+        p = try codec.encode_uint32(buf, p, item.toU32());
     }
     return p;
 }
@@ -1345,7 +1372,7 @@ fn decodeU32List(
     errdefer allocator.free(items);
 
     for (items) |*item| {
-        const r = try codec.decodeUint32(data, p);
+        const r = try codec.decode_uint32(data, p);
         item.* = LeafIndex.fromU32(r.value);
         p = r.pos;
     }

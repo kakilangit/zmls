@@ -37,6 +37,9 @@ const primitives = @import("../crypto/primitives.zig");
 const secureZero = primitives.secureZero;
 const codec = @import("../codec/codec.zig");
 const public_msg = @import("../framing/public_msg.zig");
+const CredentialValidator = @import(
+    "../credential/validator.zig",
+).CredentialValidator;
 
 const Epoch = types.Epoch;
 const LeafIndex = types.LeafIndex;
@@ -109,6 +112,49 @@ pub const CommitError =
 /// Maximum encoded size for FramedContent + auth data.
 pub const max_content_buf: u32 = 65536;
 
+/// ReInit outcome material derived during commit create/process.
+pub fn ReInitOutcome(comptime P: type) type {
+    return struct {
+        group_id: []const u8,
+        version: types.ProtocolVersion,
+        cipher_suite: types.CipherSuite,
+        extensions: []const Extension,
+        psk_usage: psk_mod.ResumptionPskUsage,
+        psk_group_id: []const u8,
+        psk_epoch: Epoch,
+        /// Present when caller provides current epoch resumption PSK.
+        resumption_psk: ?[P.nh]u8,
+    };
+}
+
+fn buildReInitOutcome(
+    comptime P: type,
+    proposal_outcome: ?ProposalApplyResult.ReInitOutcome,
+    old_group_context: *const context_mod.GroupContext(P.nh),
+    current_resumption_psk: ?*const [P.nh]u8,
+) ?ReInitOutcome(P) {
+    if (proposal_outcome == null) return null;
+    const ri = proposal_outcome.?;
+    return .{
+        .group_id = ri.group_id,
+        .version = ri.version,
+        .cipher_suite = ri.cipher_suite,
+        .extensions = ri.extensions,
+        .psk_usage = .reinit,
+        .psk_group_id = old_group_context.group_id,
+        // RFC 9420 S11.2: epoch after the Commit covering ReInit.
+        .psk_epoch = std.math.add(
+            Epoch,
+            old_group_context.epoch,
+            1,
+        ) catch old_group_context.epoch,
+        .resumption_psk = if (current_resumption_psk) |psk|
+            psk.*
+        else
+            null,
+    };
+}
+
 // -- CommitResult -----------------------------------------------------------
 
 /// Result of createCommit — everything needed by the caller
@@ -150,6 +196,8 @@ pub fn CommitResult(comptime P: type) type {
 
         /// Apply result (added/removed leaves, PSK ids).
         apply_result: ProposalApplyResult,
+        /// ReInit outcome material (including resumption-PSK metadata).
+        reinit_outcome: ?ReInitOutcome(P),
 
         /// The new epoch number.
         new_epoch: Epoch,
@@ -210,6 +258,10 @@ pub fn CreateCommitOpts(comptime P: type) type {
         path_params: ?PathParams(P) = null,
         /// PSK resolver (required when PSK proposals present).
         psk_resolver: ?PskResolver(P) = null,
+        /// Current epoch resumption_psk for ReInit outcomes.
+        current_resumption_psk: ?*const [P.nh]u8 = null,
+        /// Optional application credential validator.
+        credential_validator: ?CredentialValidator = null,
         /// Wire format for the commit message.
         wire_format: WireFormat = .mls_public_message,
     };
@@ -235,6 +287,10 @@ pub fn ProcessCommitOpts(comptime P: type) type {
         receiver_params: ?ReceiverPathParams(P) = null,
         /// PSK resolver.
         psk_resolver: ?PskResolver(P) = null,
+        /// Current epoch resumption_psk for ReInit outcomes.
+        current_resumption_psk: ?*const [P.nh]u8 = null,
+        /// Optional application credential validator.
+        credential_validator: ?CredentialValidator = null,
         /// Original proposal senders (for by-ref proposals).
         proposal_senders: ?[]const Sender = null,
         /// Membership key (for tagged messages).
@@ -430,6 +486,41 @@ pub fn createCommit(
     psk_resolver: ?PskResolver(P),
     wire_format: WireFormat,
 ) CommitError!CommitResult(P) {
+    return createCommitWithValidator(
+        P,
+        allocator,
+        group_context,
+        tree,
+        my_leaf,
+        proposals,
+        sign_key,
+        interim_transcript_hash,
+        init_secret,
+        path_params,
+        psk_resolver,
+        null,
+        null,
+        wire_format,
+    );
+}
+
+/// Create a Commit with optional credential validation.
+pub fn createCommitWithValidator(
+    comptime P: type,
+    allocator: std.mem.Allocator,
+    group_context: *const context_mod.GroupContext(P.nh),
+    tree: *const RatchetTree,
+    my_leaf: LeafIndex,
+    proposals: []const Proposal,
+    sign_key: *const [P.sign_sk_len]u8,
+    interim_transcript_hash: *const [P.nh]u8,
+    init_secret: *const [P.nh]u8,
+    path_params: ?PathParams(P),
+    psk_resolver: ?PskResolver(P),
+    current_resumption_psk: ?*const [P.nh]u8,
+    credential_validator: ?CredentialValidator,
+    wire_format: WireFormat,
+) CommitError!CommitResult(P) {
     assert(tree.leaf_count > 0);
     assert(my_leaf.toNodeIndex().toUsize() < tree.nodes.len);
     const validated = try validateCommitProposals(
@@ -439,6 +530,7 @@ pub fn createCommit(
         my_leaf,
         group_context,
         tree,
+        credential_validator,
     );
     defer validated.destroy(allocator);
 
@@ -453,6 +545,16 @@ pub fn createCommit(
         &apply_result,
         group_context,
     );
+    evolution.validateGceRequiredCapabilities(
+        &new_tree,
+        new_extensions,
+    ) catch |e| switch (e) {
+        error.InvalidLeafNode => return error.InvalidLeafNode,
+        error.UnsupportedCapability,
+        => return error.UnsupportedCapability,
+        else => return error.InvalidProposalList,
+    };
+    try evolution.validateCredentialTypeSupport(&new_tree);
 
     // Generate UpdatePath if needed. leaf_sig must outlive
     // new_tree because the tree leaf points into it.
@@ -488,6 +590,7 @@ pub fn createCommit(
         init_secret,
         validated,
         psk_resolver,
+        current_resumption_psk,
         new_extensions,
         &path_out,
         apply_result,
@@ -527,6 +630,8 @@ pub fn ProcessResult(comptime P: type) type {
 
         /// Apply result (added/removed leaves, PSK ids).
         apply_result: ProposalApplyResult,
+        /// ReInit outcome material (including resumption-PSK metadata).
+        reinit_outcome: ?ReInitOutcome(P),
 
         /// The new epoch number.
         new_epoch: Epoch,
@@ -619,6 +724,7 @@ pub fn processCommit(
         opts.proposal_senders,
         group_context,
         tree,
+        opts.credential_validator,
     );
     defer validated.destroy(allocator);
     // 6. Apply proposals to a copy of the tree.
@@ -633,6 +739,16 @@ pub fn processCommit(
         new_tree.leaf_count > 1) return error.MissingPath;
     // 8. Process UpdatePath if present.
     const new_ext = resolveExtensions(&apply_result, group_context);
+    evolution.validateGceRequiredCapabilities(
+        &new_tree,
+        new_ext,
+    ) catch |e| switch (e) {
+        error.InvalidLeafNode => return error.InvalidLeafNode,
+        error.UnsupportedCapability,
+        => return error.UnsupportedCapability,
+        else => return error.InvalidProposalList,
+    };
+    try evolution.validateCredentialTypeSupport(&new_tree);
     var path_out = processUpdatePath(
         P,
         allocator,
@@ -660,6 +776,7 @@ pub fn processCommit(
         init_secret,
         &path_out.commit_secret,
         opts.psk_resolver,
+        opts.current_resumption_psk,
         apply_result,
         path_out.derived_path_keys,
         path_out.derived_key_count,
@@ -690,6 +807,11 @@ fn verifyCommitPreconditions(
         return error.NotAMember;
     if (fc.content_type != .commit)
         return error.InvalidProposalList;
+    try evolution.validateWireFormat(
+        wire_format,
+        fc.content_type,
+        .encrypt_application_only,
+    );
 
     var gc_buf: [max_gc_encode]u8 = undefined;
     const gc_bytes = group_context.serialize(&gc_buf) catch
@@ -737,6 +859,7 @@ fn validateProcessProposals(
     proposal_senders: ?[]const Sender,
     group_context: *const context_mod.GroupContext(P.nh),
     tree: *const RatchetTree,
+    credential_validator: ?CredentialValidator,
 ) CommitError!*ValidatedProposals {
     assert(sender_leaf.toNodeIndex().toUsize() < tree.nodes.len);
     if (proposal_senders) |ps| {
@@ -765,6 +888,7 @@ fn validateProcessProposals(
         P,
         validated,
         group_context.cipher_suite,
+        credential_validator,
     );
     try evolution.validateUpdateLeafNodes(
         P,
@@ -781,6 +905,7 @@ fn validateProcessProposals(
         validated,
         tree,
         sender,
+        credential_validator,
     );
     try evolution.validateRemovesAgainstTree(
         validated,
@@ -934,6 +1059,21 @@ fn validatePathKeyFreshness(
         if (keyExistsInTree(tree, upn.encryption_key))
             return error.InvalidLeafNode;
     }
+
+    // RFC 9420 S16.7: committer's new signature key must be
+    // unique across all other non-blank leaves.
+    var i: usize = 0;
+    while (i < tree.nodes.len) : (i += 2) {
+        if (i == leaf_idx) continue;
+        const maybe_node = tree.nodes[i] orelse continue;
+        if (maybe_node.node_type != .leaf) continue;
+        const other_sig = maybe_node.payload.leaf.signature_key;
+        if (std.mem.eql(
+            u8,
+            other_sig,
+            up.leaf_node.signature_key,
+        )) return error.InvalidLeafNode;
+    }
 }
 
 /// Return true if `key` matches any non-blank node's
@@ -1074,6 +1214,7 @@ fn deriveProcessEpochState(
     init_secret: *const [P.nh]u8,
     commit_secret: *const [P.nh]u8,
     psk_resolver: ?PskResolver(P),
+    current_resumption_psk: ?*const [P.nh]u8,
     apply_result: ProposalApplyResult,
     derived_path_keys: [path_mod.max_path_nodes]PathNodeKey(P),
     derived_key_count: u32,
@@ -1138,7 +1279,17 @@ fn deriveProcessEpochState(
         .group_context = new_gc,
         .tree = new_tree.*,
         .apply_result = apply_result,
-        .new_epoch = group_context.epoch + 1,
+        .reinit_outcome = buildReInitOutcome(
+            P,
+            apply_result.reinit_outcome,
+            group_context,
+            current_resumption_psk,
+        ),
+        .new_epoch = std.math.add(
+            Epoch,
+            group_context.epoch,
+            1,
+        ) catch return error.EpochOverflow,
         .path_keys = derived_path_keys,
         .path_key_count = derived_key_count,
     };
@@ -1194,7 +1345,7 @@ pub fn buildConfirmedHash(
     var pos: u32 = 0;
 
     // WireFormat (u16).
-    pos = codec.encodeUint16(
+    pos = codec.encode_uint16(
         &input_buf,
         pos,
         @intFromEnum(wire_format),
@@ -1207,7 +1358,7 @@ pub fn buildConfirmedHash(
     ) catch return error.IndexOutOfRange;
 
     // opaque signature<V>.
-    pos = codec.encodeVarVector(
+    pos = codec.encode_var_vector(
         &input_buf,
         pos,
         signature,
@@ -1244,6 +1395,7 @@ fn validateCommitProposals(
     my_leaf: LeafIndex,
     group_context: *const context_mod.GroupContext(P.nh),
     tree: *const RatchetTree,
+    credential_validator: ?CredentialValidator,
 ) CommitError!*ValidatedProposals {
     assert(tree.leaf_count > 0);
     assert(my_leaf.toNodeIndex().toUsize() < tree.nodes.len);
@@ -1270,6 +1422,7 @@ fn validateCommitProposals(
         P,
         validated,
         group_context.cipher_suite,
+        credential_validator,
     );
     try evolution.validateUpdateLeafNodes(
         P,
@@ -1286,6 +1439,7 @@ fn validateCommitProposals(
         validated,
         tree,
         sender,
+        credential_validator,
     );
     try evolution.validateRemovesAgainstTree(
         validated,
@@ -1571,6 +1725,7 @@ fn encodeAndFinalizeCommit(
     init_secret: *const [P.nh]u8,
     validated: *const ValidatedProposals,
     psk_resolver: ?PskResolver(P),
+    current_resumption_psk: ?*const [P.nh]u8,
     new_extensions: []const Extension,
     path_out: *CommitPathOutput(P),
     apply_result: ProposalApplyResult,
@@ -1605,6 +1760,7 @@ fn encodeAndFinalizeCommit(
         init_secret,
         validated,
         psk_resolver,
+        current_resumption_psk,
         new_extensions,
         &path_out.commit_secret,
         new_tree_hash,
@@ -1629,6 +1785,7 @@ fn finalizeCommit(
     init_secret: *const [P.nh]u8,
     validated: *const ValidatedProposals,
     psk_resolver: ?PskResolver(P),
+    current_resumption_psk: ?*const [P.nh]u8,
     new_extensions: []const Extension,
     commit_secret: *const [P.nh]u8,
     new_tree_hash: [P.nh]u8,
@@ -1675,6 +1832,7 @@ fn finalizeCommit(
         group_context,
         validated,
         psk_resolver,
+        current_resumption_psk,
         new_extensions,
         init_secret,
         commit_secret,
@@ -1697,6 +1855,7 @@ fn buildCommitResult(
     group_context: *const context_mod.GroupContext(P.nh),
     validated: *const ValidatedProposals,
     psk_resolver: ?PskResolver(P),
+    current_resumption_psk: ?*const [P.nh]u8,
     new_extensions: []const Extension,
     init_secret: *const [P.nh]u8,
     commit_secret: *const [P.nh]u8,
@@ -1754,7 +1913,17 @@ fn buildCommitResult(
         .group_context = new_gc,
         .tree = new_tree,
         .apply_result = apply_result,
-        .new_epoch = group_context.epoch + 1,
+        .reinit_outcome = buildReInitOutcome(
+            P,
+            apply_result.reinit_outcome,
+            group_context,
+            current_resumption_psk,
+        ),
+        .new_epoch = std.math.add(
+            Epoch,
+            group_context.epoch,
+            1,
+        ) catch return error.EpochOverflow,
         .joiner_secret = epoch_secrets.joiner_secret,
         .welcome_secret = epoch_secrets.welcome_secret,
         .leaf_sig = leaf_sig,

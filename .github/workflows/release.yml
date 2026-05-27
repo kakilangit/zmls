@@ -41,9 +41,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: mlugg/setup-zig@v2
+      - uses: step-security/setup-zig@v2
         with:
-          version: master
+          version: 0.16.0
       - run: make check
 
   build:
@@ -53,9 +53,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: mlugg/setup-zig@v2
+      - uses: step-security/setup-zig@v2
         with:
-          version: master
+          version: 0.16.0
       - name: Debug
         run: make build
       - name: ReleaseSafe
@@ -68,9 +68,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: mlugg/setup-zig@v2
+      - uses: step-security/setup-zig@v2
         with:
-          version: master
+          version: 0.16.0
       - run: make test
       - name: Result
         if: always()

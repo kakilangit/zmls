@@ -31,6 +31,10 @@ pub const DecodeError = error{
     InvalidMembershipTagLength,
     /// The protocol version is not supported (must be mls10).
     UnsupportedProtocolVersion,
+    /// An unknown extension type was found in a mandatory context.
+    UnknownExtension,
+    /// A GREASE value was used in a context where it is prohibited.
+    GreaseNotAllowed,
 };
 
 /// Errors from cryptographic operations.
@@ -101,6 +105,8 @@ pub const ValidationError = error{
     UnknownMember,
     /// A credential failed application-level validation.
     InvalidCredential,
+    /// Resync external commit credential matcher rejected mapping.
+    CredentialMismatch,
     /// Protocol version mismatch.
     VersionMismatch,
     /// Cipher suite mismatch.
@@ -113,6 +119,8 @@ pub const ValidationError = error{
     MissingExtension,
     /// A required capability is not supported.
     UnsupportedCapability,
+    /// External sender signature_key does not match credential binding.
+    SignatureKeyMismatch,
     /// No private key available for the matched resolution node.
     MissingDecryptionKey,
 };

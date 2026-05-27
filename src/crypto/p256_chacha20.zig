@@ -542,6 +542,7 @@ test "suite 0xF001 full group lifecycle" {
         0,
         null,
         0,
+        null,
     );
     defer wr.deinit(alloc);
 
@@ -555,6 +556,7 @@ test "suite 0xF001 full group lifecycle" {
         &alice_sign.pk,
         .{ .prebuilt = cr.tree },
         LeafIndex.fromU32(1),
+        null,
         null,
     );
     defer bob_join.deinit();

@@ -43,6 +43,7 @@ const errors = @import("../common/errors.zig");
 const primitives = @import("../crypto/primitives.zig");
 const framed_content_mod = @import("framed_content.zig");
 const content_type_mod = @import("content_type.zig");
+const proposal_mod = @import("../messages/proposal.zig");
 
 const CryptoError = errors.CryptoError;
 const EncodeError = codec.EncodeError;
@@ -73,7 +74,7 @@ pub fn FramedContentAuthData(comptime P: type) type {
             var p = pos;
 
             // opaque signature<V>
-            p = try codec.encodeVarVector(
+            p = try codec.encode_var_vector(
                 buf,
                 p,
                 &self.signature,
@@ -85,7 +86,7 @@ pub fn FramedContentAuthData(comptime P: type) type {
             if (content_type == .commit) {
                 const tag = self.confirmation_tag orelse
                     return error.MissingConfirmationTag;
-                p = try codec.encodeVarVector(
+                p = try codec.encode_var_vector(
                     buf,
                     p,
                     &tag,
@@ -104,7 +105,7 @@ pub fn FramedContentAuthData(comptime P: type) type {
             var p = pos;
 
             // opaque signature<V>
-            const sig_data = try codec.decodeVarVectorSlice(
+            const sig_data = try codec.decode_var_vector_slice(
                 buf,
                 p,
             );
@@ -119,7 +120,7 @@ pub fn FramedContentAuthData(comptime P: type) type {
             // Optional confirmation_tag for commits.
             var tag: ?[P.nh]u8 = null;
             if (content_type == .commit) {
-                const tag_data = try codec.decodeVarVectorSlice(
+                const tag_data = try codec.decode_var_vector_slice(
                     buf,
                     p,
                 );
@@ -221,6 +222,31 @@ pub fn verifyFramedContent(
         "FramedContentTBS",
         tbs_buf[0..tbs_len],
         auth.signature[0..],
+    );
+}
+
+/// Verify a FramedContent whose sender is `new_member_proposal`.
+///
+/// Per RFC 9420 §6.1, the signature key is extracted from the
+/// KeyPackage in the corresponding Add proposal.
+pub fn verifyFramedContentForNewMember(
+    comptime P: type,
+    content: *const FramedContent,
+    wire_format: WireFormat,
+    group_context: []const u8,
+    add_proposal: *const proposal_mod.Add,
+    auth: *const FramedContentAuthData(P),
+) (CryptoError || error{SignatureKeyLengthMismatch})!void {
+    const sig_key = add_proposal.key_package.leaf_node.signature_key;
+    if (sig_key.len != P.sign_pk_len)
+        return error.SignatureKeyLengthMismatch;
+    return verifyFramedContent(
+        P,
+        content,
+        wire_format,
+        group_context,
+        sig_key[0..P.sign_pk_len],
+        auth,
     );
 }
 
@@ -467,9 +493,9 @@ test "FramedContentAuthData decode rejects wrong-length commit tag" {
     var p: u32 = 0;
 
     // Encode signature as var_vector.
-    p = try codec.encodeVarVector(&buf, p, &sig);
+    p = try codec.encode_var_vector(&buf, p, &sig);
     // Encode a 1-byte confirmation_tag (wrong length).
-    p = try codec.encodeVarVector(&buf, p, &[_]u8{0x42});
+    p = try codec.encode_var_vector(&buf, p, &[_]u8{0x42});
 
     const result = Auth.decode(&buf, 0, .commit);
     try testing.expectError(error.Truncated, result);
@@ -481,7 +507,7 @@ test "FramedContentAuthData decode rejects missing commit tag" {
 
     // Encode only a signature, no confirmation_tag.
     var buf: [256]u8 = undefined;
-    const p = try codec.encodeVarVector(&buf, 0, &sig);
+    const p = try codec.encode_var_vector(&buf, 0, &sig);
 
     // Decode as commit: should fail because tag is missing.
     const result = Auth.decode(buf[0..p], 0, .commit);

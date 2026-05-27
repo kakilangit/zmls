@@ -22,7 +22,7 @@ pub const EncodeError = error{ BufferTooSmall, MissingConfirmationTag, MissingLi
 // -- Encoding ----------------------------------------------------------------
 
 /// Write a single byte into `buf` at `pos`. Returns new position.
-pub fn encodeUint8(
+pub fn encode_uint8(
     buf: []u8,
     pos: u32,
     value: u8,
@@ -33,7 +33,7 @@ pub fn encodeUint8(
 }
 
 /// Write a big-endian u16 into `buf` at `pos`. Returns new position.
-pub fn encodeUint16(
+pub fn encode_uint16(
     buf: []u8,
     pos: u32,
     value: u16,
@@ -48,7 +48,7 @@ pub fn encodeUint16(
 }
 
 /// Write a big-endian u32 into `buf` at `pos`. Returns new position.
-pub fn encodeUint32(
+pub fn encode_uint32(
     buf: []u8,
     pos: u32,
     value: u32,
@@ -62,7 +62,7 @@ pub fn encodeUint32(
 }
 
 /// Write a big-endian u64 into `buf` at `pos`. Returns new position.
-pub fn encodeUint64(
+pub fn encode_uint64(
     buf: []u8,
     pos: u32,
     value: u64,
@@ -77,7 +77,7 @@ pub fn encodeUint64(
 
 /// Write a variable-length opaque vector: varint length prefix + raw bytes.
 /// Per RFC 9420 Section 2.1.2.
-pub fn encodeVarVector(
+pub fn encode_var_vector(
     buf: []u8,
     pos: u32,
     data: []const u8,
@@ -94,17 +94,17 @@ pub fn encodeVarVector(
 /// Write an optional<T>. If value is null, write 0x00 presence byte.
 /// Otherwise write 0x01 followed by the encoded value.
 /// The caller provides an encode function for the inner type.
-pub fn encodeOptional(
+pub fn encode_optional(
     buf: []u8,
     pos: u32,
     value: anytype,
     encode_fn: fn ([]u8, u32, @TypeOf(value.?)) EncodeError!u32,
 ) EncodeError!u32 {
     if (value) |v| {
-        const p = try encodeUint8(buf, pos, 1);
+        const p = try encode_uint8(buf, pos, 1);
         return encode_fn(buf, p, v);
     } else {
-        return encodeUint8(buf, pos, 0);
+        return encode_uint8(buf, pos, 0);
     }
 }
 
@@ -114,7 +114,7 @@ pub fn encodeOptional(
 /// where E is a subset of EncodeError. This function handles the
 /// gap-then-shift pattern: reserve 4 bytes for the varint prefix,
 /// encode all items, then shift left if the varint was shorter.
-pub fn encodeVarPrefixedList(
+pub fn encode_var_prefixed_list(
     comptime T: type,
     buf: []u8,
     pos: u32,
@@ -154,7 +154,7 @@ pub fn encodeVarPrefixedList(
 // -- Decoding ----------------------------------------------------------------
 
 /// Read a single byte from `data` at `pos`. Returns value and new position.
-pub fn decodeUint8(
+pub fn decode_uint8(
     data: []const u8,
     pos: u32,
 ) DecodeError!struct { value: u8, pos: u32 } {
@@ -163,7 +163,7 @@ pub fn decodeUint8(
 }
 
 /// Read a big-endian u16 from `data` at `pos`.
-pub fn decodeUint16(
+pub fn decode_uint16(
     data: []const u8,
     pos: u32,
 ) DecodeError!struct { value: u16, pos: u32 } {
@@ -177,7 +177,7 @@ pub fn decodeUint16(
 }
 
 /// Read a big-endian u32 from `data` at `pos`.
-pub fn decodeUint32(
+pub fn decode_uint32(
     data: []const u8,
     pos: u32,
 ) DecodeError!struct { value: u32, pos: u32 } {
@@ -191,7 +191,7 @@ pub fn decodeUint32(
 }
 
 /// Read a big-endian u64 from `data` at `pos`.
-pub fn decodeUint64(
+pub fn decode_uint64(
     data: []const u8,
     pos: u32,
 ) DecodeError!struct { value: u64, pos: u32 } {
@@ -206,7 +206,7 @@ pub fn decodeUint64(
 
 /// Read a variable-length opaque vector into a caller-provided buffer.
 /// Returns the filled slice and new position.
-pub fn decodeVarVectorBuf(
+pub fn decode_var_vector_buf(
     data: []const u8,
     pos: u32,
     buf: []u8,
@@ -223,7 +223,7 @@ pub fn decodeVarVectorBuf(
 }
 
 /// Read a variable-length opaque vector, allocating the result.
-pub fn decodeVarVector(
+pub fn decode_var_vector(
     allocator: std.mem.Allocator,
     data: []const u8,
     pos: u32,
@@ -245,7 +245,7 @@ pub fn decodeVarVector(
 
 /// Skip over a variable-length vector without reading its contents.
 /// Returns the position after the vector (varint header + payload).
-pub fn skipVarVector(
+pub fn skip_var_vector(
     data: []const u8,
     pos: u32,
 ) DecodeError!u32 {
@@ -259,7 +259,7 @@ pub fn skipVarVector(
 
 /// Read a variable-length opaque vector as a zero-copy slice into
 /// the source buffer. No allocation needed.
-pub fn decodeVarVectorSlice(
+pub fn decode_var_vector_slice(
     data: []const u8,
     pos: u32,
 ) DecodeError!struct { value: []const u8, pos: u32 } {
@@ -274,8 +274,8 @@ pub fn decodeVarVectorSlice(
     };
 }
 
-/// Like decodeVarVector but with a caller-specified max length.
-pub fn decodeVarVectorLimited(
+/// Like decode_var_vector but with a caller-specified max length.
+pub fn decode_var_vector_limited(
     allocator: std.mem.Allocator,
     data: []const u8,
     pos: u32,
@@ -297,8 +297,8 @@ pub fn decodeVarVectorLimited(
     return .{ .value = buf, .pos = p };
 }
 
-/// Like decodeVarVectorSlice but with a caller-specified max length.
-pub fn decodeVarVectorSliceLimited(
+/// Like decode_var_vector_slice but with a caller-specified max length.
+pub fn decode_var_vector_slice_limited(
     data: []const u8,
     pos: u32,
     max_len: u32,
@@ -318,13 +318,13 @@ pub fn decodeVarVectorSliceLimited(
 /// The caller provides a decode function for the inner type.
 /// The decode function must accept ([]const u8, u32) and return
 /// a struct with `.value` and `.pos` fields, or a DecodeError.
-pub fn decodeOptional(
+pub fn decode_optional(
     data: []const u8,
     pos: u32,
     comptime T: type,
     comptime decode_fn: anytype,
 ) DecodeError!struct { value: ?T, pos: u32 } {
-    const pr = try decodeUint8(data, pos);
+    const pr = try decode_uint8(data, pos);
     switch (pr.value) {
         0 => return .{ .value = null, .pos = pr.pos },
         1 => {
@@ -341,40 +341,40 @@ const testing = std.testing;
 
 test "encode/decode uint8" {
     var buf: [1]u8 = undefined;
-    const p = try encodeUint8(&buf, 0, 0xAB);
+    const p = try encode_uint8(&buf, 0, 0xAB);
     try testing.expectEqual(@as(u32, 1), p);
 
-    const r = try decodeUint8(&buf, 0);
+    const r = try decode_uint8(&buf, 0);
     try testing.expectEqual(@as(u8, 0xAB), r.value);
 }
 
 test "encode/decode uint16 big-endian" {
     var buf: [2]u8 = undefined;
-    const p = try encodeUint16(&buf, 0, 0x0102);
+    const p = try encode_uint16(&buf, 0, 0x0102);
     try testing.expectEqual(@as(u32, 2), p);
 
     try testing.expectEqual(@as(u8, 0x01), buf[0]);
     try testing.expectEqual(@as(u8, 0x02), buf[1]);
 
-    const r = try decodeUint16(&buf, 0);
+    const r = try decode_uint16(&buf, 0);
     try testing.expectEqual(@as(u16, 0x0102), r.value);
 }
 
 test "encode/decode uint32 big-endian" {
     var buf: [4]u8 = undefined;
-    const p = try encodeUint32(&buf, 0, 0x01020304);
+    const p = try encode_uint32(&buf, 0, 0x01020304);
     try testing.expectEqual(@as(u32, 4), p);
 
-    const r = try decodeUint32(&buf, 0);
+    const r = try decode_uint32(&buf, 0);
     try testing.expectEqual(@as(u32, 0x01020304), r.value);
 }
 
 test "encode/decode uint64 big-endian" {
     var buf: [8]u8 = undefined;
-    const p = try encodeUint64(&buf, 0, 0x0102030405060708);
+    const p = try encode_uint64(&buf, 0, 0x0102030405060708);
     try testing.expectEqual(@as(u32, 8), p);
 
-    const r = try decodeUint64(&buf, 0);
+    const r = try decode_uint64(&buf, 0);
     try testing.expectEqual(@as(u64, 0x0102030405060708), r.value);
 }
 
@@ -383,11 +383,11 @@ test "encode/decode variable-length vector" {
     const payload = "hello MLS";
 
     // Encode.
-    const written = try encodeVarVector(&buf, 0, payload);
+    const written = try encode_var_vector(&buf, 0, payload);
 
     // Decode.
     var decode_buf: [128]u8 = undefined;
-    const r = try decodeVarVectorBuf(&buf, 0, &decode_buf);
+    const r = try decode_var_vector_buf(&buf, 0, &decode_buf);
     try testing.expectEqualSlices(u8, payload, r.value);
     try testing.expectEqual(written, r.pos);
 }
@@ -399,53 +399,53 @@ test "decode variable-length vector rejects oversized" {
     _ = p;
 
     var decode_buf: [16]u8 = undefined;
-    const result = decodeVarVectorBuf(&buf, 0, &decode_buf);
+    const result = decode_var_vector_buf(&buf, 0, &decode_buf);
     try testing.expectError(error.VectorTooLarge, result);
 }
 
 test "decode uint16 truncated" {
     const buf = [_]u8{0x01};
-    const result = decodeUint16(&buf, 0);
+    const result = decode_uint16(&buf, 0);
     try testing.expectError(error.Truncated, result);
 }
 
 test "decode optional present" {
     var buf: [16]u8 = undefined;
     // Write present (1) + a u16 value.
-    var p = try encodeUint8(&buf, 0, 1);
-    p = try encodeUint16(&buf, p, 42);
+    var p = try encode_uint8(&buf, 0, 1);
+    p = try encode_uint16(&buf, p, 42);
 
-    const r = try decodeOptional(&buf, 0, u16, decodeUint16);
+    const r = try decode_optional(&buf, 0, u16, decode_uint16);
     try testing.expectEqual(@as(u16, 42), r.value.?);
     try testing.expectEqual(p, r.pos);
 }
 
 test "decode optional absent" {
     const buf = [_]u8{0x00};
-    const r = try decodeOptional(&buf, 0, u16, decodeUint16);
+    const r = try decode_optional(&buf, 0, u16, decode_uint16);
     try testing.expectEqual(@as(?u16, null), r.value);
 }
 
 test "decode optional invalid prefix" {
     const buf = [_]u8{0x02};
-    const result = decodeOptional(&buf, 0, u16, decodeUint16);
+    const result = decode_optional(&buf, 0, u16, decode_uint16);
     try testing.expectError(error.InvalidOptionalPrefix, result);
 }
 
 test "encode uint8 buffer too small" {
     var buf: [0]u8 = undefined;
-    const result = encodeUint8(&buf, 0, 0xFF);
+    const result = encode_uint8(&buf, 0, 0xFF);
     try testing.expectError(error.BufferTooSmall, result);
 }
 
-test "decodeVarVectorLimited rejects oversized vector" {
+test "decode_var_vector_limited rejects oversized vector" {
     var buf: [8]u8 = undefined;
     // Encode a varint length of 300 bytes.
     _ = try varint.encode(&buf, 0, 300);
     // Fill remaining with zeros (won't be enough, but limit
     // check fires first).
     const alloc = testing.allocator;
-    const result = decodeVarVectorLimited(
+    const result = decode_var_vector_limited(
         alloc,
         &buf,
         0,
@@ -454,7 +454,7 @@ test "decodeVarVectorLimited rejects oversized vector" {
     try testing.expectError(error.VectorTooLarge, result);
     // Same length at exactly the limit: should fail with
     // Truncated (buffer too short) not VectorTooLarge.
-    const result2 = decodeVarVectorLimited(
+    const result2 = decode_var_vector_limited(
         alloc,
         &buf,
         0,
@@ -470,7 +470,7 @@ test "global max_vec_length is 1 MiB" {
     );
 }
 
-test "encodeVarVector rejects oversized data" {
+test "encode_var_vector rejects oversized data" {
     // Create a slice that claims to be larger than max_vec_length.
     // We can't actually allocate 1 MiB+ on the stack, but we can
     // test via a pointer-length pair using a small backing buffer
@@ -481,18 +481,18 @@ test "encodeVarVector rejects oversized data" {
     // oversized length.
     const big_len: usize = max_vec_length + 1;
     // Build a slice with length > max_vec_length. The backing
-    // memory doesn't matter since encodeVarVector checks length
+    // memory doesn't matter since encode_var_vector checks length
     // before reading any data.
     var dummy: [1]u8 = .{0};
     const oversized: []const u8 = @as(
         [*]const u8,
         &dummy,
     )[0..big_len];
-    const result = encodeVarVector(&buf, 0, oversized);
+    const result = encode_var_vector(&buf, 0, oversized);
     try testing.expectError(error.VectorTooLarge, result);
 }
 
-test "encodeVarPrefixedList rejects oversized inner length" {
+test "encode_var_prefixed_list rejects oversized inner length" {
     // Mock type whose encode advances position by a
     // configurable amount without writing to the buffer.
     const BigItem = struct {
@@ -515,7 +515,7 @@ test "encodeVarPrefixedList rejects oversized inner length" {
     // Buffer only needs to be large enough for the varint
     // prefix gap (4 bytes); the mock doesn't write data.
     var buf: [64]u8 = undefined;
-    const result = encodeVarPrefixedList(
+    const result = encode_var_prefixed_list(
         BigItem,
         &buf,
         0,

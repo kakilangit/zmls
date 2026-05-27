@@ -42,7 +42,7 @@ fn fuzzVarint(_: void, smith: *Smith) anyerror!void {
     _ = varint;
     // Try decoding at every possible start position.
     for (0..@min(buf.len, 5)) |i| {
-        _ = codec.decodeUint8(
+        _ = codec.decode_uint8(
             &buf,
             @intCast(i),
         ) catch continue;
@@ -61,10 +61,10 @@ fn fuzzUintDecode(_: void, smith: *Smith) anyerror!void {
     const len: u32 = @intCast(buf.len);
     const pos = smith.valueRangeAtMost(u32, 0, len);
 
-    tryDecode(codec.decodeUint8, &buf, pos);
-    tryDecode(codec.decodeUint16, &buf, pos);
-    tryDecode(codec.decodeUint32, &buf, pos);
-    tryDecode(codec.decodeUint64, &buf, pos);
+    tryDecode(codec.decode_uint8, &buf, pos);
+    tryDecode(codec.decode_uint16, &buf, pos);
+    tryDecode(codec.decode_uint32, &buf, pos);
+    tryDecode(codec.decode_uint64, &buf, pos);
 }
 
 test "fuzz: uint decode" {
@@ -83,15 +83,15 @@ fn fuzzVarVectorDecode(
 
     // decodeVarVectorBuf: stack-buffered decode.
     var out_buf: [256]u8 = undefined;
-    _ = codec.decodeVarVectorBuf(data, 0, &out_buf) catch
+    _ = codec.decode_var_vector_buf(data, 0, &out_buf) catch
         return;
 
     // decodeVarVectorSlice: zero-copy decode.
-    _ = codec.decodeVarVectorSlice(data, 0) catch return;
+    _ = codec.decode_var_vector_slice(data, 0) catch return;
 
     // decodeVarVector: allocating decode — use failing
     // allocator to check the OOM path too.
-    _ = codec.decodeVarVector(
+    _ = codec.decode_var_vector(
         testing.failing_allocator,
         data,
         0,
@@ -99,7 +99,7 @@ fn fuzzVarVectorDecode(
 
     // Also try with a real allocator.
     const alloc = testing.allocator;
-    if (codec.decodeVarVector(alloc, data, 0)) |r| {
+    if (codec.decode_var_vector(alloc, data, 0)) |r| {
         alloc.free(r.value);
     } else |_| {}
 }
@@ -120,11 +120,11 @@ fn fuzzOptionalDecode(
     const pos = smith.valueRangeAtMost(u32, 0, len);
 
     // Decode optional<u32> (presence byte + u32).
-    _ = codec.decodeOptional(
+    _ = codec.decode_optional(
         &buf,
         pos,
         u32,
-        codec.decodeUint32,
+        codec.decode_uint32,
     ) catch return;
 }
 
@@ -141,8 +141,8 @@ fn fuzzCodecRoundTrip(
     // Encode a random u32, then decode it and verify.
     const val = smith.value(u32);
     var buf: [16]u8 = undefined;
-    const end = codec.encodeUint32(&buf, 0, val) catch return;
-    const r = codec.decodeUint32(&buf, 0) catch return;
+    const end = codec.encode_uint32(&buf, 0, val) catch return;
+    const r = codec.decode_uint32(&buf, 0) catch return;
     try testing.expectEqual(val, r.value);
     try testing.expectEqual(end, r.pos);
 }
