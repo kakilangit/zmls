@@ -31,13 +31,15 @@ TV_FILES := \
 # Default target.
 all: fmt check build test
 
-# Format all Zig source files (core + client).
+# Format all Zig source files.
 fmt: fmt-client
 	$(ZIG) fmt $(SRC_DIR)
+	$(ZIG) fmt benchmarks
 
 # Check formatting without modifying files. Useful in CI.
 check: check-client
 	$(ZIG) fmt --check $(SRC_DIR)
+	$(ZIG) fmt --check benchmarks
 
 # Build the library in debug mode.
 build: build-client

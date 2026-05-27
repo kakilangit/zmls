@@ -78,7 +78,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_fuzz.step);
     }
 
-    // Benchmark executable (opt-in: zig build bench).
+    // Benchmark executable.
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("benchmarks/bench.zig"),
         .target = target,
@@ -89,6 +89,8 @@ pub fn build(b: *std.Build) void {
         .name = "zmls-bench",
         .root_module = bench_mod,
     });
+    b.installArtifact(bench_exe);
+
     const run_bench = b.addRunArtifact(bench_exe);
     if (b.args) |args| {
         run_bench.addArgs(args);
