@@ -462,6 +462,7 @@ pub fn createCommit(
         => return error.UnsupportedCapability,
         else => return error.InvalidProposalList,
     };
+    try evolution.validateCredentialTypeSupport(&new_tree);
 
     // Generate UpdatePath if needed. leaf_sig must outlive
     // new_tree because the tree leaf points into it.
@@ -651,6 +652,7 @@ pub fn processCommit(
         => return error.UnsupportedCapability,
         else => return error.InvalidProposalList,
     };
+    try evolution.validateCredentialTypeSupport(&new_tree);
     var path_out = processUpdatePath(
         P,
         allocator,

@@ -1117,6 +1117,61 @@ pub fn validateGceRequiredCapabilities(
     }
 }
 
+/// Validate RFC 9420 Section 7.3 Step 4:
+/// every non-blank leaf must advertise support for every
+/// credential type currently used by any non-blank leaf.
+pub fn validateCredentialTypeSupport(
+    tree: *const RatchetTree,
+) ValidationError!void {
+    var in_use: [16]CredentialType = undefined;
+    var in_use_len: usize = 0;
+
+    // Collect unique credential types present in the tree.
+    var li: u32 = 0;
+    while (li < tree.leaf_count) : (li += 1) {
+        const idx = LeafIndex.fromU32(li).toNodeIndex().toUsize();
+        if (idx >= tree.nodes.len) continue;
+        const node = tree.nodes[idx] orelse continue;
+        if (node.node_type != .leaf) continue;
+        const ct = node.payload.leaf.credential.tag;
+
+        var seen = false;
+        for (in_use[0..in_use_len]) |have| {
+            if (have == ct) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) {
+            if (in_use_len >= in_use.len)
+                return error.InvalidLeafNode;
+            in_use[in_use_len] = ct;
+            in_use_len += 1;
+        }
+    }
+
+    // Each leaf must advertise support for all in-use types.
+    li = 0;
+    while (li < tree.leaf_count) : (li += 1) {
+        const idx = LeafIndex.fromU32(li).toNodeIndex().toUsize();
+        if (idx >= tree.nodes.len) continue;
+        const node = tree.nodes[idx] orelse continue;
+        if (node.node_type != .leaf) continue;
+
+        const caps = node.payload.leaf.capabilities.credentials;
+        for (in_use[0..in_use_len]) |needed| {
+            var found = false;
+            for (caps) |supported| {
+                if (supported == needed) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return error.InvalidLeafNode;
+        }
+    }
+}
+
 // -- validateNonDefaultProposalCaps -------------------------------------------
 
 /// RFC 9420 S12.2: Non-default proposal types (tag > 7) must

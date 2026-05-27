@@ -21,6 +21,7 @@ const RatchetTree = ratchet_tree_mod.RatchetTree;
 const Proposal = proposal_mod.Proposal;
 const PreSharedKeyId = psk_mod.PreSharedKeyId;
 const Credential = credential_mod.Credential;
+const Certificate = credential_mod.Certificate;
 const KeyPackage = key_package_mod.KeyPackage;
 
 const CommitSender = evolution.CommitSender;
@@ -33,6 +34,7 @@ const parseRequiredCapabilities = evolution.parseRequiredCapabilities;
 const validateLeafMeetsRequired = evolution.validateLeafMeetsRequired;
 const validateAddsRequiredCapabilities = evolution.validateAddsRequiredCapabilities;
 const validateGceRequiredCapabilities = evolution.validateGceRequiredCapabilities;
+const validateCredentialTypeSupport = evolution.validateCredentialTypeSupport;
 const validateWireFormat = evolution.validateWireFormat;
 const validateNonDefaultProposalCaps = evolution.validateNonDefaultProposalCaps;
 const validateReInitVersion = evolution.validateReInitVersion;
@@ -1387,6 +1389,50 @@ test "validateGceRequiredCapabilities accepts compliant existing leaves" {
     const group_exts = [_]Extension{ext};
 
     try validateGceRequiredCapabilities(&tree, &group_exts);
+}
+
+test "validateCredentialTypeSupport rejects missing cross-member credential support" {
+    const alloc = testing.allocator;
+    var tree = try RatchetTree.init(alloc, 2);
+    defer tree.deinit();
+
+    const basic_only = [_]CredentialType{.basic};
+    const basic_and_x509 = [_]CredentialType{ .basic, .x509 };
+
+    var alice = makeTestLeaf("alice");
+    alice.capabilities.credentials = &basic_only;
+    const alice_certs = [_]Certificate{};
+    alice.credential = Credential.initX509(&alice_certs);
+    try tree.setLeaf(LeafIndex.fromU32(0), alice);
+
+    var bob = makeTestLeaf("bob");
+    bob.capabilities.credentials = &basic_and_x509;
+    bob.credential = Credential.initBasic("bob");
+    try tree.setLeaf(LeafIndex.fromU32(1), bob);
+
+    const result = validateCredentialTypeSupport(&tree);
+    try testing.expectError(error.InvalidLeafNode, result);
+}
+
+test "validateCredentialTypeSupport accepts when all leaves support in-use credential types" {
+    const alloc = testing.allocator;
+    var tree = try RatchetTree.init(alloc, 2);
+    defer tree.deinit();
+
+    const basic_and_x509 = [_]CredentialType{ .basic, .x509 };
+
+    var alice = makeTestLeaf("alice");
+    alice.capabilities.credentials = &basic_and_x509;
+    const alice_certs = [_]Certificate{};
+    alice.credential = Credential.initX509(&alice_certs);
+    try tree.setLeaf(LeafIndex.fromU32(0), alice);
+
+    var bob = makeTestLeaf("bob");
+    bob.capabilities.credentials = &basic_and_x509;
+    bob.credential = Credential.initBasic("bob");
+    try tree.setLeaf(LeafIndex.fromU32(1), bob);
+
+    try validateCredentialTypeSupport(&tree);
 }
 
 // -- Phase 14.6: Wire format policy tests ------------------------------------
