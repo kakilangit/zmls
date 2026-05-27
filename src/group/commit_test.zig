@@ -347,6 +347,7 @@ test "createCommitWithValidator rejects invalid Add credential" {
         &tg.gs.epoch_secrets.init_secret,
         null,
         null,
+        null,
         RejectAll.validator(),
         .mls_public_message,
     );

@@ -183,6 +183,8 @@ pub fn GroupState(comptime P: type) type {
                 &self.epoch_secrets.init_secret,
                 opts.path_params,
                 opts.psk_resolver,
+                opts.current_resumption_psk orelse
+                    &self.epoch_secrets.resumption_psk,
                 opts.credential_validator,
                 opts.wire_format,
             );
@@ -197,10 +199,15 @@ pub fn GroupState(comptime P: type) type {
             allocator: std.mem.Allocator,
             opts: commit_mod.ProcessCommitOpts(P),
         ) CommitError!commit_mod.ProcessResult(P) {
+            var opts_local = opts;
+            if (opts_local.current_resumption_psk == null) {
+                opts_local.current_resumption_psk =
+                    &self.epoch_secrets.resumption_psk;
+            }
             return commit_mod.processCommit(
                 P,
                 allocator,
-                opts,
+                opts_local,
                 &self.group_context,
                 &self.tree,
                 &self.interim_transcript_hash,
@@ -437,6 +444,8 @@ pub fn GroupState(comptime P: type) type {
                 &self.epoch_secrets.init_secret,
                 opts.path_params,
                 opts.psk_resolver,
+                opts.current_resumption_psk orelse
+                    &self.epoch_secrets.resumption_psk,
                 opts.credential_validator,
                 opts.wire_format,
             );
@@ -476,10 +485,15 @@ pub fn GroupState(comptime P: type) type {
             allocator: std.mem.Allocator,
             opts: commit_mod.ProcessCommitOpts(P),
         ) commit_mod.CommitError!ProcessOutput {
+            var opts_local = opts;
+            if (opts_local.current_resumption_psk == null) {
+                opts_local.current_resumption_psk =
+                    &self.epoch_secrets.resumption_psk;
+            }
             const cr = try commit_mod.processCommit(
                 P,
                 allocator,
-                opts,
+                opts_local,
                 &self.group_context,
                 &self.tree,
                 &self.interim_transcript_hash,

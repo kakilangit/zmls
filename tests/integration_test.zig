@@ -2569,6 +2569,18 @@ test "ReInit proposal: commit with reinit processed by receiver" {
         cr2_reinit.group_id,
         cr2_reinit_direct.group_id,
     );
+    try testing.expectEqual(
+        mls.psk.ResumptionPskUsage.reinit,
+        cr2_reinit_direct.psk_usage,
+    );
+    try testing.expectEqualStrings(
+        cr1.group_context.group_id,
+        cr2_reinit_direct.psk_group_id,
+    );
+    try testing.expectEqual(
+        cr1.group_context.epoch + 1,
+        cr2_reinit_direct.psk_epoch,
+    );
 
     // 4. Bob processes the ReInit commit.
     const fc = FramedContent{
@@ -2613,6 +2625,22 @@ test "ReInit proposal: commit with reinit processed by receiver" {
     try testing.expectEqualStrings(
         pr_reinit.group_id,
         pr_reinit_direct.group_id,
+    );
+    try testing.expectEqual(
+        mls.psk.ResumptionPskUsage.reinit,
+        pr_reinit_direct.psk_usage,
+    );
+    try testing.expectEqualStrings(
+        cr1.group_context.group_id,
+        pr_reinit_direct.psk_group_id,
+    );
+    try testing.expectEqual(
+        cr1.group_context.epoch + 1,
+        pr_reinit_direct.psk_epoch,
+    );
+    try testing.expectEqual(
+        cr2_reinit_direct.resumption_psk != null,
+        pr_reinit_direct.resumption_psk != null,
     );
     try testing.expectEqual(cr2.new_epoch, pr.new_epoch);
 
