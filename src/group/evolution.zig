@@ -38,6 +38,7 @@ const LeafIndex = types.LeafIndex;
 const ProposalType = types.ProposalType;
 const SenderType = types.SenderType;
 const Sender = framing.Sender;
+const ProtocolVersion = types.ProtocolVersion;
 const CipherSuite = types.CipherSuite;
 const ContentType = types.ContentType;
 const WireFormat = types.WireFormat;
@@ -412,6 +413,14 @@ fn isKnownSenderAllowed(
 /// Stack usage: ~50 KiB due to inline arrays of up to 256
 /// added/removed leaves and 64 PSK IDs.
 pub const ProposalApplyResult = struct {
+    /// ReInit parameters (when a ReInit proposal is present).
+    pub const ReInitOutcome = struct {
+        group_id: []const u8,
+        version: ProtocolVersion,
+        cipher_suite: CipherSuite,
+        extensions: []const Extension,
+    };
+
     /// New group extensions (if GCE was applied).
     new_extensions: ?[]const Extension,
     /// Leaf indices of newly added members.
@@ -425,6 +434,8 @@ pub const ProposalApplyResult = struct {
     psk_ids_len: u32,
     /// Whether a ReInit was proposed.
     has_reinit: bool,
+    /// ReInit parameters copied from the proposal.
+    reinit_outcome: ?ReInitOutcome,
     /// Whether an ExternalInit was proposed.
     has_external_init: bool,
 };
@@ -1277,6 +1288,12 @@ pub fn applyProposals(
     result.removed_count = 0;
     result.psk_ids_len = 0;
     result.has_reinit = validated.reinit != null;
+    result.reinit_outcome = if (validated.reinit) |ri| .{
+        .group_id = ri.group_id,
+        .version = ri.version,
+        .cipher_suite = ri.cipher_suite,
+        .extensions = ri.extensions,
+    } else null;
     result.has_external_init = validated.external_init != null;
 
     // 1. Apply GroupContextExtensions.
